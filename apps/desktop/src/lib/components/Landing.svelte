@@ -1,118 +1,116 @@
 <script lang="ts">
-  // Landing — pick a surface. Three cards; the chat card shows live
-  // provider connection state so an unconnected user knows where to go.
+  // Landing — a pixel night scene with the three mode plates over it.
+  // GG Coder's trick is that the home screen is a *place*, not a page:
+  // ours is the 3am version — black sky, campfire, fireflies, and the
+  // chunky plate buttons from the same playbook.
   import { onMount } from 'svelte';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
+  import NightScene from './NightScene.svelte';
   import type { ProviderInfo } from '../ipc';
 
   let providers = $state<ProviderInfo[]>([]);
+  let version = $state('0.1.0');
   let inTauri = $state(false);
 
   onMount(async () => {
     try {
       const m = await import('../ipc');
       providers = await m.providersList();
+      version = (await m.appInfo()).version;
       inTauri = true;
     } catch {
-      /* fixture mode — cards still work */
+      /* fixture mode — plates still work */
     }
   });
 
-  const connected = $derived(providers.filter((p) => p.auth_kind !== 'none'));
-  const defaultProvider = $derived(
+  const connected = $derived(providers.some((p) => p.auth_kind !== 'none'));
+  const primary = $derived(
     providers.find((p) => p.is_default) ?? providers[0],
   );
 
-  const cards = $derived([
-    {
-      mode: 'code' as const,
-      icon: 'code',
-      title: 'Code',
-      blurb:
-        'Workspace agent — attaches a folder, reads and edits code, runs checks, verifies before it claims done.',
-      foot: session.workspacePath
-        ? session.workspacePath.split(/[\\/]/).filter(Boolean).pop()
-        : 'no folder attached',
-    },
-    {
-      mode: 'chat' as const,
-      icon: 'chat',
-      title: 'Chat',
-      blurb:
-        'Plain conversation with your connected models — no tools, no workspace, just talk.',
-      foot: inTauri
-        ? connected.length > 0
-          ? `${defaultProvider?.name ?? 'provider'} · ${defaultProvider?.model ?? ''}`.trim()
-          : 'no provider connected'
-        : 'fixture mode',
-    },
-    {
-      mode: 'settings' as const,
-      icon: 'gear',
-      title: 'Settings',
-      blurb:
-        'Providers and connections, workspace folder, and app details.',
-      foot: `${providers.length} provider${providers.length === 1 ? '' : 's'} configured`,
-    },
-  ]);
+  const PLATES = [
+    { mode: 'code' as const, label: 'Code' },
+    { mode: 'chat' as const, label: 'Chat' },
+    { mode: 'settings' as const, label: 'Settings' },
+  ];
 </script>
 
 <div class="landing">
+  <NightScene />
+
   <div class="hero">
-    <div class="wordmark">hate-agent<span class="cursor" aria-hidden="true"></span></div>
-    <p class="tagline">
-      A coding agent that spends fewer tokens per task — small prompt, lazy
-      tools, shaped output, verified work.
+    <div class="version pixel">v{version}</div>
+    <h1 class="wordmark">hate-agent<span class="cursor" aria-hidden="true"></span></h1>
+    <p class="tagline pixel">
+      A coding agent that spends fewer tokens per task — small prompt,
+      lazy tools, verified work. Built for the 3am club.
     </p>
-  </div>
 
-  <div class="cards">
-    {#each cards as card (card.mode)}
-      <button class="card" onclick={() => session.setMode(card.mode)}>
-        <span class="card-icon"><Icon name={card.icon} size={22} /></span>
-        <span class="card-title">{card.title}</span>
-        <span class="card-blurb">{card.blurb}</span>
-        <span class="card-foot mono">{card.foot}</span>
+    <div class="plates">
+      {#each PLATES as plate (plate.mode)}
+        <button class="plate pixel" onclick={() => session.setMode(plate.mode)}>
+          {plate.label}
+        </button>
+      {/each}
+    </div>
+
+    {#if inTauri && !connected}
+      <button class="connect-hint" onclick={() => session.setMode('settings')}>
+        <Icon name="link" size={13} />
+        No provider connected — Settings to link Nous Portal
       </button>
-    {/each}
+    {/if}
   </div>
 
-  {#if inTauri && connected.length === 0}
-    <button class="connect-hint" onclick={() => session.setMode('settings')}>
-      <Icon name="link" size={13} />
-      No provider connected — open Settings to link Nous Portal
-    </button>
+  {#if inTauri && connected && primary}
+    <div class="status pixel">{primary.name} · {primary.model}</div>
   {/if}
 </div>
 
 <style>
   .landing {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .hero {
+    position: relative;
     flex: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     padding: 24px;
-    overflow-y: auto;
-  }
-  .hero {
     text-align: center;
-    margin-bottom: 36px;
+  }
+  .pixel {
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 16px;
+    letter-spacing: 0.02em;
+  }
+  .version {
+    color: var(--fg-2);
+    margin-bottom: 18px;
   }
   .wordmark {
-    font-size: 30px;
-    font-weight: 800;
-    letter-spacing: -0.03em;
+    font-family: 'Alagard', var(--font-ui);
+    font-size: 62px;
+    font-weight: 400;
     color: var(--fg-0);
-    margin-bottom: 10px;
+    margin: 0 0 14px;
+    line-height: 1;
+    text-shadow: 0 3px 0 rgba(0, 0, 0, 0.9), 0 8px 24px rgba(0, 0, 0, 0.8);
   }
   .cursor {
     display: inline-block;
-    width: 3px;
-    height: 0.85em;
-    margin-left: 3px;
-    vertical-align: -0.08em;
+    width: 5px;
+    height: 0.72em;
+    margin-left: 6px;
+    vertical-align: -0.06em;
     background: var(--accent);
     animation: blink 1.15s steps(1) infinite;
   }
@@ -122,88 +120,85 @@
     }
   }
   .tagline {
-    font-size: 13.5px;
-    line-height: 1.6;
-    color: var(--fg-2);
-    max-width: 460px;
-    margin: 0 auto;
+    color: var(--fg-1);
+    max-width: 560px;
+    margin: 0 auto 30px;
+    line-height: 1.5;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
   }
-  .cards {
+
+  /* Chunky game-plate buttons — dark plates, lit top edge, bottom lip. */
+  .plates {
     display: flex;
     gap: 14px;
     flex-wrap: wrap;
     justify-content: center;
-    max-width: 760px;
   }
-  .card {
-    width: 224px;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 18px;
-    text-align: left;
-    background: var(--bg-1);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-sm);
+  .plate {
+    font-family: 'Alagard', var(--font-ui);
+    font-size: 19px;
+    letter-spacing: 0.05em;
+    color: var(--fg-0);
+    padding: 12px 38px;
+    min-width: 136px;
+    background: linear-gradient(#1a1c1f, #121315);
+    border: 2px solid #2b2d31;
+    border-radius: 6px;
+    box-shadow:
+      inset 0 2px 0 rgba(255, 255, 255, 0.07),
+      inset 0 -2px 0 rgba(0, 0, 0, 0.55),
+      0 4px 0 #050505,
+      var(--shadow-md);
+    text-shadow: 0 2px 0 rgba(0, 0, 0, 0.65);
+    cursor: pointer;
     transition:
-      border-color var(--motion),
       transform var(--motion),
+      border-color var(--motion),
       box-shadow var(--motion);
   }
-  .card:hover {
+  .plate:hover {
     border-color: var(--accent-dim);
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-md);
+    color: #ffffff;
+    transform: translateY(-1px);
+    box-shadow:
+      inset 0 2px 0 rgba(255, 255, 255, 0.1),
+      inset 0 -2px 0 rgba(0, 0, 0, 0.55),
+      0 5px 0 #050505,
+      var(--shadow-md);
   }
-  .card:active {
-    transform: translateY(0);
+  .plate:active {
+    transform: translateY(3px);
+    box-shadow:
+      inset 0 2px 0 rgba(255, 255, 255, 0.05),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+      0 1px 0 #050505,
+      var(--shadow-sm);
   }
-  .card-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 40px;
-    height: 40px;
-    border-radius: var(--radius);
-    background: var(--accent-soft);
-    color: var(--accent);
-    margin-bottom: 2px;
-  }
-  .card-title {
-    font-size: 15px;
-    font-weight: 700;
-    color: var(--fg-0);
-  }
-  .card-blurb {
-    font-size: 12px;
-    line-height: 1.55;
-    color: var(--fg-2);
-    flex: 1;
-  }
-  .card-foot {
-    font-size: 10.5px;
-    color: var(--fg-3);
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+
   .connect-hint {
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    margin-top: 26px;
+    margin-top: 30px;
     padding: 8px 14px;
     font-size: 12px;
     color: var(--warn);
-    background: var(--accent-soft);
+    background: rgba(10, 10, 12, 0.7);
     border: 1px solid var(--border);
     border-radius: var(--radius-pill);
     transition: border-color var(--motion);
+    backdrop-filter: blur(4px);
   }
   .connect-hint:hover {
     border-color: var(--warn);
+  }
+
+  .status {
+    position: absolute;
+    bottom: 14px;
+    left: 18px;
+    color: var(--fg-3);
+    font-size: 14px;
+    text-shadow: 0 1px 0 #000;
   }
 </style>

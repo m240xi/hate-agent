@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { fade } from 'svelte/transition';
   import { session } from './lib/store.svelte';
   import Pane from './lib/components/Pane.svelte';
   import FileTree from './lib/components/FileTree.svelte';
@@ -76,46 +77,50 @@
   </header>
 
   <div class="body">
-    {#if session.mode === 'home'}
-      <Landing />
-    {:else if session.mode === 'chat'}
-      <ChatView />
-    {:else if session.mode === 'settings'}
-      <SettingsView />
-    {:else}
-      <Pane
-        side="left"
-        title="Files"
-        collapsed={session.leftCollapsed}
-        width={session.leftWidth}
-        onToggle={() => (session.leftCollapsed = !session.leftCollapsed)}
-        onResize={(w) => (session.leftWidth = w)}
-      >
-        <FileTree />
-      </Pane>
-
-      <main class="center">
-        {#if session.blocks.length === 0}
-          <EmptyState />
+    {#key session.mode}
+      <div class="mode-view" in:fade={{ duration: 140 }}>
+        {#if session.mode === 'home'}
+          <Landing />
+        {:else if session.mode === 'chat'}
+          <ChatView />
+        {:else if session.mode === 'settings'}
+          <SettingsView />
         {:else}
-          <Transcript />
+          <Pane
+            side="left"
+            title="Files"
+            collapsed={session.leftCollapsed}
+            width={session.leftWidth}
+            onToggle={() => (session.leftCollapsed = !session.leftCollapsed)}
+            onResize={(w) => (session.leftWidth = w)}
+          >
+            <FileTree />
+          </Pane>
+
+          <main class="center">
+            {#if session.blocks.length === 0}
+              <EmptyState />
+            {:else}
+              <Transcript />
+            {/if}
+
+            <PermissionBar />
+            <Composer />
+          </main>
+
+          <Pane
+            side="right"
+            title="Inspector"
+            collapsed={session.rightCollapsed}
+            width={session.rightWidth}
+            onToggle={() => (session.rightCollapsed = !session.rightCollapsed)}
+            onResize={(w) => (session.rightWidth = w)}
+          >
+            <Inspector />
+          </Pane>
         {/if}
-
-        <PermissionBar />
-        <Composer />
-      </main>
-
-      <Pane
-        side="right"
-        title="Inspector"
-        collapsed={session.rightCollapsed}
-        width={session.rightWidth}
-        onToggle={() => (session.rightCollapsed = !session.rightCollapsed)}
-        onResize={(w) => (session.rightWidth = w)}
-      >
-        <Inspector />
-      </Pane>
-    {/if}
+      </div>
+    {/key}
   </div>
 </div>
 
@@ -128,6 +133,12 @@
   }
   .body {
     flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+  .mode-view {
+    flex: 1;
+    min-width: 0;
     min-height: 0;
     display: flex;
   }

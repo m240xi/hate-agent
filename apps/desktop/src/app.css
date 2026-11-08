@@ -3,6 +3,21 @@
    (ok/warn/err/info) stay muted so status still reads at a glance.
    Motion: 140ms ease-out on enter only. */
 
+/* Pixel faces for the landing (GG Royale's picks): Alagard (Hewett Tsoi,
+   free with credit — see docs/deps.md) for the wordmark and plate
+   buttons, m5x7 (Daniel Linssen, CC0) for small pixel text. Drawn on a
+   16px grid — use at 16px or whole multiples. */
+@font-face {
+  font-family: 'Alagard';
+  src: url('./assets/fonts/alagard/alagard.ttf') format('truetype');
+  font-display: block;
+}
+@font-face {
+  font-family: 'm5x7';
+  src: url('./assets/fonts/m5x7/m5x7.ttf') format('truetype');
+  font-display: block;
+}
+
 :root {
   color-scheme: dark;
 

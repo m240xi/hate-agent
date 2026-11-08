@@ -64,6 +64,11 @@ works, what it costs. Rows are added when the dependency lands, not before.
 - `tauri-plugin-dialog` — native folder picker for attaching a code
   workspace; hand-rolling platform dialogs is strictly worse. Used
   Rust-side only (`blocking_pick_folder`), so no JS dep is needed.
+- `m5x7` + `Alagard` (fonts, not crates) — pixel faces for the landing
+  wordmark, plate buttons, and pixel text. m5x7 is CC0 (Daniel Linssen);
+  Alagard is free with credit (Hewett Tsoi —
+  https://hewett.tsoy.net/alagard). Vendored TTFs under
+  `apps/desktop/src/assets/fonts/`; attribution satisfied here.
 - `tauri-specta`, `specta`, `specta-typescript` — generates TypeScript
   types from the Rust command signatures, satisfying the typed-invoke-wrapper
   requirement without a hand-maintained parallel type file. Pinned to the

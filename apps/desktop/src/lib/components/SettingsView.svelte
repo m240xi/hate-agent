@@ -23,6 +23,8 @@
   let keyDrafts = $state<Record<string, string>>({});
   let keyBusy = $state<string | null>(null);
 
+  const THEMES = ['light', 'dark', 'auto'] as const;
+
   async function refresh(): Promise<void> {
     if (!inTauri) return;
     const m = await import('../ipc');
@@ -112,6 +114,27 @@
 <div class="settings">
   <div class="settings-inner">
     <h1 class="page-title">Settings</h1>
+
+    <section class="group">
+      <h2 class="group-title">Appearance</h2>
+      <p class="group-hint">
+        Light or dark. Auto follows your system's setting.
+      </p>
+      <div class="card">
+        <div class="seg" role="group" aria-label="Theme">
+          {#each THEMES as t}
+            <button
+              class="seg-item"
+              class:active={session.theme === t}
+              onclick={() => session.setTheme(t)}
+              aria-pressed={session.theme === t}
+            >
+              {t}
+            </button>
+          {/each}
+        </div>
+      </div>
+    </section>
 
     <section class="group">
       <h2 class="group-title">Providers</h2>
@@ -237,15 +260,17 @@
 
     <section class="group">
       <h2 class="group-title">About</h2>
-      {#if appInfo}
-        <dl class="about-grid">
-          <dt>Version</dt><dd class="mono">{appInfo.version}</dd>
-          <dt>Platform</dt><dd class="mono">{appInfo.platform} · {appInfo.arch}</dd>
-          <dt>Data</dt><dd class="mono about-path" title={appInfo.data_dir}>{appInfo.data_dir}</dd>
-        </dl>
-      {:else}
-        <p class="muted">App info unavailable outside the desktop app.</p>
-      {/if}
+      <div class="card">
+        {#if appInfo}
+          <dl class="about-grid">
+            <dt>Version</dt><dd class="mono">{appInfo.version}</dd>
+            <dt>Platform</dt><dd class="mono">{appInfo.platform} · {appInfo.arch}</dd>
+            <dt>Data</dt><dd class="mono about-path" title={appInfo.data_dir}>{appInfo.data_dir}</dd>
+          </dl>
+        {:else}
+          <p class="muted">App info unavailable outside the desktop app.</p>
+        {/if}
+      </div>
     </section>
   </div>
 </div>
@@ -271,6 +296,41 @@
   }
   .group {
     margin-bottom: 30px;
+  }
+  .card {
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 14px 16px;
+    box-shadow: var(--shadow-sm);
+  }
+  .seg {
+    display: inline-flex;
+    gap: 4px;
+    padding: 3px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .seg-item {
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 18px;
+    border-radius: 7px;
+    color: var(--fg-2);
+    text-transform: capitalize;
+    transition:
+      background var(--motion),
+      color var(--motion);
+  }
+  .seg-item:hover {
+    color: var(--fg-0);
+  }
+  .seg-item.active {
+    background: var(--accent);
+    color: var(--accent-fg);
+    box-shadow: var(--shadow-sm);
   }
   .group-title {
     font-size: 13px;

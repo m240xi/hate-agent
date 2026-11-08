@@ -71,6 +71,8 @@ class SessionStore {
   // ── app shell ───────────────────────────────────────────────────────────
   /** Landing picks the surface; persisted across launches. */
   mode = $state<AppMode>('home');
+  /** `auto` follows the OS; explicit themes force the palette. */
+  theme = $state<'auto' | 'dark' | 'light'>('auto');
   /** Folder the code session operates in (from config.toml). */
   workspacePath = $state<string | null>(null);
 
@@ -86,6 +88,9 @@ class SessionStore {
   async start(): Promise<void> {
     const saved = localStorage.getItem('hate:mode');
     if (MODES.includes(saved as AppMode)) this.mode = saved as AppMode;
+    const savedTheme = localStorage.getItem('hate:theme');
+    if (savedTheme === 'dark' || savedTheme === 'light') this.theme = savedTheme;
+    this.applyTheme();
     if (inTauri()) {
       const m = await import('./ipc');
       this.workspacePath = await m.workspaceGet().catch(() => null);
@@ -169,6 +174,21 @@ class SessionStore {
   setMode(mode: AppMode): void {
     this.mode = mode;
     localStorage.setItem('hate:mode', mode);
+  }
+
+  setTheme(theme: 'auto' | 'dark' | 'light'): void {
+    this.theme = theme;
+    localStorage.setItem('hate:theme', theme);
+    this.applyTheme();
+  }
+
+  private applyTheme(): void {
+    if (typeof document === 'undefined') return;
+    if (this.theme === 'auto') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.dataset.theme = this.theme;
+    }
   }
 
   /** Native folder picker → persist to config.toml. */

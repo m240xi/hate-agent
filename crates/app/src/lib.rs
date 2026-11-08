@@ -18,6 +18,9 @@ pub fn run() {
         commands::session_cancel,
         commands::session_answer,
         commands::session_respond_permission,
+        commands::auth_nous_login,
+        commands::auth_nous_cancel,
+        commands::auth_status,
     ]);
 
     // Emit TypeScript bindings for the frontend's typed invoke wrapper.
@@ -37,6 +40,7 @@ pub fn run() {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             app.manage(commands::Sessions::default());
+            app.manage(commands::AuthState::default());
             builder.mount_events(app);
             Ok(())
         })

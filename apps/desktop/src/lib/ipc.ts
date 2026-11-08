@@ -37,3 +37,28 @@ export async function sessionRespondPermission(
 export async function sessionAnswer(text: string): Promise<void> {
   return invoke<void>('session_answer', { text });
 }
+
+// Nous Portal device login — returns the code to show; completion
+// arrives on the `auth-event` channel.
+export interface NousLoginInfo {
+  user_code: string;
+  verification_url: string;
+  verification_url_complete: string | null;
+}
+
+export async function authNousLogin(): Promise<NousLoginInfo> {
+  return invoke<NousLoginInfo>('auth_nous_login');
+}
+
+export async function authNousCancel(): Promise<void> {
+  return invoke<void>('auth_nous_cancel');
+}
+
+export interface AuthStatus {
+  kind: 'none' | 'api_key' | 'oauth';
+  expires_at: number | null;
+}
+
+export async function authStatus(provider?: string): Promise<AuthStatus> {
+  return invoke<AuthStatus>('auth_status', { provider: provider ?? null });
+}

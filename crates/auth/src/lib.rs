@@ -8,12 +8,15 @@
 
 #![deny(unsafe_code)]
 
+mod composite;
 mod context;
+mod file_store;
 mod keychain;
 mod nous;
 mod source;
 mod store;
 
+pub use composite::CompositeStore;
 pub use context::{AuthContext, CredStatus};
 pub use keychain::KeyringStore;
 pub use nous::{

@@ -149,8 +149,10 @@ async fn auth(cmd: AuthCommands) -> i32 {
             }
         },
         AuthCommands::Status => {
+            let mut config = ctx.config.clone();
+            config.ensure_default_provider();
             let mut any = false;
-            for name in ctx.config.providers.keys() {
+            for name in config.providers.keys() {
                 match ctx.status(name) {
                     Ok(s) => {
                         any = true;

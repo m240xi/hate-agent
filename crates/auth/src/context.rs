@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use hate_core::provider::CredentialSource;
 
-use crate::keychain::KeyringStore;
 use crate::nous::{NousCredentialSource, PortalAuth};
 use crate::source::{ApiKeySource, EnvKeySource};
 use crate::store::{AuthError, AuthStore, Config, CredentialBlob, ProviderConfig};
@@ -28,13 +27,14 @@ pub struct AuthContext {
 }
 
 impl AuthContext {
-    /// Production context: OS keychain + user config file.
+    /// Production context: composite secret store + user config file.
     ///
     /// # Errors
-    /// [`AuthError::Config`] on malformed config.
+    /// [`AuthError::Config`] on malformed config,
+    /// [`AuthError::Store`] when the secrets dir is unresolvable.
     pub fn load() -> Result<Self, AuthError> {
         Ok(Self {
-            store: Arc::new(KeyringStore::new()),
+            store: Arc::new(crate::CompositeStore::new()?),
             config: Config::load()?,
         })
     }
@@ -74,6 +74,13 @@ impl AuthContext {
                 )));
             }
             None => {}
+        }
+
+        // Nous with no stored credential and no env key should say
+        // "log in", not "no API key found" — the fix is a different
+        // command entirely.
+        if name == "nous" && !std::env::var("NOUS_API_KEY").is_ok_and(|v| !v.trim().is_empty()) {
+            return Err(AuthError::NeedsLogin);
         }
 
         let vars = env_vars_for(name);

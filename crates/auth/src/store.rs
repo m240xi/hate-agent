@@ -18,8 +18,8 @@ pub enum AuthError {
     /// OAuth endpoint or protocol failure.
     #[error("oauth: {0}")]
     OAuth(String),
-    /// The user must re-authenticate (refresh token rejected/expired).
-    #[error("authentication expired — run `hate auth login`")]
+    /// The user must (re-)authenticate — no credential or refresh rejected.
+    #[error("not authenticated — run `hate auth login`")]
     NeedsLogin,
     /// Config file problems.
     #[error("config: {0}")]

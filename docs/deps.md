@@ -34,8 +34,9 @@ works, what it costs. Rows are added when the dependency lands, not before.
 - `keyring` — OS credential store (Windows Credential Manager, macOS
   Keychain, Secret Service). The brief mandates keychain storage; this is
   the standard crate.
-- `open` — launch the system browser for the Nous device flow; tiny and
-  cross-platform. Cost: one small dep, justified by UX.
+- `webbrowser` — launch the system browser for the Nous device flow;
+  tiny, cross-platform, actively maintained. Cost: one small dep,
+  justified by UX. (Supersedes the originally-planned `open` crate.)
 - `tiktoken-rs` — real token counts for OpenAI-compatible and local models
   (o200k_base approximation, the brief-sanctioned fallback where no
   provider counter exists). Chosen over `chars/4` estimation, which the

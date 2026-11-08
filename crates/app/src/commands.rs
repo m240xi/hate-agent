@@ -170,3 +170,123 @@ pub fn session_respond_permission(
     }
     Ok(())
 }
+
+/// What the frontend shows while the user approves device login.
+#[derive(Debug, Clone, serde::Serialize, Type)]
+pub struct NousLoginInfo {
+    /// Code to type at the Portal page.
+    pub user_code: String,
+    /// Page to open.
+    pub verification_url: String,
+    /// URL with the code pre-filled, when offered.
+    pub verification_url_complete: Option<String>,
+}
+
+/// Credential state for the connect UI (`kind`: `none`|`api_key`|`oauth`).
+#[derive(Debug, Clone, serde::Serialize, Type)]
+pub struct AuthStatus {
+    /// Which credential kind is stored.
+    pub kind: String,
+    /// Access-token expiry (OAuth), unix seconds.
+    pub expires_at: Option<u64>,
+}
+
+/// Report the stored credential for a provider (default `nous`).
+#[tauri::command]
+#[specta::specta]
+pub fn auth_status(provider: Option<String>) -> Result<AuthStatus, String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let name = provider.unwrap_or_else(|| "nous".to_string());
+    let status = ctx.status(&name).map_err(|e| e.to_string())?;
+    Ok(AuthStatus {
+        kind: status.kind.to_string(),
+        expires_at: status.expires_at,
+    })
+}
+
+/// In-flight device login, cancellable from the UI.
+#[derive(Default)]
+pub struct AuthState {
+    /// Cancel token for the running poll; `None` when idle.
+    pub login_cancel: Mutex<Option<tokio_util::sync::CancellationToken>>,
+}
+
+/// Start Nous Portal device login. Returns the user code + URL as soon
+/// as the Portal issues them; approval polling continues in the
+/// background and reports on the `auth-event` channel
+/// (`{"type":"nous_login","ok":bool,"error"?:string}`).
+#[tauri::command]
+#[specta::specta]
+pub async fn auth_nous_login(
+    state: State<'_, AuthState>,
+    app: AppHandle,
+) -> Result<NousLoginInfo, String> {
+    use hate_auth::PortalAuth;
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let auth = std::sync::Arc::new(PortalAuth::new(std::sync::Arc::clone(&ctx.store)));
+
+    // One login at a time: cancel any previous poll first.
+    let cancel = CancellationToken::new();
+    if let Ok(mut slot) = state.login_cancel.lock()
+        && let Some(old) = slot.replace(cancel.clone())
+    {
+        old.cancel();
+    }
+
+    // `login` reports flow info via callback *before* polling — relay it
+    // through a oneshot so this command can return promptly.
+    let (info_tx, info_rx) = oneshot::channel::<NousLoginInfo>();
+    let auth2 = std::sync::Arc::clone(&auth);
+    let app2 = app.clone();
+    let cancel2 = cancel.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = auth2
+            .login(&cancel2, |info| {
+                let _ = info_tx.send(NousLoginInfo {
+                    user_code: info.user_code.clone(),
+                    verification_url: info.verification_url.clone(),
+                    verification_url_complete: info.verification_url_complete.clone(),
+                });
+            })
+            .await;
+        let payload = match result {
+            Ok(_) => serde_json::json!({"type": "nous_login", "ok": true}),
+            Err(e) => {
+                serde_json::json!({"type": "nous_login", "ok": false, "error": e.to_string()})
+            }
+        };
+        let _ = app2.emit("auth-event", payload);
+    });
+
+    // The device-code request is quick; bound the wait so a hung Portal
+    // doesn't park the command forever.
+    match tokio::time::timeout(std::time::Duration::from_secs(30), info_rx).await {
+        Ok(Ok(info)) => {
+            // Hand the approval page to the system browser — prefer the
+            // code-pre-filled URL when the Portal offers one. Failure to
+            // open is non-fatal; the UI still shows the link.
+            let url = info
+                .verification_url_complete
+                .clone()
+                .unwrap_or_else(|| info.verification_url.clone());
+            let _ = webbrowser::open(&url);
+            Ok(info)
+        }
+        Ok(Err(_)) => Err("login task ended before device code".to_string()),
+        Err(_) => Err("timed out requesting device code".to_string()),
+    }
+}
+
+/// Cancel an in-flight Nous device login.
+#[tauri::command]
+#[specta::specta]
+pub fn auth_nous_cancel(state: State<'_, AuthState>) {
+    if let Ok(mut slot) = state.login_cancel.lock()
+        && let Some(cancel) = slot.take()
+    {
+        cancel.cancel();
+    }
+}

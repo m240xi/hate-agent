@@ -173,7 +173,7 @@
     const clamp = (x: number) => Math.max(10, Math.min(w - 10, x));
     // The pal — a sleeping cat curled up right beside the fire.
     const pals: Pal[] = [
-      { sheet: 'cat', x: clamp(fireX + 30), base: fireY + 9, fps: 1, scale: 0.2, smooth: true, zzz: true },
+      { sheet: 'cat', x: clamp(fireX + 30), base: fireY + 9, fps: 1, scale: 0.12, smooth: true, zzz: true },
     ];
     return { w, horizon, stars, ridge, trees, grass, flies, pals, fireX, fireY };
   }
@@ -263,9 +263,9 @@
 
     const fire = images.get('fire');
     if (fire) {
-      // Front-view Burn loop: 6 frames of the 64px sheet, half-scaled.
+      // Front-view Burn loop: 6 frames of the 64px sheet at 28px.
       const fi = Math.floor(t * 0.008) % 6;
-      ctx.drawImage(fire, fi * 64, 0, 64, 64, fx - 16, fy - 27, 32, 32);
+      ctx.drawImage(fire, fi * 64, 0, 64, 64, fx - 14, fy - 23, 28, 28);
     }
 
     // Rising sparks — three embers on offset loops.

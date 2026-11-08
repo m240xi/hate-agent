@@ -6,13 +6,12 @@
   // frame under prefers-reduced-motion.
   //
   // Palette is the app's mono chrome plus ONE warm accent — the
-  // campfire and its embers — which is the whole 3am-club signature.
+  // glow around the sleeping cat — which is the whole 3am-club
+  // signature.
   //
-  // Sprites are real pixel art (all CC0): Pixor campfire sheet and
-  // OpenGameArt animals — see docs/deps.md for attributions.
+  // Sprite is user-supplied pixel art (gattino.gif, 2 frames).
   import { onMount } from 'svelte';
-  import campfireUrl from '../../assets/sprites/campfire.png?url';
-  import catUrl from '../../assets/sprites/sleeping-cat.png?url';
+  import catUrl from '../../assets/sprites/gattino.png?url';
 
   let canvas = $state<HTMLCanvasElement | null>(null);
 
@@ -52,16 +51,13 @@
   // number of frames per row; frames are read row-major, so a grid
   // sheet (cat) and a strip sheet (fox) share the same math.
   const SHEET_FILES = {
-    fire: campfireUrl,
     cat: catUrl,
   } as const;
   type SheetId = keyof typeof SHEET_FILES;
 
   const SHEETS: Record<SheetId, { fw: number; fh: number; cols: number; count: number; oy: number }> = {
-    // Pixor campfire: 8 rows of 64px cells (8 sides); row 0 = front view.
-    fire: { fw: 64, fh: 64, cols: 6, count: 6, oy: 0 },
-    // User-supplied sleeping cat, trimmed to content (180x144, single frame).
-    cat: { fw: 180, fh: 144, cols: 1, count: 1, oy: 0 },
+    // User-supplied gattino gif — 2 frames of 64px, ~900ms each.
+    cat: { fw: 64, fh: 64, cols: 2, count: 2, oy: 0 },
   };
 
   interface Pal {
@@ -93,8 +89,6 @@
     grass: number[];
     flies: Fly[];
     pals: Pal[];
-    fireX: number;
-    fireY: number;
   }
 
   function build(w: number): Scene {
@@ -168,14 +162,11 @@
       });
     }
 
-    const fireX = Math.round(w * 0.46);
-    const fireY = horizon + 14;
-    const clamp = (x: number) => Math.max(10, Math.min(w - 10, x));
-    // The pal — a sleeping cat curled up right beside the fire.
+    // The pal — a little cat asleep on the ground, center stage.
     const pals: Pal[] = [
-      { sheet: 'cat', x: clamp(fireX + 30), base: fireY + 9, fps: 1, scale: 0.12, smooth: true, zzz: true },
+      { sheet: 'cat', x: Math.round(w * 0.5), base: L_H - 7, fps: 1.1, scale: 0.75, zzz: true },
     ];
-    return { w, horizon, stars, ridge, trees, grass, flies, pals, fireX, fireY };
+    return { w, horizon, stars, ridge, trees, grass, flies, pals };
   }
 
   function draw(ctx: CanvasRenderingContext2D, s: Scene, t: number): void {
@@ -248,56 +239,22 @@
       if (g >= 0) ctx.fillRect(x, s.horizon + 4 + g, 1, 1);
     }
 
-    // Campfire — the one warm accent. The sprite sheet provides the
-    // flame; we keep the light it throws: glow, ground pool, sparks.
-    const { fireX: fx, fireY: fy } = s;
-    const flick = 0.75 + 0.25 * Math.sin(t * 0.012) + 0.1 * Math.sin(t * 0.031);
-    const glow = ctx.createRadialGradient(fx, fy, 2, fx, fy, 30);
-    glow.addColorStop(0, `rgba(255, 168, 74, ${(0.16 * flick).toFixed(3)})`);
-    glow.addColorStop(1, 'rgba(255, 168, 74, 0)');
-    ctx.fillStyle = glow;
-    ctx.fillRect(fx - 30, fy - 30, 60, 60);
-    // ground glow
-    ctx.fillStyle = `rgba(224, 122, 45, ${(0.1 * flick).toFixed(3)})`;
-    ctx.fillRect(fx - 9, fy + 3, 18, 2);
-
-    const fire = images.get('fire');
-    if (fire) {
-      // Front-view Burn loop: 6 frames of the 64px sheet at 28px.
-      const fi = Math.floor(t * 0.008) % 6;
-      ctx.drawImage(fire, fi * 64, 0, 64, 64, fx - 14, fy - 23, 28, 28);
-    }
-
-    // Rising sparks — three embers on offset loops.
-    const flameTop = fy - 14;
-    ctx.fillStyle = '#ffb03a';
-    for (let i = 0; i < 3; i++) {
-      const age = (t * 0.02 + i * 37) % 40;
-      const sx = fx + Math.round(Math.sin(t * 0.001 + i * 2.1) * (2 + i));
-      const sy = flameTop - Math.floor(age);
-      if (sy > 0 && age < 30) ctx.fillRect(sx, sy, 1, 1);
-    }
-
-    // Pals — CC0 sprite sheets around the fire. A soft pool of
-    // firelight sits behind each, strongest nearest the flames.
+    // Pals — sprite sheets on the ground. A faint warm halo sits
+    // behind each: the sleeping cat is the warm spot in the cold night.
     for (const p of s.pals) {
       const img = images.get(p.sheet);
       if (!img) continue;
       const sheet = SHEETS[p.sheet];
-      const d = Math.abs(p.x - fx);
-      if (d < 60) {
-        const a = 0.12 * (1 - d / 60);
-        const pool = ctx.createRadialGradient(p.x, p.base - 8, 1, p.x, p.base - 8, 22);
-        pool.addColorStop(0, `rgba(255,150,60,${a.toFixed(3)})`);
-        pool.addColorStop(1, 'rgba(255,150,60,0)');
-        ctx.fillStyle = pool;
-        ctx.fillRect(p.x - 22, p.base - 30, 44, 30);
-      }
       const fi = Math.floor(t * 0.001 * p.fps) % sheet.count;
       const sx = (fi % sheet.cols) * sheet.fw;
       const sy = sheet.oy + Math.floor(fi / sheet.cols) * sheet.fh;
       const dw = sheet.fw * p.scale;
       const dh = sheet.fh * p.scale;
+      const pool = ctx.createRadialGradient(p.x, p.base - dh * 0.5, 1, p.x, p.base - dh * 0.5, 24);
+      pool.addColorStop(0, 'rgba(255,150,60,0.10)');
+      pool.addColorStop(1, 'rgba(255,150,60,0)');
+      ctx.fillStyle = pool;
+      ctx.fillRect(p.x - 24, p.base - dh - 14, 48, dh + 28);
       // Sleeping pals breathe — a slow sub-pixel rise and fall.
       const bob = p.zzz ? Math.sin(t * 0.0016) * 0.7 : 0;
       const dy = Math.round(p.base - dh + bob);

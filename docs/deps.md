@@ -69,11 +69,9 @@ works, what it costs. Rows are added when the dependency lands, not before.
   Alagard is free with credit (Hewett Tsoi —
   https://hewett.tsoy.net/alagard). Vendored TTFs under
   `apps/desktop/src/assets/fonts/`; attribution satisfied here.
-- Landing pixel-art sprites (not crates) — vendored under
-  `apps/desktop/src/assets/sprites/`:
-  - `campfire.png` — Pixor campfire sheet (8 sides × 6 Burn frames,
-    front row used), CC0 — https://pixor.art/library/elements/campfire/
-  - `sleeping-cat.png` — user-supplied artwork (trimmed to content)
+- `gattino.png` (landing sprite, not a crate) — user-supplied pixel-art
+  cat (derived from `gattino.gif`, 2 frames), vendored under
+  `apps/desktop/src/assets/sprites/`
 - `tauri-specta`, `specta`, `specta-typescript` — generates TypeScript
   types from the Rust command signatures, satisfying the typed-invoke-wrapper
   requirement without a hand-maintained parallel type file. Pinned to the

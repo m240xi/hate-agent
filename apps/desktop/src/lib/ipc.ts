@@ -62,3 +62,37 @@ export interface AuthStatus {
 export async function authStatus(provider?: string): Promise<AuthStatus> {
   return invoke<AuthStatus>('auth_status', { provider: provider ?? null });
 }
+
+export async function authSetKey(provider: string, key: string): Promise<void> {
+  return invoke<void>('auth_set_key', { provider, key });
+}
+
+export async function authLogout(provider: string): Promise<void> {
+  return invoke<void>('auth_logout', { provider });
+}
+
+export interface ProviderInfo {
+  name: string;
+  kind: string;
+  base_url: string;
+  model: string;
+  is_default: boolean;
+  auth_kind: 'none' | 'api_key' | 'oauth';
+  auth_expires_at: number | null;
+}
+
+export async function providersList(): Promise<ProviderInfo[]> {
+  return invoke<ProviderInfo[]>('providers_list');
+}
+
+export async function workspaceGet(): Promise<string | null> {
+  return invoke<string | null>('workspace_get');
+}
+
+export async function workspaceSet(path: string | null): Promise<void> {
+  return invoke<void>('workspace_set', { path });
+}
+
+export async function workspacePick(): Promise<string | null> {
+  return invoke<string | null>('workspace_pick');
+}

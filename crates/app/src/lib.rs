@@ -21,6 +21,12 @@ pub fn run() {
         commands::auth_nous_login,
         commands::auth_nous_cancel,
         commands::auth_status,
+        commands::auth_set_key,
+        commands::auth_logout,
+        commands::providers_list,
+        commands::workspace_get,
+        commands::workspace_set,
+        commands::workspace_pick,
     ]);
 
     // Emit TypeScript bindings for the frontend's typed invoke wrapper.
@@ -37,6 +43,7 @@ pub fn run() {
         .expect("failed to export TypeScript bindings");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             app.manage(commands::Sessions::default());

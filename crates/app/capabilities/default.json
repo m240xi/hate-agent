@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability: core event/window/webview permissions only. App commands need no ACL entries; plugins get explicit entries as they are added.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

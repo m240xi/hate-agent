@@ -27,6 +27,10 @@ import type {
 const inTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
+export type AppMode = 'home' | 'code' | 'chat' | 'settings';
+
+const MODES: readonly AppMode[] = ['home', 'code', 'chat', 'settings'];
+
 let nextBlockId = 2;
 
 class SessionStore {
@@ -64,6 +68,12 @@ class SessionStore {
   leftWidth = $state(260);
   rightWidth = $state(300);
 
+  // ── app shell ───────────────────────────────────────────────────────────
+  /** Landing picks the surface; persisted across launches. */
+  mode = $state<AppMode>('home');
+  /** Folder the code session operates in (from config.toml). */
+  workspacePath = $state<string | null>(null);
+
   // ── internals ───────────────────────────────────────────────────────────
   private unlisten: UnlistenFn | null = null;
   private fixtureTimers: ReturnType<typeof setTimeout>[] = [];
@@ -74,14 +84,18 @@ class SessionStore {
 
   /** Wire the event stream. Called once on app mount. */
   async start(): Promise<void> {
-    if (!inTauri()) {
+    const saved = localStorage.getItem('hate:mode');
+    if (MODES.includes(saved as AppMode)) this.mode = saved as AppMode;
+    if (inTauri()) {
+      const m = await import('./ipc');
+      this.workspacePath = await m.workspaceGet().catch(() => null);
+      const { listen } = await import('@tauri-apps/api/event');
+      this.unlisten = await listen<SessionEvent>('core-event', (e) => {
+        this.handleEvent(e.payload);
+      });
+    } else {
       this.startFixturePlayback();
-      return;
     }
-    const { listen } = await import('@tauri-apps/api/event');
-    this.unlisten = await listen<SessionEvent>('core-event', (e) => {
-      this.handleEvent(e.payload);
-    });
   }
 
   destroy(): void {
@@ -150,6 +164,22 @@ class SessionStore {
   clearTranscript(): void {
     this.blocks = [];
     nextBlockId = 1;
+  }
+
+  setMode(mode: AppMode): void {
+    this.mode = mode;
+    localStorage.setItem('hate:mode', mode);
+  }
+
+  /** Native folder picker → persist to config.toml. */
+  async pickWorkspace(): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    const p = await m.workspacePick().catch(() => null);
+    if (p) {
+      this.workspacePath = p;
+      await m.workspaceSet(p).catch(() => {});
+    }
   }
 
   // ── event handling ──────────────────────────────────────────────────────

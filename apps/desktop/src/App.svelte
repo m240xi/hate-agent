@@ -8,6 +8,10 @@
   import PermissionBar from './lib/components/PermissionBar.svelte';
   import Inspector from './lib/components/Inspector.svelte';
   import EmptyState from './lib/components/EmptyState.svelte';
+  import Landing from './lib/components/Landing.svelte';
+  import ChatView from './lib/components/ChatView.svelte';
+  import SettingsView from './lib/components/SettingsView.svelte';
+  import ModeSwitch from './lib/components/ModeSwitch.svelte';
   import Icon from './lib/components/Icon.svelte';
 
   onMount(() => {
@@ -32,27 +36,34 @@
     session.leftCollapsed = localStorage.getItem('hate:pane:leftCollapsed') === 'true';
     session.rightCollapsed = localStorage.getItem('hate:pane:rightCollapsed') === 'true';
   });
+
+  const workspaceName = $derived(
+    session.workspacePath?.split(/[\\/]/).filter(Boolean).pop() ?? null,
+  );
 </script>
 
 <div class="shell">
-  <Pane
-    side="left"
-    title="Files"
-    collapsed={session.leftCollapsed}
-    width={session.leftWidth}
-    onToggle={() => (session.leftCollapsed = !session.leftCollapsed)}
-    onResize={(w) => (session.leftWidth = w)}
-  >
-    <FileTree />
-  </Pane>
-
-  <main class="center">
-    <header class="topbar">
-      <span class="brand">hate-agent</span>
+  <header class="topbar">
+    <button class="brand" onclick={() => session.setMode('home')} title="Home">
+      hate-agent
+    </button>
+    <ModeSwitch />
+    {#if session.mode === 'code'}
+      <button
+        class="ws-chip mono"
+        class:set={!!session.workspacePath}
+        onclick={() => session.pickWorkspace()}
+        title={session.workspacePath ?? 'Attach a folder for code sessions'}
+      >
+        <Icon name="folder" size={12} />
+        {workspaceName ?? 'Attach folder'}
+      </button>
+    {/if}
+    <span class="spacer"></span>
+    {#if session.mode === 'code' || session.mode === 'chat'}
       <span class="state mono" class:running={session.running}>
         {session.sessionState}
       </span>
-      <span class="spacer"></span>
       <button
         class="icon-btn"
         onclick={() => session.clearTranscript()}
@@ -61,58 +72,117 @@
       >
         <Icon name="x" size={13} />
       </button>
-    </header>
-
-    {#if session.blocks.length === 0}
-      <EmptyState />
-    {:else}
-      <Transcript />
     {/if}
+  </header>
 
-    <PermissionBar />
-    <Composer />
-  </main>
+  <div class="body">
+    {#if session.mode === 'home'}
+      <Landing />
+    {:else if session.mode === 'chat'}
+      <ChatView />
+    {:else if session.mode === 'settings'}
+      <SettingsView />
+    {:else}
+      <Pane
+        side="left"
+        title="Files"
+        collapsed={session.leftCollapsed}
+        width={session.leftWidth}
+        onToggle={() => (session.leftCollapsed = !session.leftCollapsed)}
+        onResize={(w) => (session.leftWidth = w)}
+      >
+        <FileTree />
+      </Pane>
 
-  <Pane
-    side="right"
-    title="Inspector"
-    collapsed={session.rightCollapsed}
-    width={session.rightWidth}
-    onToggle={() => (session.rightCollapsed = !session.rightCollapsed)}
-    onResize={(w) => (session.rightWidth = w)}
-  >
-    <Inspector />
-  </Pane>
+      <main class="center">
+        {#if session.blocks.length === 0}
+          <EmptyState />
+        {:else}
+          <Transcript />
+        {/if}
+
+        <PermissionBar />
+        <Composer />
+      </main>
+
+      <Pane
+        side="right"
+        title="Inspector"
+        collapsed={session.rightCollapsed}
+        width={session.rightWidth}
+        onToggle={() => (session.rightCollapsed = !session.rightCollapsed)}
+        onResize={(w) => (session.rightWidth = w)}
+      >
+        <Inspector />
+      </Pane>
+    {/if}
+  </div>
 </div>
 
 <style>
   .shell {
     display: flex;
+    flex-direction: column;
     height: 100vh;
     overflow: hidden;
   }
-  .center {
+  .body {
     flex: 1;
-    min-width: 0;
+    min-height: 0;
     display: flex;
-    flex-direction: column;
-    background: var(--bg-0);
   }
   .topbar {
     display: flex;
     align-items: center;
     gap: 10px;
-    height: 32px;
+    height: 40px;
     padding: 0 12px;
     border-bottom: 1px solid var(--border);
     flex: none;
     background: var(--bg-1);
   }
   .brand {
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: -0.01em;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
     color: var(--fg-0);
+    padding: 4px 6px;
+    border-radius: var(--radius-sm);
+  }
+  .brand:hover {
+    background: var(--bg-2);
+  }
+  .ws-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 220px;
+    padding: 4px 10px;
+    font-size: 11px;
+    color: var(--fg-3);
+    background: var(--bg-2);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-pill);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .ws-chip.set {
+    color: var(--fg-1);
+    border-style: solid;
+    border-color: var(--border);
+  }
+  .ws-chip:hover {
+    color: var(--fg-0);
+    border-color: var(--accent-dim);
+  }
+  .center {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-0);
   }
   .state {
     font-size: 10.5px;
@@ -130,9 +200,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 22px;
-    border-radius: var(--radius);
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
     color: var(--fg-2);
   }
   .icon-btn:hover {

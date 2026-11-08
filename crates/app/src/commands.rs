@@ -293,3 +293,100 @@ pub fn auth_nous_cancel(state: State<'_, AuthState>) {
         cancel.cancel();
     }
 }
+
+/// Store an API key for a provider (Settings → provider key entry).
+/// The key travels frontend→backend once and is never returned.
+#[tauri::command]
+#[specta::specta]
+pub fn auth_set_key(provider: String, key: String) -> Result<(), String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    ctx.set_api_key(&provider, &key).map_err(|e| e.to_string())
+}
+
+/// Remove stored credentials for a provider.
+#[tauri::command]
+#[specta::specta]
+pub fn auth_logout(provider: String) -> Result<(), String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    ctx.logout(&provider).map_err(|e| e.to_string())
+}
+
+/// One row of the Settings → Providers list.
+#[derive(Debug, Clone, serde::Serialize, Type)]
+pub struct ProviderInfo {
+    /// Config key (`nous`, `openrouter`, …).
+    pub name: String,
+    /// Adapter family (`openai_compat`, `anthropic`).
+    pub kind: String,
+    /// API base URL.
+    pub base_url: String,
+    /// Default model id.
+    pub model: String,
+    /// Whether this is the session's default provider.
+    pub is_default: bool,
+    /// Credential state: `none` | `api_key` | `oauth`.
+    pub auth_kind: String,
+    /// OAuth access-token expiry, unix seconds.
+    pub auth_expires_at: Option<u32>,
+}
+
+/// List configured providers with their credential state — drives the
+/// Settings → Providers section. Secrets are never included.
+#[tauri::command]
+#[specta::specta]
+pub fn providers_list() -> Result<Vec<ProviderInfo>, String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let mut config = ctx.config.clone();
+    config.ensure_default_provider();
+    let default = config.default_provider.clone();
+    let mut out = Vec::new();
+    for (name, p) in &config.providers {
+        let status = ctx.status(name).map_err(|e| e.to_string())?;
+        out.push(ProviderInfo {
+            name: name.clone(),
+            kind: p.kind.clone(),
+            base_url: p.base_url.clone(),
+            model: p.model.clone(),
+            is_default: default.as_deref() == Some(name.as_str()),
+            auth_kind: status.kind.to_string(),
+            auth_expires_at: status
+                .expires_at
+                .map(|e| u32::try_from(e).unwrap_or(u32::MAX)),
+        });
+    }
+    Ok(out)
+}
+
+/// Current workspace folder for code sessions (`None` = app data dir).
+#[tauri::command]
+#[specta::specta]
+pub fn workspace_get() -> Result<Option<String>, String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    Ok(ctx.config.workspace_path.clone())
+}
+
+/// Persist the workspace folder (`None` clears it).
+#[tauri::command]
+#[specta::specta]
+pub fn workspace_set(path: Option<String>) -> Result<(), String> {
+    let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    ctx.config.workspace_path = path;
+    ctx.config.save().map_err(|e| e.to_string())
+}
+
+/// Open the native folder picker; returns the chosen path or `None`.
+#[tauri::command]
+#[specta::specta]
+pub async fn workspace_pick(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let picked =
+        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+            .await
+            .map_err(|e| format!("picker task failed: {e}"))?;
+    Ok(picked.and_then(|p| p.into_path().ok()).map(|p| {
+        // `into_path` can yield \\?\ verbatim paths on Windows — simplify
+        // for display/storage.
+        dunce::simplified(&p).display().to_string()
+    }))
+}

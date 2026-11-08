@@ -46,6 +46,9 @@ pub struct Config {
     /// Named provider configs.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// Folder the code session operates in (picked in the UI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
 }
 
 impl Config {

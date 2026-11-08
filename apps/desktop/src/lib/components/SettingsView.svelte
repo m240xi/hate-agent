@@ -289,7 +289,7 @@
   }
   .page-title {
     font-family: 'Alagard', var(--font-ui);
-    font-size: 34px;
+    font-size: 38px;
     font-weight: 400;
     color: var(--fg-0);
     margin: 0 0 30px;
@@ -299,13 +299,13 @@
   }
   .group-title {
     font-family: 'm5x7', var(--font-mono);
-    font-size: 14px;
+    font-size: 16px;
     color: var(--fg-0);
     margin: 0 0 4px;
   }
   .group-hint {
     font-family: 'm5x7', var(--font-mono);
-    font-size: 12px;
+    font-size: 14px;
     color: var(--fg-2);
     margin: 0 0 12px;
     line-height: 1.6;
@@ -344,8 +344,8 @@
   }
   .seg-item {
     font-family: 'm5x7', var(--font-mono);
-    font-size: 12px;
-    padding: 6px 16px;
+    font-size: 14px;
+    padding: 7px 18px;
     border-radius: 5px;
     border: 1px solid transparent;
     color: var(--fg-2);
@@ -379,12 +379,12 @@
     margin-bottom: 4px;
   }
   .provider-name {
-    font-size: 14px;
+    font-size: 16px;
     color: var(--fg-0);
   }
   .badge {
     font-family: 'm5x7', var(--font-mono);
-    font-size: 10px;
+    font-size: 12px;
     padding: 2px 8px;
     border-radius: var(--radius-pill);
     background: var(--bg-3);
@@ -397,11 +397,11 @@
     color: var(--accent);
   }
   .provider-meta {
-    font-size: 12px;
+    font-size: 14px;
     color: var(--fg-1);
   }
   .provider-url {
-    font-size: 11px;
+    font-size: 13px;
     color: var(--fg-3);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -417,8 +417,8 @@
   .key-input {
     flex: 1;
     min-width: 160px;
-    padding: 7px 10px;
-    font-size: 12px;
+    padding: 8px 12px;
+    font-size: 14px;
     background: var(--bg-0);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -435,7 +435,7 @@
     padding: 8px 0 2px;
   }
   .login-line {
-    font-size: 12px;
+    font-size: 14px;
     color: var(--fg-1);
     margin: 0 0 8px;
     line-height: 1.6;
@@ -458,7 +458,7 @@
     color: var(--fg-2);
   }
   .workspace-path {
-    font-size: 12px;
+    font-size: 14px;
     color: var(--fg-1);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -473,8 +473,8 @@
      buttons, not themed surfaces. */
   .btn {
     font-family: 'm5x7', var(--font-mono);
-    font-size: 13px;
-    padding: 7px 14px;
+    font-size: 15px;
+    padding: 8px 16px;
     border-radius: 5px;
     border: 2px solid #2b2d31;
     background: linear-gradient(#1a1c1f, #121315);
@@ -525,13 +525,13 @@
   }
   .error-text {
     font-family: 'm5x7', var(--font-mono);
-    font-size: 12px;
+    font-size: 13px;
     color: var(--err);
     margin: 8px 0 0;
   }
   .muted {
     font-family: 'm5x7', var(--font-mono);
-    font-size: 12px;
+    font-size: 13px;
     color: var(--fg-3);
   }
   .about-grid {
@@ -539,7 +539,7 @@
     grid-template-columns: 90px 1fr;
     gap: 8px 14px;
     margin: 0;
-    font-size: 12px;
+    font-size: 13px;
   }
   .about-grid dt {
     font-family: 'm5x7', var(--font-mono);
@@ -547,7 +547,7 @@
   }
   .about-grid dd {
     margin: 0;
-    font-size: 13px;
+    font-size: 14px;
     color: var(--fg-1);
   }
   .about-path {

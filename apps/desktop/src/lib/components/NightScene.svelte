@@ -43,6 +43,92 @@
     sp: number;
   }
 
+  interface Critter {
+    /** Pixel rows; chars map through PALETTE below. */
+    sprite: string[];
+    /** Center x in scene pixels. */
+    x: number;
+    /** Baseline y — bottom of the feet. */
+    base: number;
+    /** Blink/breath phase seed. */
+    seed: number;
+    /** Perch on a log. */
+    log?: boolean;
+  }
+
+  // Sprite chars: k body · K shade · g light detail · w warm eye glow ·
+  // e dim ember inner-ear · n light beak/nose.
+  const PALETTE: Record<string, string> = {
+    k: '#1a1a20',
+    K: '#101014',
+    g: '#3a3a40',
+    w: '#f0c26a',
+    e: '#7a4a22',
+    n: '#8a8a80',
+  };
+
+  // The pals — original pixel sprites, hand-drawn, CC0-by-authorship.
+  // Front-facing silhouettes that read at a glance around the fire.
+  const CAT = [
+    '...k......k...',
+    '..kkk....kkk..',
+    '..kkk....kkk..',
+    '..kkkk..kkkk..',
+    '...kkkkkkkk...',
+    '..kkkkkkkkkk..',
+    '..kwkkkkkwkk..',
+    '..kkkkkkkkkk..',
+    '...kkkkkkkk...',
+    '....kk..kk....',
+    '....kk..kk....',
+    '...kkk..kkk...',
+    '............k.',
+    '...........kk.',
+    '..........kk..',
+  ];
+  const FOX = [
+    '...k......k...',
+    '..kkk....kkk..',
+    '..eke....eke..',
+    '..kkkk..kkkk..',
+    '...kkkkkkkk...',
+    '..kkkkkkkkkk..',
+    '..kwkkkkkwkk..',
+    '..kkkkkkkkkkk.',
+    '.kgggggggggk.k',
+    '.kgggggggggkk.',
+    '..kkkkkkkkkkk.',
+    '...kkkkkkkk.k.',
+    '....kk..kk..k.',
+    '...kkk..kkk...',
+  ];
+  const RABBIT = [
+    '..kk......kk..',
+    '..kk......kk..',
+    '..kkk....kkk..',
+    '..eke....eke..',
+    '..kkkk..kkkk..',
+    '...kkkkkkkk...',
+    '..kkkkkkkkkk..',
+    '..kwkkkkkwkk..',
+    '..kkkkkkkkkk..',
+    '...kkkkkkkk...',
+    '....kkkkkk....',
+    '...kkkkkkkk...',
+    '..kkk....kkk..',
+    '..kk......kk..',
+    '.kk........kk.',
+  ];
+  const BIRD = [
+    '...kkk...',
+    '..kkkkk..',
+    '.kkkkkkk.',
+    'nkwkkkk..',
+    'kkkkkk...',
+    '.kkkk....',
+    '..kk.....',
+  ];
+
   interface Scene {
     w: number;
     horizon: number;
@@ -51,6 +137,7 @@
     trees: number[];
     grass: number[];
     flies: Fly[];
+    critters: Critter[];
     fireX: number;
     fireY: number;
   }
@@ -128,7 +215,14 @@
 
     const fireX = Math.round(w * 0.46);
     const fireY = horizon + 14;
-    return { w, horizon, stars, ridge, trees, grass, flies, fireX, fireY };
+    const clamp = (x: number) => Math.max(10, Math.min(w - 10, x));
+    const critters: Critter[] = [
+      { sprite: RABBIT, x: clamp(fireX - 62), base: fireY + 13, seed: 0.2 },
+      { sprite: CAT, x: clamp(fireX - 40), base: fireY + 12, seed: 1.1 },
+      { sprite: FOX, x: clamp(fireX + 36), base: fireY + 11, seed: 2.3 },
+      { sprite: BIRD, x: clamp(fireX + 58), base: fireY + 10, seed: 0.7, log: true },
+    ];
+    return { w, horizon, stars, ridge, trees, grass, flies, critters, fireX, fireY };
   }
 
   function draw(ctx: CanvasRenderingContext2D, s: Scene, t: number): void {
@@ -232,6 +326,37 @@
       const sx = fx + Math.round(Math.sin(t * 0.001 + i * 2.1) * (2 + i));
       const sy = fy - core - Math.floor(age);
       if (sy > 0 && age < 30) ctx.fillRect(sx, sy, 1, 1);
+    }
+
+    // Pals — pixel critters around the fire. Warm pool of firelight on
+    // nearby ones, a slow breathing bob, and eyes that blink on a timer.
+    for (const c of s.critters) {
+      const H = c.sprite.length;
+      const bob = Math.sin(t * 0.0012 + c.seed * 9) > 0.55 ? 1 : 0;
+      const blinking = (t * 0.001 + c.seed * 13.7) % 4.3 < 0.16;
+      if (c.log) {
+        ctx.fillStyle = '#241a10';
+        ctx.fillRect(c.x - 4, c.base, 9, 2);
+      }
+      const d = Math.abs(c.x - fx);
+      if (d < 60) {
+        const a = 0.12 * (1 - d / 60);
+        const pool = ctx.createRadialGradient(c.x, c.base - 8, 1, c.x, c.base - 8, 22);
+        pool.addColorStop(0, `rgba(255,150,60,${a.toFixed(3)})`);
+        pool.addColorStop(1, 'rgba(255,150,60,0)');
+        ctx.fillStyle = pool;
+        ctx.fillRect(c.x - 22, c.base - 30, 44, 30);
+      }
+      for (let r = 0; r < H; r++) {
+        const row = c.sprite[r] ?? '';
+        const rx = c.x - Math.floor(row.length / 2);
+        for (let cx = 0; cx < row.length; cx++) {
+          const ch = row[cx] ?? '.';
+          if (ch === '.') continue;
+          ctx.fillStyle = blinking && ch === 'w' ? '#16161d' : (PALETTE[ch] ?? PALETTE.k ?? '#1a1a20');
+          ctx.fillRect(rx + cx, c.base - H + bob + r, 1, 1);
+        }
+      }
     }
 
     // Fireflies — slow elliptical drift, blinking in and out.

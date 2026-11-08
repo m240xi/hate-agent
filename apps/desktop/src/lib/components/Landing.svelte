@@ -41,7 +41,7 @@
 
   <div class="hero">
     <div class="version pixel">v{version}</div>
-    <h1 class="wordmark">hate-agent<span class="cursor" aria-hidden="true"></span></h1>
+    <h1 class="wordmark">hate-agent</h1>
     <p class="tagline pixel">
       A coding agent that spends fewer tokens per task — small prompt,
       lazy tools, verified work. Built for the 3am club.
@@ -104,20 +104,6 @@
     margin: 0 0 14px;
     line-height: 1;
     text-shadow: 0 3px 0 rgba(0, 0, 0, 0.9), 0 8px 24px rgba(0, 0, 0, 0.8);
-  }
-  .cursor {
-    display: inline-block;
-    width: 5px;
-    height: 0.72em;
-    margin-left: 6px;
-    vertical-align: -0.06em;
-    background: var(--accent);
-    animation: blink 1.15s steps(1) infinite;
-  }
-  @keyframes blink {
-    50% {
-      opacity: 0;
-    }
   }
   .tagline {
     color: var(--fg-1);

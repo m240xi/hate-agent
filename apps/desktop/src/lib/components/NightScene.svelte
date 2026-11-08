@@ -12,10 +12,7 @@
   // OpenGameArt animals — see docs/deps.md for attributions.
   import { onMount } from 'svelte';
   import campfireUrl from '../../assets/sprites/campfire.png?url';
-  import catUrl from '../../assets/sprites/cat.png?url';
-  import foxUrl from '../../assets/sprites/fox.png?url';
-  import rabbitUrl from '../../assets/sprites/rabbit.png?url';
-  import wolfUrl from '../../assets/sprites/wolf.png?url';
+  import catUrl from '../../assets/sprites/sleeping-cat.png?url';
 
   let canvas = $state<HTMLCanvasElement | null>(null);
 
@@ -57,21 +54,14 @@
   const SHEET_FILES = {
     fire: campfireUrl,
     cat: catUrl,
-    fox: foxUrl,
-    rabbit: rabbitUrl,
-    wolf: wolfUrl,
   } as const;
   type SheetId = keyof typeof SHEET_FILES;
 
   const SHEETS: Record<SheetId, { fw: number; fh: number; cols: number; count: number; oy: number }> = {
     // Pixor campfire: 8 rows of 64px cells (8 sides); row 0 = front view.
     fire: { fw: 64, fh: 64, cols: 6, count: 6, oy: 0 },
-    // Flute Head Cat (RickGalasio): 3x3 grid of 64px cells, last empty.
-    cat: { fw: 64, fh: 64, cols: 3, count: 8, oy: 0 },
-    // ScratchIO idle strips: fox 6x64px, rabbit 10x32px, wolf-howl 10x64px.
-    fox: { fw: 64, fh: 36, cols: 6, count: 6, oy: 0 },
-    rabbit: { fw: 32, fh: 26, cols: 10, count: 10, oy: 0 },
-    wolf: { fw: 64, fh: 40, cols: 10, count: 10, oy: 0 },
+    // User-supplied sleeping cat, trimmed to content (180x144, single frame).
+    cat: { fw: 180, fh: 144, cols: 1, count: 1, oy: 0 },
   };
 
   interface Pal {
@@ -84,8 +74,12 @@
     fps: number;
     /** Mirror horizontally — all animal sheets face left natively. */
     flip?: boolean;
-    /** Uniform scale; 0.5 keeps the half-pixel crisp. */
+    /** Uniform scale. */
     scale: number;
+    /** Bilinear minification — for painterly (non-pixel) sources. */
+    smooth?: boolean;
+    /** Sleeping: breathing bob + rising z particles. */
+    zzz?: boolean;
   }
 
   const images = new Map<SheetId, HTMLImageElement>();
@@ -177,14 +171,9 @@
     const fireX = Math.round(w * 0.46);
     const fireY = horizon + 14;
     const clamp = (x: number) => Math.max(10, Math.min(w - 10, x));
-    // The pals gathered around the fire — every animal sheet faces
-    // left natively, so the wolf on the left is flipped to face the
-    // flames; the rest already look toward the fire.
+    // The pal — a sleeping cat curled up right beside the fire.
     const pals: Pal[] = [
-      { sheet: 'wolf', x: clamp(fireX - 96), base: fireY + 15, fps: 4, flip: true, scale: 0.5 },
-      { sheet: 'cat', x: clamp(fireX - 56), base: fireY + 14, fps: 5, scale: 0.5 },
-      { sheet: 'rabbit', x: clamp(fireX + 34), base: fireY + 15, fps: 7, scale: 0.5 },
-      { sheet: 'fox', x: clamp(fireX + 66), base: fireY + 13, fps: 6, scale: 0.5 },
+      { sheet: 'cat', x: clamp(fireX + 30), base: fireY + 9, fps: 1, scale: 0.2, smooth: true, zzz: true },
     ];
     return { w, horizon, stars, ridge, trees, grass, flies, pals, fireX, fireY };
   }
@@ -309,7 +298,11 @@
       const sy = sheet.oy + Math.floor(fi / sheet.cols) * sheet.fh;
       const dw = sheet.fw * p.scale;
       const dh = sheet.fh * p.scale;
-      const dy = Math.round(p.base - dh);
+      // Sleeping pals breathe — a slow sub-pixel rise and fall.
+      const bob = p.zzz ? Math.sin(t * 0.0016) * 0.7 : 0;
+      const dy = Math.round(p.base - dh + bob);
+      const dx = Math.round(p.x - dw / 2);
+      if (p.smooth) ctx.imageSmoothingEnabled = true;
       if (p.flip) {
         ctx.save();
         ctx.translate(Math.round(p.x), 0);
@@ -317,7 +310,29 @@
         ctx.drawImage(img, sx, sy, sheet.fw, sheet.fh, Math.round(-dw / 2), dy, dw, dh);
         ctx.restore();
       } else {
-        ctx.drawImage(img, sx, sy, sheet.fw, sheet.fh, Math.round(p.x - dw / 2), dy, dw, dh);
+        ctx.drawImage(img, sx, sy, sheet.fw, sheet.fh, dx, dy, dw, dh);
+      }
+      if (p.smooth) ctx.imageSmoothingEnabled = false;
+
+      // Sleep bubbles — tiny pixel z's drifting up and fading out.
+      if (p.zzz) {
+        const zx = p.x + dw * 0.3;
+        const zy = p.base - dh - 4;
+        for (let i = 0; i < 3; i++) {
+          const cyc = (t * 0.00035 + i * 0.37) % 1;
+          const a = Math.min(1, (1 - cyc) * 1.6) * 0.7;
+          if (a <= 0.03) continue;
+          const px = Math.round(zx + i * 2.5 + Math.sin(cyc * 6 + i * 2) * 1.5);
+          const py = Math.round(zy - cyc * 24);
+          ctx.fillStyle = `rgba(239,237,230,${a.toFixed(3)})`;
+          const Z = ['###', '..#', '.#.', '#..', '###'];
+          for (let r = 0; r < Z.length; r++) {
+            const row = Z[r] ?? '';
+            for (let c = 0; c < row.length; c++) {
+              if (row[c] === '#') ctx.fillRect(px + c, py + r, 1, 1);
+            }
+          }
+        }
       }
     }
 

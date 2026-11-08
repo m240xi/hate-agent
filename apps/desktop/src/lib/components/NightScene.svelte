@@ -7,7 +7,15 @@
   //
   // Palette is the app's mono chrome plus ONE warm accent — the
   // campfire and its embers — which is the whole 3am-club signature.
+  //
+  // Sprites are real pixel art (all CC0): Pixor campfire sheet and
+  // OpenGameArt animals — see docs/deps.md for attributions.
   import { onMount } from 'svelte';
+  import campfireUrl from '../../assets/sprites/campfire.png?url';
+  import catUrl from '../../assets/sprites/cat.png?url';
+  import foxUrl from '../../assets/sprites/fox.png?url';
+  import rabbitUrl from '../../assets/sprites/rabbit.png?url';
+  import wolfUrl from '../../assets/sprites/wolf.png?url';
 
   let canvas = $state<HTMLCanvasElement | null>(null);
 
@@ -43,91 +51,44 @@
     sp: number;
   }
 
-  interface Critter {
-    /** Pixel rows; chars map through PALETTE below. */
-    sprite: string[];
-    /** Center x in scene pixels. */
-    x: number;
-    /** Baseline y — bottom of the feet. */
-    base: number;
-    /** Blink/breath phase seed. */
-    seed: number;
-    /** Perch on a log. */
-    log?: boolean;
-  }
+  // Sprite sheets — frame geometry in source pixels. `cols` is the
+  // number of frames per row; frames are read row-major, so a grid
+  // sheet (cat) and a strip sheet (fox) share the same math.
+  const SHEET_FILES = {
+    fire: campfireUrl,
+    cat: catUrl,
+    fox: foxUrl,
+    rabbit: rabbitUrl,
+    wolf: wolfUrl,
+  } as const;
+  type SheetId = keyof typeof SHEET_FILES;
 
-  // Sprite chars: k body · K shade · g light detail · w warm eye glow ·
-  // e dim ember inner-ear · n light beak/nose.
-  const PALETTE: Record<string, string> = {
-    k: '#1a1a20',
-    K: '#101014',
-    g: '#3a3a40',
-    w: '#f0c26a',
-    e: '#7a4a22',
-    n: '#8a8a80',
+  const SHEETS: Record<SheetId, { fw: number; fh: number; cols: number; count: number; oy: number }> = {
+    // Pixor campfire: 8 rows of 64px cells (8 sides); row 0 = front view.
+    fire: { fw: 64, fh: 64, cols: 6, count: 6, oy: 0 },
+    // Flute Head Cat (RickGalasio): 3x3 grid of 64px cells, last empty.
+    cat: { fw: 64, fh: 64, cols: 3, count: 8, oy: 0 },
+    // ScratchIO idle strips: fox 6x64px, rabbit 10x32px, wolf-howl 10x64px.
+    fox: { fw: 64, fh: 36, cols: 6, count: 6, oy: 0 },
+    rabbit: { fw: 32, fh: 26, cols: 10, count: 10, oy: 0 },
+    wolf: { fw: 64, fh: 40, cols: 10, count: 10, oy: 0 },
   };
 
-  // The pals — original pixel sprites, hand-drawn, CC0-by-authorship.
-  // Front-facing silhouettes that read at a glance around the fire.
-  const CAT = [
-    '...k......k...',
-    '..kkk....kkk..',
-    '..kkk....kkk..',
-    '..kkkk..kkkk..',
-    '...kkkkkkkk...',
-    '..kkkkkkkkkk..',
-    '..kwkkkkkwkk..',
-    '..kkkkkkkkkk..',
-    '...kkkkkkkk...',
-    '....kk..kk....',
-    '....kk..kk....',
-    '...kkk..kkk...',
-    '............k.',
-    '...........kk.',
-    '..........kk..',
-  ];
-  const FOX = [
-    '...k......k...',
-    '..kkk....kkk..',
-    '..eke....eke..',
-    '..kkkk..kkkk..',
-    '...kkkkkkkk...',
-    '..kkkkkkkkkk..',
-    '..kwkkkkkwkk..',
-    '..kkkkkkkkkkk.',
-    '.kgggggggggk.k',
-    '.kgggggggggkk.',
-    '..kkkkkkkkkkk.',
-    '...kkkkkkkk.k.',
-    '....kk..kk..k.',
-    '...kkk..kkk...',
-  ];
-  const RABBIT = [
-    '..kk......kk..',
-    '..kk......kk..',
-    '..kkk....kkk..',
-    '..eke....eke..',
-    '..kkkk..kkkk..',
-    '...kkkkkkkk...',
-    '..kkkkkkkkkk..',
-    '..kwkkkkkwkk..',
-    '..kkkkkkkkkk..',
-    '...kkkkkkkk...',
-    '....kkkkkk....',
-    '...kkkkkkkk...',
-    '..kkk....kkk..',
-    '..kk......kk..',
-    '.kk........kk.',
-  ];
-  const BIRD = [
-    '...kkk...',
-    '..kkkkk..',
-    '.kkkkkkk.',
-    'nkwkkkk..',
-    'kkkkkk...',
-    '.kkkk....',
-    '..kk.....',
-  ];
+  interface Pal {
+    sheet: SheetId;
+    /** Center x in scene pixels. */
+    x: number;
+    /** Baseline y — bottom of the feet (or fire base for `fire`). */
+    base: number;
+    /** Animation speed, frames per second. */
+    fps: number;
+    /** Mirror horizontally — all animal sheets face left natively. */
+    flip?: boolean;
+    /** Uniform scale; 0.5 keeps the half-pixel crisp. */
+    scale: number;
+  }
+
+  const images = new Map<SheetId, HTMLImageElement>();
 
   interface Scene {
     w: number;
@@ -137,7 +98,7 @@
     trees: number[];
     grass: number[];
     flies: Fly[];
-    critters: Critter[];
+    pals: Pal[];
     fireX: number;
     fireY: number;
   }
@@ -216,13 +177,16 @@
     const fireX = Math.round(w * 0.46);
     const fireY = horizon + 14;
     const clamp = (x: number) => Math.max(10, Math.min(w - 10, x));
-    const critters: Critter[] = [
-      { sprite: RABBIT, x: clamp(fireX - 62), base: fireY + 13, seed: 0.2 },
-      { sprite: CAT, x: clamp(fireX - 40), base: fireY + 12, seed: 1.1 },
-      { sprite: FOX, x: clamp(fireX + 36), base: fireY + 11, seed: 2.3 },
-      { sprite: BIRD, x: clamp(fireX + 58), base: fireY + 10, seed: 0.7, log: true },
+    // The pals gathered around the fire — every animal sheet faces
+    // left natively, so the wolf on the left is flipped to face the
+    // flames; the rest already look toward the fire.
+    const pals: Pal[] = [
+      { sheet: 'wolf', x: clamp(fireX - 96), base: fireY + 15, fps: 4, flip: true, scale: 0.5 },
+      { sheet: 'cat', x: clamp(fireX - 56), base: fireY + 14, fps: 5, scale: 0.5 },
+      { sheet: 'rabbit', x: clamp(fireX + 34), base: fireY + 15, fps: 7, scale: 0.5 },
+      { sheet: 'fox', x: clamp(fireX + 66), base: fireY + 13, fps: 6, scale: 0.5 },
     ];
-    return { w, horizon, stars, ridge, trees, grass, flies, critters, fireX, fireY };
+    return { w, horizon, stars, ridge, trees, grass, flies, pals, fireX, fireY };
   }
 
   function draw(ctx: CanvasRenderingContext2D, s: Scene, t: number): void {
@@ -295,7 +259,8 @@
       if (g >= 0) ctx.fillRect(x, s.horizon + 4 + g, 1, 1);
     }
 
-    // Campfire — the one warm accent. Soft glow, logs, flickering core.
+    // Campfire — the one warm accent. The sprite sheet provides the
+    // flame; we keep the light it throws: glow, ground pool, sparks.
     const { fireX: fx, fireY: fy } = s;
     const flick = 0.75 + 0.25 * Math.sin(t * 0.012) + 0.1 * Math.sin(t * 0.031);
     const glow = ctx.createRadialGradient(fx, fy, 2, fx, fy, 30);
@@ -307,55 +272,52 @@
     ctx.fillStyle = `rgba(224, 122, 45, ${(0.1 * flick).toFixed(3)})`;
     ctx.fillRect(fx - 9, fy + 3, 18, 2);
 
-    ctx.fillStyle = '#3a2415'; // logs
-    ctx.fillRect(fx - 4, fy + 1, 9, 2);
-    ctx.fillRect(fx - 3, fy + 3, 7, 1);
-
-    const core = 3 + Math.floor(flick * 2.4);
-    ctx.fillStyle = '#ffd57a';
-    ctx.fillRect(fx - 1, fy - core, 3, core);
-    ctx.fillStyle = '#ff9d45';
-    ctx.fillRect(fx - 2, fy - Math.floor(core * 0.6), 5, Math.floor(core * 0.6));
-    ctx.fillStyle = '#e0542f';
-    ctx.fillRect(fx - 1, fy - 1, 3, 2);
+    const fire = images.get('fire');
+    if (fire) {
+      // Front-view Burn loop: 6 frames of the 64px sheet, half-scaled.
+      const fi = Math.floor(t * 0.008) % 6;
+      ctx.drawImage(fire, fi * 64, 0, 64, 64, fx - 16, fy - 27, 32, 32);
+    }
 
     // Rising sparks — three embers on offset loops.
+    const flameTop = fy - 14;
     ctx.fillStyle = '#ffb03a';
     for (let i = 0; i < 3; i++) {
       const age = (t * 0.02 + i * 37) % 40;
       const sx = fx + Math.round(Math.sin(t * 0.001 + i * 2.1) * (2 + i));
-      const sy = fy - core - Math.floor(age);
+      const sy = flameTop - Math.floor(age);
       if (sy > 0 && age < 30) ctx.fillRect(sx, sy, 1, 1);
     }
 
-    // Pals — pixel critters around the fire. Warm pool of firelight on
-    // nearby ones, a slow breathing bob, and eyes that blink on a timer.
-    for (const c of s.critters) {
-      const H = c.sprite.length;
-      const bob = Math.sin(t * 0.0012 + c.seed * 9) > 0.55 ? 1 : 0;
-      const blinking = (t * 0.001 + c.seed * 13.7) % 4.3 < 0.16;
-      if (c.log) {
-        ctx.fillStyle = '#241a10';
-        ctx.fillRect(c.x - 4, c.base, 9, 2);
-      }
-      const d = Math.abs(c.x - fx);
+    // Pals — CC0 sprite sheets around the fire. A soft pool of
+    // firelight sits behind each, strongest nearest the flames.
+    for (const p of s.pals) {
+      const img = images.get(p.sheet);
+      if (!img) continue;
+      const sheet = SHEETS[p.sheet];
+      const d = Math.abs(p.x - fx);
       if (d < 60) {
         const a = 0.12 * (1 - d / 60);
-        const pool = ctx.createRadialGradient(c.x, c.base - 8, 1, c.x, c.base - 8, 22);
+        const pool = ctx.createRadialGradient(p.x, p.base - 8, 1, p.x, p.base - 8, 22);
         pool.addColorStop(0, `rgba(255,150,60,${a.toFixed(3)})`);
         pool.addColorStop(1, 'rgba(255,150,60,0)');
         ctx.fillStyle = pool;
-        ctx.fillRect(c.x - 22, c.base - 30, 44, 30);
+        ctx.fillRect(p.x - 22, p.base - 30, 44, 30);
       }
-      for (let r = 0; r < H; r++) {
-        const row = c.sprite[r] ?? '';
-        const rx = c.x - Math.floor(row.length / 2);
-        for (let cx = 0; cx < row.length; cx++) {
-          const ch = row[cx] ?? '.';
-          if (ch === '.') continue;
-          ctx.fillStyle = blinking && ch === 'w' ? '#16161d' : (PALETTE[ch] ?? PALETTE.k ?? '#1a1a20');
-          ctx.fillRect(rx + cx, c.base - H + bob + r, 1, 1);
-        }
+      const fi = Math.floor(t * 0.001 * p.fps) % sheet.count;
+      const sx = (fi % sheet.cols) * sheet.fw;
+      const sy = sheet.oy + Math.floor(fi / sheet.cols) * sheet.fh;
+      const dw = sheet.fw * p.scale;
+      const dh = sheet.fh * p.scale;
+      const dy = Math.round(p.base - dh);
+      if (p.flip) {
+        ctx.save();
+        ctx.translate(Math.round(p.x), 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(img, sx, sy, sheet.fw, sheet.fh, Math.round(-dw / 2), dy, dw, dh);
+        ctx.restore();
+      } else {
+        ctx.drawImage(img, sx, sy, sheet.fw, sheet.fh, Math.round(p.x - dw / 2), dy, dw, dh);
       }
     }
 
@@ -377,6 +339,22 @@
 
     let scene = build(300);
     let timer: ReturnType<typeof setInterval> | null = null;
+
+    // Decode the sprite sheets, then repaint once they're ready.
+    void Promise.all(
+      (Object.keys(SHEET_FILES) as SheetId[]).map(
+        (id) =>
+          new Promise<void>((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              images.set(id, img);
+              resolve();
+            };
+            img.onerror = () => resolve();
+            img.src = SHEET_FILES[id];
+          }),
+      ),
+    ).then(() => draw(ctx, scene, performance.now()));
 
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 

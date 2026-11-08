@@ -5,7 +5,6 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
-  import NightScene from './NightScene.svelte';
   import type { AppInfo, NousLoginInfo, ProviderInfo } from '../ipc';
 
   let providers = $state<ProviderInfo[]>([]);
@@ -113,8 +112,6 @@
 </script>
 
 <div class="settings">
-  <NightScene />
-  <div class="settings-scroll">
   <div class="settings-inner">
     <h1 class="page-title">Settings</h1>
 
@@ -276,24 +273,14 @@
       </div>
     </section>
   </div>
-  </div>
 </div>
 
 <style>
-  /* The night scene is the backdrop — same place as the landing.
-     Text that sits directly on it uses fixed light colors so it
-     survives the light theme too; everything else lives on cards. */
   .settings {
-    position: relative;
-    flex: 1;
-    min-height: 0;
-    display: flex;
-  }
-  .settings-scroll {
-    position: relative;
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    background: var(--bg-0);
   }
   .settings-inner {
     max-width: 680px;
@@ -304,10 +291,7 @@
     font-family: 'Alagard', var(--font-ui);
     font-size: 34px;
     font-weight: 400;
-    color: #f0eee9;
-    text-shadow:
-      0 2px 0 rgba(0, 0, 0, 0.9),
-      0 6px 18px rgba(0, 0, 0, 0.8);
+    color: var(--fg-0);
     margin: 0 0 30px;
   }
   .group {
@@ -316,26 +300,21 @@
   .group-title {
     font-family: 'm5x7', var(--font-mono);
     font-size: 14px;
-    color: #efede6;
-    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
+    color: var(--fg-0);
     margin: 0 0 4px;
   }
   .group-hint {
     font-family: 'm5x7', var(--font-mono);
     font-size: 12px;
-    color: rgba(240, 238, 233, 0.55);
-    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
+    color: var(--fg-2);
     margin: 0 0 12px;
     line-height: 1.6;
   }
 
-  /* Frosted panels floating over the scene. */
   .card,
   .provider,
   .workspace-row {
     background: var(--bg-1);
-    background: color-mix(in srgb, var(--bg-1) 80%, transparent);
-    backdrop-filter: blur(8px);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-sm);
@@ -359,7 +338,7 @@
     display: inline-flex;
     gap: 4px;
     padding: 3px;
-    background: rgba(0, 0, 0, 0.35);
+    background: var(--bg-2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
   }
@@ -440,13 +419,13 @@
     min-width: 160px;
     padding: 7px 10px;
     font-size: 12px;
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--bg-0);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    color: #f0eee9;
+    color: var(--fg-0);
   }
   .key-input::placeholder {
-    color: rgba(240, 238, 233, 0.35);
+    color: var(--fg-3);
   }
   .key-input:focus {
     outline: none;
@@ -547,15 +526,13 @@
   .error-text {
     font-family: 'm5x7', var(--font-mono);
     font-size: 12px;
-    color: #e08070;
-    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
+    color: var(--err);
     margin: 8px 0 0;
   }
   .muted {
     font-family: 'm5x7', var(--font-mono);
     font-size: 12px;
-    color: rgba(240, 238, 233, 0.45);
-    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
+    color: var(--fg-3);
   }
   .about-grid {
     display: grid;

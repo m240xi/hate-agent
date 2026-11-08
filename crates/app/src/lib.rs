@@ -7,11 +7,18 @@
 
 mod commands;
 
+use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
 
 /// Application entry point. Called by `src/main.rs`.
 pub fn run() {
-    let builder = Builder::new().commands(collect_commands![commands::app_info]);
+    let builder = Builder::new().commands(collect_commands![
+        commands::app_info,
+        commands::session_send,
+        commands::session_cancel,
+        commands::session_answer,
+        commands::session_respond_permission,
+    ]);
 
     // Emit TypeScript bindings for the frontend's typed invoke wrapper.
     // Path is compile-time absolute so it works regardless of the runtime cwd.
@@ -29,6 +36,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
+            app.manage(commands::Sessions::default());
             builder.mount_events(app);
             Ok(())
         })

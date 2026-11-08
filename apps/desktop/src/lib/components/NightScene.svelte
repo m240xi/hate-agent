@@ -175,20 +175,20 @@
     // Far ridge silhouette.
     ctx.fillStyle = '#0a0a0e';
     for (let x = 0; x < w; x++) {
-      const y = s.ridge[x];
+      const y = s.ridge[x] ?? s.horizon;
       ctx.fillRect(x, y, 1, s.horizon + 2 - y);
     }
 
     // Pine treeline silhouette — darker, spikier.
     ctx.fillStyle = '#050505';
     for (let x = 0; x < w; x++) {
-      const y = s.trees[x];
+      const y = s.trees[x] ?? s.horizon;
       ctx.fillRect(x, y, 1, s.horizon + 3 - y);
     }
     // A few front tufts one shade up so the line reads as depth.
     ctx.fillStyle = '#0c0c0f';
     for (let x = 0; x < w; x += 13) {
-      const y = s.trees[Math.min(w - 1, x + 3)];
+      const y = s.trees[Math.min(w - 1, x + 3)] ?? s.horizon;
       ctx.fillRect(x + 3, y - 2, 1, 3);
     }
 
@@ -197,7 +197,7 @@
     ctx.fillRect(0, s.horizon + 2, w, L_H - s.horizon - 2);
     ctx.fillStyle = '#0d120c';
     for (let x = 0; x < w; x++) {
-      const g = s.grass[x];
+      const g = s.grass[x] ?? -1;
       if (g >= 0) ctx.fillRect(x, s.horizon + 4 + g, 1, 1);
     }
 

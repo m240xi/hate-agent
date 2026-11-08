@@ -1,0 +1,31 @@
+[package]
+name = "hate-app"
+description = "Tauri shell for hate-agent — thin command/event adapter only"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "hate_app"
+
+[[bin]]
+name = "hate-agent"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+hate-core = { path = "../core" }
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+specta = { version = "=2.0.0-rc.26", features = ["derive"] }
+specta-typescript = "0.0.13"
+tauri = { version = "2", features = [] }
+tauri-specta = { version = "=2.0.0-rc.26", features = ["derive", "typescript"] }
+thiserror = "2"

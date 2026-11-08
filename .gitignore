@@ -1,0 +1,12 @@
+/target
+**/node_modules
+**/dist
+**/dist-ssr
+apps/desktop/src/lib/components/**/fixture*.ts
+apps/desktop/src/bindings.ts
+*.local
+.devin/config.local.json
+.DS_Store
+Thumbs.db
+crates/app/gen
+bench/results/*.tmp

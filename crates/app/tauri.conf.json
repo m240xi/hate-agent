@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "hate-agent",
+  "version": "0.1.0",
+  "identifier": "dev.hateagent.app",
+  "build": {
+    "frontendDist": "../../apps/desktop/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": {
+      "cwd": "../../apps/desktop",
+      "script": "npm run dev"
+    },
+    "beforeBuildCommand": {
+      "cwd": "../../apps/desktop",
+      "script": "npm run build"
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "hate-agent",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 600,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

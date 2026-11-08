@@ -363,7 +363,9 @@
     line-height: 1.6;
   }
   .login-line a {
-    color: var(--accent);
+    color: var(--fg-0);
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   .login-line code {
     font-family: var(--font-mono);

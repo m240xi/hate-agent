@@ -147,7 +147,9 @@
     margin-bottom: 8px;
   }
   .login a {
-    color: var(--accent);
+    color: var(--fg-0);
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   .login code {
     font-family: var(--font-mono);

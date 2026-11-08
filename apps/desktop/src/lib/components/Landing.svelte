@@ -60,7 +60,7 @@
 
 <div class="landing">
   <div class="hero">
-    <div class="wordmark">hate-agent</div>
+    <div class="wordmark">hate-agent<span class="cursor" aria-hidden="true"></span></div>
     <p class="tagline">
       A coding agent that spends fewer tokens per task — small prompt, lazy
       tools, shaped output, verified work.
@@ -106,6 +106,20 @@
     letter-spacing: -0.03em;
     color: var(--fg-0);
     margin-bottom: 10px;
+  }
+  .cursor {
+    display: inline-block;
+    width: 3px;
+    height: 0.85em;
+    margin-left: 3px;
+    vertical-align: -0.08em;
+    background: var(--accent);
+    animation: blink 1.15s steps(1) infinite;
+  }
+  @keyframes blink {
+    50% {
+      opacity: 0;
+    }
   }
   .tagline {
     font-size: 13.5px;

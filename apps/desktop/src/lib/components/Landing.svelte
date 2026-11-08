@@ -92,21 +92,22 @@
     font-size: 16px;
     letter-spacing: 0.02em;
   }
+  /* The scene is always night — text over it stays light in every theme. */
   .version {
-    color: var(--fg-2);
+    color: rgba(240, 238, 233, 0.6);
     margin-bottom: 18px;
   }
   .wordmark {
     font-family: 'Alagard', var(--font-ui);
     font-size: 62px;
     font-weight: 400;
-    color: var(--fg-0);
+    color: #f0eee9;
     margin: 0 0 14px;
     line-height: 1;
     text-shadow: 0 3px 0 rgba(0, 0, 0, 0.9), 0 8px 24px rgba(0, 0, 0, 0.8);
   }
   .tagline {
-    color: var(--fg-1);
+    color: rgba(240, 238, 233, 0.75);
     max-width: 560px;
     margin: 0 auto 30px;
     line-height: 1.5;
@@ -124,7 +125,7 @@
     font-family: 'Alagard', var(--font-ui);
     font-size: 19px;
     letter-spacing: 0.05em;
-    color: var(--fg-0);
+    color: #e9e7e1;
     padding: 12px 38px;
     min-width: 136px;
     background: linear-gradient(#1a1c1f, #121315);
@@ -183,7 +184,7 @@
     position: absolute;
     bottom: 14px;
     left: 18px;
-    color: var(--fg-3);
+    color: rgba(240, 238, 233, 0.45);
     font-size: 14px;
     text-shadow: 0 1px 0 #000;
   }

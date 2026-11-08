@@ -5,6 +5,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
+  import NightScene from './NightScene.svelte';
   import type { AppInfo, NousLoginInfo, ProviderInfo } from '../ipc';
 
   let providers = $state<ProviderInfo[]>([]);
@@ -112,6 +113,8 @@
 </script>
 
 <div class="settings">
+  <NightScene />
+  <div class="settings-scroll">
   <div class="settings-inner">
     <h1 class="page-title">Settings</h1>
 
@@ -273,76 +276,114 @@
       </div>
     </section>
   </div>
+  </div>
 </div>
 
 <style>
+  /* The night scene is the backdrop — same place as the landing.
+     Text that sits directly on it uses fixed light colors so it
+     survives the light theme too; everything else lives on cards. */
   .settings {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+  .settings-scroll {
+    position: relative;
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    background: var(--bg-0);
   }
   .settings-inner {
     max-width: 680px;
     margin: 0 auto;
-    padding: 28px 24px 48px;
+    padding: 30px 24px 72px;
   }
   .page-title {
-    font-size: 20px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
-    color: var(--fg-0);
-    margin: 0 0 22px;
+    font-family: 'Alagard', var(--font-ui);
+    font-size: 34px;
+    font-weight: 400;
+    color: #f0eee9;
+    text-shadow:
+      0 2px 0 rgba(0, 0, 0, 0.9),
+      0 6px 18px rgba(0, 0, 0, 0.8);
+    margin: 0 0 30px;
   }
   .group {
-    margin-bottom: 30px;
+    margin-bottom: 34px;
   }
-  .card {
+  .group-title {
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 14px;
+    color: #efede6;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
+    margin: 0 0 4px;
+  }
+  .group-hint {
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 12px;
+    color: rgba(240, 238, 233, 0.55);
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
+    margin: 0 0 12px;
+    line-height: 1.6;
+  }
+
+  /* Frosted panels floating over the scene. */
+  .card,
+  .provider,
+  .workspace-row {
     background: var(--bg-1);
+    background: color-mix(in srgb, var(--bg-1) 80%, transparent);
+    backdrop-filter: blur(8px);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 14px 16px;
     box-shadow: var(--shadow-sm);
+  }
+  .card {
+    padding: 14px 16px;
+  }
+
+  /* Pixel type for data-dense labels inside the cards. */
+  .provider-name,
+  .provider-meta,
+  .provider-url,
+  .workspace-path,
+  .about-grid dd,
+  .login-line,
+  .login-line code,
+  .key-input {
+    font-family: 'm5x7', var(--font-mono);
   }
   .seg {
     display: inline-flex;
     gap: 4px;
     padding: 3px;
-    background: var(--bg-2);
+    background: rgba(0, 0, 0, 0.35);
     border: 1px solid var(--border);
     border-radius: var(--radius);
   }
   .seg-item {
-    font: inherit;
+    font-family: 'm5x7', var(--font-mono);
     font-size: 12px;
-    font-weight: 600;
-    padding: 6px 18px;
-    border-radius: 7px;
+    padding: 6px 16px;
+    border-radius: 5px;
+    border: 1px solid transparent;
     color: var(--fg-2);
     text-transform: capitalize;
     transition:
       background var(--motion),
-      color var(--motion);
+      color var(--motion),
+      border-color var(--motion);
   }
   .seg-item:hover {
     color: var(--fg-0);
   }
   .seg-item.active {
     background: var(--accent);
+    border-color: var(--accent);
     color: var(--accent-fg);
-    box-shadow: var(--shadow-sm);
-  }
-  .group-title {
-    font-size: 13px;
-    font-weight: 700;
-    color: var(--fg-0);
-    margin: 0 0 4px;
-  }
-  .group-hint {
-    font-size: 12px;
-    color: var(--fg-2);
-    margin: 0 0 12px;
-    line-height: 1.5;
+    box-shadow: 0 2px 0 rgba(0, 0, 0, 0.4);
   }
   .provider-list {
     display: flex;
@@ -350,11 +391,7 @@
     gap: 10px;
   }
   .provider {
-    background: var(--bg-1);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
     padding: 14px 16px;
-    box-shadow: var(--shadow-sm);
   }
   .provider-head {
     display: flex;
@@ -364,12 +401,11 @@
   }
   .provider-name {
     font-size: 14px;
-    font-weight: 700;
     color: var(--fg-0);
   }
   .badge {
+    font-family: 'm5x7', var(--font-mono);
     font-size: 10px;
-    font-weight: 600;
     padding: 2px 8px;
     border-radius: var(--radius-pill);
     background: var(--bg-3);
@@ -382,11 +418,11 @@
     color: var(--accent);
   }
   .provider-meta {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--fg-1);
   }
   .provider-url {
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--fg-3);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -402,12 +438,15 @@
   .key-input {
     flex: 1;
     min-width: 160px;
-    padding: 6px 10px;
+    padding: 7px 10px;
     font-size: 12px;
-    background: var(--bg-0);
+    background: rgba(0, 0, 0, 0.4);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    color: var(--fg-0);
+    color: #f0eee9;
+  }
+  .key-input::placeholder {
+    color: rgba(240, 238, 233, 0.35);
   }
   .key-input:focus {
     outline: none;
@@ -428,7 +467,6 @@
     text-underline-offset: 2px;
   }
   .login-line code {
-    font-family: var(--font-mono);
     background: var(--bg-2);
     padding: 1px 6px;
     border-radius: var(--radius-sm);
@@ -438,9 +476,6 @@
     align-items: center;
     gap: 10px;
     padding: 12px 14px;
-    background: var(--bg-1);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
     color: var(--fg-2);
   }
   .workspace-path {
@@ -453,53 +488,74 @@
   .spacer {
     flex: 1;
   }
+
+  /* Chunky plates — same object language as the landing buttons,
+     sized down for dense rows. Always dark: they're physical
+     buttons, not themed surfaces. */
   .btn {
-    font: inherit;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 6px 12px;
-    border-radius: var(--radius);
-    border: 1px solid var(--border-strong);
-    background: var(--bg-2);
-    color: var(--fg-0);
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 13px;
+    padding: 7px 14px;
+    border-radius: 5px;
+    border: 2px solid #2b2d31;
+    background: linear-gradient(#1a1c1f, #121315);
+    color: #e9e7e1;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
     cursor: pointer;
     transition:
-      background var(--motion),
-      border-color var(--motion);
+      transform var(--motion),
+      border-color var(--motion),
+      box-shadow var(--motion),
+      filter var(--motion);
+    box-shadow:
+      inset 0 2px 0 rgba(255, 255, 255, 0.07),
+      inset 0 -2px 0 rgba(0, 0, 0, 0.55),
+      0 3px 0 #050505,
+      var(--shadow-sm);
   }
   .btn:hover {
-    background: var(--bg-3);
+    border-color: var(--accent-dim);
+    transform: translateY(-1px);
+  }
+  .btn:active {
+    transform: translateY(2px);
+    box-shadow:
+      inset 0 2px 0 rgba(255, 255, 255, 0.05),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+      0 1px 0 #050505,
+      var(--shadow-sm);
   }
   .btn:disabled {
     opacity: 0.45;
     cursor: default;
+    transform: none;
   }
   .btn.primary {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-fg);
+    text-shadow: none;
   }
   .btn.primary:hover {
-    background: var(--accent);
-    filter: brightness(1.08);
+    filter: brightness(1.06);
   }
   .btn.ghost {
-    background: transparent;
-    border-color: var(--border);
-    color: var(--fg-2);
-  }
-  .btn.ghost:hover {
-    color: var(--fg-0);
-    background: var(--bg-2);
+    background: rgba(18, 19, 21, 0.7);
+    border-color: #26282c;
+    color: #b9b6ae;
   }
   .error-text {
+    font-family: 'm5x7', var(--font-mono);
     font-size: 12px;
-    color: var(--err);
+    color: #e08070;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
     margin: 8px 0 0;
   }
   .muted {
+    font-family: 'm5x7', var(--font-mono);
     font-size: 12px;
-    color: var(--fg-3);
+    color: rgba(240, 238, 233, 0.45);
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
   }
   .about-grid {
     display: grid;
@@ -509,10 +565,12 @@
     font-size: 12px;
   }
   .about-grid dt {
+    font-family: 'm5x7', var(--font-mono);
     color: var(--fg-3);
   }
   .about-grid dd {
     margin: 0;
+    font-size: 13px;
     color: var(--fg-1);
   }
   .about-path {

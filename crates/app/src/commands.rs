@@ -187,8 +187,9 @@ pub struct NousLoginInfo {
 pub struct AuthStatus {
     /// Which credential kind is stored.
     pub kind: String,
-    /// Access-token expiry (OAuth), unix seconds.
-    pub expires_at: Option<u64>,
+    /// Access-token expiry (OAuth), unix seconds. `u32` because
+    /// specta-typescript refuses 64-bit ints (JS precision).
+    pub expires_at: Option<u32>,
 }
 
 /// Report the stored credential for a provider (default `nous`).
@@ -200,7 +201,9 @@ pub fn auth_status(provider: Option<String>) -> Result<AuthStatus, String> {
     let status = ctx.status(&name).map_err(|e| e.to_string())?;
     Ok(AuthStatus {
         kind: status.kind.to_string(),
-        expires_at: status.expires_at,
+        expires_at: status
+            .expires_at
+            .map(|e| u32::try_from(e).unwrap_or(u32::MAX)),
     })
 }
 

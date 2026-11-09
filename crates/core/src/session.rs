@@ -23,10 +23,11 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::event::{AgentError, Event};
+use crate::mcp::{MCP_PREFIX, McpHub};
 use crate::persist::{PersistCtx, PersistedSession};
 use crate::provider::{ChatRequest, Delta, Message, Provider, ProviderError, ThinkingLevel};
 use crate::state::SessionState;
-use crate::tools::WorkspaceTools;
+use crate::tools::{ToolOutput, WorkspaceTools};
 use crate::types::{
     CheckpointId, CompactionReason, FailureReason, Outcome, PermissionDecision, PermissionRequest,
     SessionId, TokenUsage, ToolCall, TurnId, TurnOutcome,
@@ -77,9 +78,14 @@ pub struct SessionConfig {
     /// Session persistence; `None` = ephemeral (CLI one-shots, tests).
     pub persist: Option<PersistCtx>,
     /// Workspace tool surface (M2 read tools, M3 mutations + bash).
-    /// `None` = text-only turns — chat sessions and sessions without a
-    /// workspace stay tool-free.
+    /// `None` = no filesystem tools — chat sessions and sessions
+    /// without a workspace stay workspace-tool-free.
     pub tools: Option<Arc<WorkspaceTools>>,
+    /// MCP servers' tool surface. Independent of `tools` — MCP tools
+    /// aren't workspace-bound, so chat sessions get them too when
+    /// servers are configured. Live `configure()` reloads are visible
+    /// from the next turn on.
+    pub mcp: Option<Arc<McpHub>>,
     /// Permission decision router shared with the in-flight turn task.
     pub permissions: Arc<PermissionHub>,
     /// Model context window in tokens; `0` = unknown → compaction
@@ -430,6 +436,7 @@ impl Actor {
         let provider_name = self.cfg.provider_name.clone();
         let thinking = self.cfg.thinking;
         let tools = self.cfg.tools.clone();
+        let mcp = self.cfg.mcp.clone();
         let permissions = self.cfg.permissions.clone();
         let ledger = self.cfg.ledger.clone();
         let context_window = self.cfg.context_window;
@@ -446,6 +453,7 @@ impl Actor {
                 provider_name,
                 thinking,
                 tools,
+                mcp,
                 permissions,
                 cancel,
                 events,
@@ -760,6 +768,53 @@ async fn gate_tool(
     }
 }
 
+/// Which tool surface a call routes to. MCP names are prefixed
+/// `mcp__` so routing is a string check, never ambiguous.
+enum ToolBackend<'a> {
+    /// Filesystem tools bound to the session workspace.
+    Ws(&'a Arc<WorkspaceTools>),
+    /// Tools advertised by configured MCP servers.
+    Mcp(&'a Arc<McpHub>),
+}
+
+impl ToolBackend<'_> {
+    /// Policy gate — `Some` means the call needs user approval.
+    fn gate_reason(&self, call: &ToolCall) -> Option<(String, Option<String>)> {
+        match self {
+            Self::Ws(t) => t.gate_reason(call),
+            Self::Mcp(h) => h.gate_reason(call),
+        }
+    }
+
+    /// Run the call. `cancel` only reaches the MCP side — workspace
+    /// tools manage their own timeouts.
+    async fn execute(&self, call: &ToolCall, cancel: &CancellationToken) -> ToolOutput {
+        match self {
+            Self::Ws(t) => t.execute(call).await,
+            Self::Mcp(h) => h.execute(call, cancel).await,
+        }
+    }
+
+    /// Error-shaped output for policy denials.
+    fn tool_error(&self, msg: String) -> ToolOutput {
+        match self {
+            Self::Ws(t) => t.tool_error(msg),
+            Self::Mcp(h) => h.tool_error(msg),
+        }
+    }
+}
+
+/// Borrow whichever backend exists purely to shape an error output —
+/// used when a call arrives for a backend this session doesn't have.
+fn error_backend<'a>(
+    mcp: Option<&'a Arc<McpHub>>,
+    tools: Option<&'a Arc<WorkspaceTools>>,
+) -> ToolBackend<'a> {
+    mcp.map(ToolBackend::Mcp)
+        .or_else(|| tools.map(ToolBackend::Ws))
+        .expect("error_backend requires at least one tool backend")
+}
+
 /// The per-turn driver. Owns the whole tool-call loop: stream one
 /// provider round, execute any requested tools, feed the results back,
 /// and keep going until the model answers with no calls. Sends exactly
@@ -774,6 +829,7 @@ async fn run_turn(
     provider_name: String,
     thinking: ThinkingLevel,
     tools: Option<Arc<WorkspaceTools>>,
+    mcp: Option<Arc<McpHub>>,
     permissions: Arc<PermissionHub>,
     cancel: CancellationToken,
     events: broadcast::Sender<Event>,
@@ -788,7 +844,10 @@ async fn run_turn(
     const MAX_TOOL_ROUNDS: u32 = 12;
     const MAX_TOOL_CALLS: u32 = 48;
 
-    let specs = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
+    let mut specs = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
+    if let Some(hub) = mcp.as_ref() {
+        specs.extend(hub.specs());
+    }
     let mut total_usage = TokenUsage::default();
     let mut total_cost: Option<f64> = None;
     let mut tool_calls_done = 0u32;
@@ -978,18 +1037,17 @@ async fn run_turn(
             return;
         }
 
-        let Some(tools) = tools.clone() else {
+        if tools.is_none() && mcp.is_none() {
             let _ = done_tx
                 .send(TurnReport::Failed {
-                    error: ProviderError::Stream(format!(
-                        "model requested {} tool call(s) but this session has no tools",
-                        calls.len()
-                    )),
+                    error: ProviderError::Stream(
+                        "model requested tool call(s) but this session has no tools".to_string(),
+                    ),
                     convo: convo.clone(),
                 })
                 .await;
             return;
-        };
+        }
 
         if tool_calls_done > MAX_TOOL_CALLS {
             let _ = done_tx
@@ -1008,22 +1066,37 @@ async fn run_turn(
         // its result, even if the user cancels immediately after.
         for call in calls {
             emit(Event::ToolStarted { call: call.clone() });
-            let out = match tools.gate_reason(&call) {
-                Some((reason, detail)) => {
-                    match gate_tool(&permissions, &cancel, &events, &call, reason, detail).await {
-                        Gate::Run => tools.execute(&call).await,
-                        Gate::Denied(msg) => tools.tool_error(msg),
-                        Gate::Cancelled => {
-                            let _ = done_tx
-                                .send(TurnReport::Cancelled {
-                                    convo: convo.clone(),
-                                })
-                                .await;
-                            return;
+            // `mcp__…` routes to the MCP hub; everything else to the
+            // workspace tools. A call for a backend this session lacks
+            // becomes an honest tool error, not a turn failure.
+            let backend = if call.name.as_str().starts_with(MCP_PREFIX) {
+                mcp.as_ref().map(ToolBackend::Mcp)
+            } else {
+                tools.as_ref().map(ToolBackend::Ws)
+            };
+            let out = match backend {
+                Some(b) => match b.gate_reason(&call) {
+                    Some((reason, detail)) => {
+                        match gate_tool(&permissions, &cancel, &events, &call, reason, detail).await
+                        {
+                            Gate::Run => b.execute(&call, &cancel).await,
+                            Gate::Denied(msg) => b.tool_error(msg),
+                            Gate::Cancelled => {
+                                let _ = done_tx
+                                    .send(TurnReport::Cancelled {
+                                        convo: convo.clone(),
+                                    })
+                                    .await;
+                                return;
+                            }
                         }
                     }
-                }
-                None => tools.execute(&call).await,
+                    None => b.execute(&call, &cancel).await,
+                },
+                None => error_backend(mcp.as_ref(), tools.as_ref()).tool_error(format!(
+                    "unknown tool `{}` for this session",
+                    call.name.as_str()
+                )),
             };
             emit(Event::ToolOutput {
                 call_id: call.id.clone(),

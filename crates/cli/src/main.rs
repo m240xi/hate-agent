@@ -315,6 +315,15 @@ async fn run(
         .and_then(|meta| meta.context_tokens)
         .map_or(0, u64::from);
 
+    // MCP servers from the shared `mcp.json` — same file the desktop
+    // app manages, so `hate run` sees identical tools. Missing file →
+    // empty hub, zero cost.
+    let mcp_path = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("hate-agent")
+        .join("mcp.json");
+    let mcp = std::sync::Arc::new(hate_core::McpHub::from_config_file(&mcp_path).await);
+
     let session = spawn_session(SessionConfig {
         provider,
         model: model.clone(),
@@ -329,6 +338,7 @@ async fn run(
             .and_then(|p| WorkspaceTools::new(p).ok())
             .map(std::sync::Arc::new),
         permissions: std::sync::Arc::new(PermissionHub::default()),
+        mcp: Some(mcp),
         context_window,
     });
 

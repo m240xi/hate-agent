@@ -33,6 +33,8 @@ pub fn run() {
         commands::workspace_set,
         commands::workspace_pick,
         commands::workspace_index,
+        commands::mcp_list,
+        commands::mcp_save,
         commands::sessions_list,
         commands::session_new,
         commands::session_open,
@@ -59,6 +61,17 @@ pub fn run() {
         .setup(move |app| {
             app.manage(commands::Sessions::default());
             app.manage(commands::AuthState::default());
+            // MCP servers connect once at startup; sessions share the
+            // hub so a settings save reaches every session next turn.
+            let mcp = commands::McpState::load();
+            if !mcp.pending.is_empty() {
+                let hub = mcp.hub.clone();
+                let pending = mcp.pending.clone();
+                tauri::async_runtime::spawn(async move {
+                    hub.configure(pending).await;
+                });
+            }
+            app.manage(mcp);
             builder.mount_events(app);
             Ok(())
         })

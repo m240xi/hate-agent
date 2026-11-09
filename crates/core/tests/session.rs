@@ -81,6 +81,7 @@ fn session_with(provider: Arc<dyn Provider>) -> hate_core::SessionHandle {
         persist: None,
         tools: None,
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        mcp: None,
         context_window: 0,
     })
 }
@@ -359,6 +360,7 @@ async fn tool_calls_execute_and_feed_results_back() {
         persist: None,
         tools: Some(tools),
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        mcp: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -470,6 +472,7 @@ async fn gated_tool_waits_for_permission_then_denies() {
         persist: None,
         tools: Some(tools),
         permissions,
+        mcp: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -545,6 +548,7 @@ async fn allow_session_skips_repeat_prompts() {
         persist: None,
         tools: Some(tools),
         permissions: Arc::new(PermissionHub::default()),
+        mcp: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -621,6 +625,7 @@ async fn compaction_bounds_journaled_history() {
         }),
         tools: None,
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        mcp: None,
         // Tiny window → compacts as soon as history reaches the tail+4
         // minimum; the system prompt alone already exceeds 72% of it.
         context_window: 400,
@@ -729,6 +734,7 @@ async fn stale_tool_outputs_elide_next_turn() {
         persist: None,
         tools: Some(tools),
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        mcp: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();

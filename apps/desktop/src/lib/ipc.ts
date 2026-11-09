@@ -183,3 +183,32 @@ export async function sessionDelete(id: string): Promise<void> {
 export async function sessionSaveUi(id: string, uiState: string): Promise<void> {
   return invoke<void>('session_save_ui', { id, uiState });
 }
+
+// ── MCP servers ────────────────────────────────────────────────────────────
+
+export interface McpServerConfig {
+  name: string;
+  kind: 'stdio' | 'http';
+  enabled: boolean;
+  command?: string | null;
+  args: string[];
+  env: Record<string, string>;
+  url?: string | null;
+  headers: Record<string, string>;
+}
+
+export interface McpServerInfo extends McpServerConfig {
+  /** connected | connecting | error | disabled */
+  state: string;
+  tools: number;
+  /** Server name/version from the handshake. */
+  info: string;
+}
+
+export async function mcpList(): Promise<McpServerInfo[]> {
+  return invoke<McpServerInfo[]>('mcp_list');
+}
+
+export async function mcpSave(servers: McpServerConfig[]): Promise<McpServerInfo[]> {
+  return invoke<McpServerInfo[]>('mcp_save', { servers });
+}

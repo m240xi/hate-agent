@@ -13,7 +13,7 @@ use hate_ledger::Ledger;
 use hate_providers::{ProviderKind, ProviderSpec, build, warn_if_unknown};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::sessions_db::{SessionDb, SqliteJournal, StoredSession};
 
@@ -172,6 +172,9 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
     };
 
     let ledger = ledger_handle();
+    // MCP tools are workspace-independent — every session (chat
+    // included) sees whatever servers are currently connected.
+    let mcp = app.state::<McpState>().hub.clone();
     let handle = spawn_session(SessionConfig {
         provider,
         model,
@@ -181,6 +184,7 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         ledger,
         persist,
         tools,
+        mcp: Some(mcp),
         permissions: std::sync::Arc::new(PermissionHub::default()),
         context_window: guard.context_window,
     });
@@ -195,6 +199,40 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
 
     guard.handle = Some(handle.clone());
     Ok(handle)
+}
+
+/// Managed MCP hub + its config file. One hub for the whole app —
+/// sessions share it, so a settings save reaches every session's next
+/// turn without respawning anything.
+pub struct McpState {
+    /// Live server connections + advertised tools.
+    pub hub: std::sync::Arc<hate_core::McpHub>,
+    /// `<data>/hate-agent/mcp.json` — persisted server configs.
+    pub path: std::path::PathBuf,
+    /// Configs loaded at startup, applied by a background `configure`.
+    pub pending: Vec<hate_core::McpServerConfig>,
+}
+
+impl McpState {
+    /// Read `mcp.json` synchronously (cheap, once at startup); the
+    /// actual server connects happen in `setup` on the async runtime.
+    pub fn load() -> Self {
+        let path = mcp_config_path();
+        let pending = hate_core::McpConfigFile::load(&path);
+        Self {
+            hub: std::sync::Arc::new(hate_core::McpHub::new()),
+            path,
+            pending,
+        }
+    }
+}
+
+/// `<data>/hate-agent/mcp.json` — same dir as `sessions.db`/`ledger.db`.
+fn mcp_config_path() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("hate-agent")
+        .join("mcp.json")
 }
 
 /// `<data>/hate-agent/checkpoints/<session-key>` — where per-turn file
@@ -889,4 +927,176 @@ pub fn workspace_index(path: String) -> Result<WorkspaceIndexOut, String> {
     // Core types are serde-only; the app DTOs mirror them for specta.
     serde_json::from_value(serde_json::to_value(&idx).map_err(|e| e.to_string())?)
         .map_err(|e| format!("index shape mismatch: {e}"))
+}
+
+// ── MCP servers ─────────────────────────────────────────────────────────
+
+/// Wire shape for one configured MCP server — mirrors
+/// `hate_core::McpServerConfig` for specta/TS bindings.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct McpServerConfigDto {
+    /// Unique display name → `mcp__<name>__` wire prefix.
+    pub name: String,
+    /// `"stdio"` or `"http"`.
+    pub kind: String,
+    /// Disabled servers stay configured but never connect.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// stdio: executable (`npx`, `uvx`, binary path).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// stdio: arguments after the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// stdio: extra environment on top of inherited vars.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// http: streamable-HTTP endpoint.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// http: headers sent on every request.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One settings row: full config (editable) + live connection state.
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct McpServerInfo {
+    /// Configured name.
+    pub name: String,
+    /// `"stdio"` | `"http"`.
+    pub kind: String,
+    /// Config `enabled` flag.
+    pub enabled: bool,
+    /// stdio: executable.
+    pub command: Option<String>,
+    /// stdio: arguments.
+    pub args: Vec<String>,
+    /// stdio: extra environment.
+    pub env: std::collections::BTreeMap<String, String>,
+    /// http: endpoint.
+    pub url: Option<String>,
+    /// http: headers.
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// `connected` | `connecting` | `error` | `disabled`.
+    pub state: String,
+    /// Tools the server advertised (0 until connected).
+    pub tools: usize,
+    /// Server name/version from the handshake.
+    pub info: String,
+}
+
+/// Merge `hub.configs()` (editable fields) with `hub.status()` (live
+/// state) into settings rows, keyed by name.
+fn mcp_rows(state: &McpState) -> Vec<McpServerInfo> {
+    let status = state.hub.status();
+    state
+        .hub
+        .configs()
+        .into_iter()
+        .map(|c| {
+            let st = status.iter().find(|s| s.name == c.name);
+            McpServerInfo {
+                name: c.name,
+                kind: c.kind,
+                enabled: c.enabled,
+                command: c.command,
+                args: c.args,
+                env: c.env,
+                url: c.url,
+                headers: c.headers,
+                state: st.map_or_else(|| "error".to_string(), |s| s.state.clone()),
+                tools: st.map_or(0, |s| s.tools),
+                info: st.map_or_else(String::new, |s| s.info.clone()),
+            }
+        })
+        .collect()
+}
+
+/// Validate + normalize one DTO into a core config. Names must be
+/// unique-ish (duplicates get suffixed) and each kind needs its
+/// required field — bad rows are rejected, not silently dropped.
+fn validate_mcp_config(
+    dto: &McpServerConfigDto,
+    seen: &mut Vec<String>,
+) -> Result<hate_core::McpServerConfig, String> {
+    let name = dto.name.trim().to_string();
+    if name.is_empty() {
+        return Err("MCP server needs a name".to_string());
+    }
+    if seen.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+        return Err(format!("duplicate MCP server name `{name}`"));
+    }
+    seen.push(name.clone());
+    match dto.kind.as_str() {
+        "stdio" => {
+            let command = dto
+                .command
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .ok_or("stdio server needs a command")?
+                .to_string();
+            Ok(hate_core::McpServerConfig {
+                name,
+                kind: "stdio".to_string(),
+                enabled: dto.enabled,
+                command: Some(command),
+                args: dto.args.clone(),
+                env: dto.env.clone(),
+                url: None,
+                headers: std::collections::BTreeMap::new(),
+            })
+        }
+        "http" => {
+            let url = dto
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                .ok_or("http server needs an http(s) URL")?
+                .to_string();
+            Ok(hate_core::McpServerConfig {
+                name,
+                kind: "http".to_string(),
+                enabled: dto.enabled,
+                command: None,
+                args: Vec::new(),
+                env: std::collections::BTreeMap::new(),
+                url: Some(url),
+                headers: dto.headers.clone(),
+            })
+        }
+        other => Err(format!("unknown MCP kind `{other}` (stdio|http)")),
+    }
+}
+
+/// Configured servers + live connection state for the settings pane.
+#[tauri::command]
+#[specta::specta]
+pub fn mcp_list(state: State<'_, McpState>) -> Vec<McpServerInfo> {
+    mcp_rows(&state)
+}
+
+/// Replace the whole server list: validate → persist `mcp.json` →
+/// reconnect the hub. Existing sessions pick the new tool set up on
+/// their next turn; in-flight turns are untouched.
+#[tauri::command]
+#[specta::specta]
+pub async fn mcp_save(
+    state: State<'_, McpState>,
+    servers: Vec<McpServerConfigDto>,
+) -> Result<Vec<McpServerInfo>, String> {
+    let mut seen = Vec::with_capacity(servers.len());
+    let mut configs = Vec::with_capacity(servers.len());
+    for dto in &servers {
+        configs.push(validate_mcp_config(dto, &mut seen)?);
+    }
+    hate_core::McpHub::save_config(&state.path, &configs)?;
+    state.hub.configure(configs).await;
+    Ok(mcp_rows(&state))
 }

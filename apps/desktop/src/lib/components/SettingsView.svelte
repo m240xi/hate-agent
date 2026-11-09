@@ -5,7 +5,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
-  import type { AppInfo, NousLoginInfo, ProviderInfo } from '../ipc';
+  import type { AppInfo, McpServerConfig, McpServerInfo, NousLoginInfo, ProviderInfo } from '../ipc';
 
   let providers = $state<ProviderInfo[]>([]);
   let appInfo = $state<AppInfo | null>(null);
@@ -30,6 +30,7 @@
     const m = await import('../ipc');
     providers = await m.providersList().catch(() => []);
     appInfo = await m.appInfo().catch(() => null);
+    await loadMcp();
   }
 
   onMount(async () => {
@@ -108,6 +109,146 @@
     if (p.auth_kind === 'oauth') return 'subscription';
     if (p.auth_kind === 'api_key') return 'api key';
     return 'not connected';
+  }
+
+  // ── MCP servers ──────────────────────────────────────────────────────
+  // `mcpRows` is the editable working copy — loaded once, saved as a
+  // whole via `mcp_save` (the backend reconnects the hub atomically).
+  let mcpRows = $state<McpServerInfo[]>([]);
+  let mcpDirty = $state(false);
+  let mcpBusy = $state(false);
+  let mcpError = $state<string | null>(null);
+  let mcpLoaded = $state(false);
+  let mcpOpen = $state<string | null>(null); // row name with editor open
+  let showMcpAdd = $state(false);
+
+  // Add-form drafts.
+  let nfName = $state('');
+  let nfKind = $state<'stdio' | 'http'>('stdio');
+  let nfCommand = $state('');
+  let nfArgs = $state('');
+  let nfEnv = $state('');
+  let nfUrl = $state('');
+  let nfHeaders = $state('');
+
+  // Per-open-editor text drafts for env/headers (KEY=VALUE per line).
+  let editEnv = $state('');
+  let editHeaders = $state('');
+
+  function pairsToText(rec: Record<string, string>): string {
+    return Object.entries(rec)
+      .map(([k, v]) => `${k}=${v}`)
+      .join('\n');
+  }
+
+  function textToPairs(text: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      const eq = t.indexOf('=');
+      if (eq > 0) out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+    }
+    return out;
+  }
+
+  async function loadMcp(): Promise<void> {
+    if (!inTauri || mcpLoaded) return;
+    const m = await import('../ipc');
+    mcpRows = await m.mcpList().catch(() => []);
+    mcpLoaded = true;
+  }
+
+  function openMcpEditor(name: string): void {
+    mcpOpen = mcpOpen === name ? null : name;
+    const row = mcpRows.find((r) => r.name === name);
+    if (row && mcpOpen === name) {
+      editEnv = pairsToText(row.env ?? {});
+      editHeaders = pairsToText(row.headers ?? {});
+    }
+  }
+
+  function addMcpRow(): void {
+    const name = nfName.trim();
+    if (!name) {
+      mcpError = 'server needs a name';
+      return;
+    }
+    if (mcpRows.some((r) => r.name.toLowerCase() === name.toLowerCase())) {
+      mcpError = `duplicate name "${name}"`;
+      return;
+    }
+    const row: McpServerInfo = {
+      name,
+      kind: nfKind,
+      enabled: true,
+      state: 'new',
+      tools: 0,
+      info: '',
+      command: nfKind === 'stdio' ? nfCommand.trim() || null : null,
+      args: nfKind === 'stdio' ? nfArgs.trim().split(/\s+/).filter(Boolean) : [],
+      env: nfKind === 'stdio' ? textToPairs(nfEnv) : {},
+      url: nfKind === 'http' ? nfUrl.trim() || null : null,
+      headers: nfKind === 'http' ? textToPairs(nfHeaders) : {},
+    };
+    mcpRows = [...mcpRows, row];
+    mcpDirty = true;
+    mcpError = null;
+    nfName = nfCommand = nfArgs = nfEnv = nfUrl = nfHeaders = '';
+    showMcpAdd = false;
+  }
+
+  function removeMcpRow(i: number): void {
+    mcpRows = mcpRows.filter((_, j) => j !== i);
+    mcpDirty = true;
+  }
+
+  function mcpKindSwitch(row: McpServerInfo, kind: 'stdio' | 'http'): void {
+    row.kind = kind;
+    // Drop the other transport's fields so stale values can't confuse
+    // the backend validator or the user.
+    if (kind === 'stdio') {
+      row.url = null;
+      row.headers = {};
+    } else {
+      row.command = null;
+      row.args = [];
+      row.env = {};
+    }
+    mcpDirty = true;
+  }
+
+  async function saveMcp(): Promise<void> {
+    mcpBusy = true;
+    mcpError = null;
+    try {
+      const m = await import('../ipc');
+      const configs: McpServerConfig[] = mcpRows.map((r) => ({
+        name: r.name,
+        kind: r.kind as 'stdio' | 'http',
+        enabled: r.enabled,
+        command: r.command ?? null,
+        args: r.args ?? [],
+        env: r.env ?? {},
+        url: r.url ?? null,
+        headers: r.headers ?? {},
+      }));
+      mcpRows = await m.mcpSave(configs);
+      mcpDirty = false;
+      mcpOpen = null;
+    } catch (e) {
+      mcpError = e instanceof Error ? e.message : String(e);
+    } finally {
+      mcpBusy = false;
+    }
+  }
+
+  function mcpStateLabel(row: McpServerInfo): string {
+    if (row.state === 'connected') return `connected · ${row.tools} tool${row.tools === 1 ? '' : 's'}`;
+    if (row.state === 'connecting') return 'connecting…';
+    if (row.state === 'disabled') return 'disabled';
+    if (row.state === 'new') return 'unsaved';
+    return 'error';
   }
 </script>
 
@@ -253,9 +394,243 @@
     <section class="group">
       <h2 class="group-title">MCP servers</h2>
       <p class="group-hint muted">
-        Tool servers (Model Context Protocol) are planned for a later
-        milestone — nothing to configure yet.
+        Model Context Protocol tools — stdio commands and HTTP endpoints.
+        Their tools reach the agent as <code class="mono">mcp__server__tool</code>;
+        anything not marked read-only asks permission, same as bash.
       </p>
+
+      {#if mcpRows.length > 0}
+        <div class="card mcp-list">
+          {#each mcpRows as row, i (row.name)}
+            <div class="mcp-row" class:mcp-off={!row.enabled}>
+              <div class="mcp-head">
+                <span
+                  class="mcp-dot"
+                  class:dot-ok={row.state === 'connected'}
+                  class:dot-busy={row.state === 'connecting'}
+                  class:dot-err={row.state === 'error'}
+                  title={row.state}
+                ></span>
+                <span class="mcp-name mono">{row.name}</span>
+                <span class="mcp-kind">{row.kind}</span>
+                <span
+                  class="mcp-state"
+                  class:state-err={row.state === 'error'}
+                  class:state-ok={row.state === 'connected'}
+                >{mcpStateLabel(row)}</span>
+                <span class="mcp-spacer"></span>
+                <label class="mcp-enable" title="Enabled servers connect at startup and after save">
+                  <input
+                    type="checkbox"
+                    bind:checked={row.enabled}
+                    onchange={() => (mcpDirty = true)}
+                  />
+                  on
+                </label>
+                <button
+                  class="icon-btn"
+                  title={mcpOpen === row.name ? 'Close editor' : 'Edit server'}
+                  onclick={() => openMcpEditor(row.name)}
+                >
+                  <Icon name="edit" size={13} />
+                </button>
+                <button
+                  class="icon-btn danger"
+                  title="Remove server"
+                  onclick={() => removeMcpRow(i)}
+                >
+                  <Icon name="trash" size={13} />
+                </button>
+              </div>
+              <div class="mcp-sub muted mono">
+                {#if row.kind === 'stdio'}
+                  {[row.command, ...(row.args ?? [])].filter(Boolean).join(' ')}
+                {:else}
+                  {row.url}
+                {/if}
+                {#if row.info}<span class="mcp-info"> · {row.info}</span>{/if}
+              </div>
+
+              {#if mcpOpen === row.name}
+                <div class="mcp-editor">
+                  <label class="fld">
+                    <span class="fld-label">Name</span>
+                    <input class="input" bind:value={row.name} oninput={() => (mcpDirty = true)} />
+                  </label>
+                  <div class="fld">
+                    <span class="fld-label">Transport</span>
+                    <div class="seg seg-sm" role="group">
+                      <button
+                        class="seg-item"
+                        class:active={row.kind === 'stdio'}
+                        onclick={() => mcpKindSwitch(row, 'stdio')}
+                      >stdio</button>
+                      <button
+                        class="seg-item"
+                        class:active={row.kind === 'http'}
+                        onclick={() => mcpKindSwitch(row, 'http')}
+                      >http</button>
+                    </div>
+                  </div>
+                  {#if row.kind === 'stdio'}
+                    <label class="fld">
+                      <span class="fld-label">Command</span>
+                      <input
+                        class="input mono"
+                        placeholder="npx"
+                        bind:value={row.command}
+                        oninput={() => (mcpDirty = true)}
+                      />
+                    </label>
+                    <label class="fld">
+                      <span class="fld-label">Args (space-separated)</span>
+                      <input
+                        class="input mono"
+                        placeholder="-y @modelcontextprotocol/server-filesystem ."
+                        value={(row.args ?? []).join(' ')}
+                        oninput={(e) => {
+                          row.args = (e.currentTarget as HTMLInputElement).value
+                            .trim()
+                            .split(/\s+/)
+                            .filter(Boolean);
+                          mcpDirty = true;
+                        }}
+                      />
+                    </label>
+                    <label class="fld">
+                      <span class="fld-label">Env (KEY=VALUE per line)</span>
+                      <textarea
+                        class="input mono"
+                        rows="2"
+                        bind:value={editEnv}
+                        oninput={() => {
+                          row.env = textToPairs(editEnv);
+                          mcpDirty = true;
+                        }}
+                      ></textarea>
+                    </label>
+                  {:else}
+                    <label class="fld">
+                      <span class="fld-label">URL</span>
+                      <input
+                        class="input mono"
+                        placeholder="http://localhost:3002/mcp"
+                        bind:value={row.url}
+                        oninput={() => (mcpDirty = true)}
+                      />
+                    </label>
+                    <label class="fld">
+                      <span class="fld-label">Headers (Name: value per line)</span>
+                      <textarea
+                        class="input mono"
+                        rows="2"
+                        placeholder={"Authorization: Bearer …"}
+                        bind:value={editHeaders}
+                        oninput={() => {
+                          row.headers = Object.fromEntries(
+                            Object.entries(textToPairs(editHeaders)).map(([k, v]) => [
+                              k.replace(/:$/, ''),
+                              v,
+                            ]),
+                          );
+                          mcpDirty = true;
+                        }}
+                      ></textarea>
+                    </label>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {:else if mcpLoaded}
+        <div class="card">
+          <p class="muted mcp-empty">
+            No MCP servers yet — add one below and its tools show up in
+            every session, Chat included.
+          </p>
+        </div>
+      {/if}
+
+      {#if showMcpAdd}
+        <div class="card mcp-add">
+          <div class="mcp-add-grid">
+            <label class="fld">
+              <span class="fld-label">Name</span>
+              <input class="input" placeholder="roblox" bind:value={nfName} />
+            </label>
+            <div class="fld">
+              <span class="fld-label">Transport</span>
+              <div class="seg seg-sm" role="group">
+                <button
+                  class="seg-item"
+                  class:active={nfKind === 'stdio'}
+                  onclick={() => (nfKind = 'stdio')}
+                >stdio</button>
+                <button
+                  class="seg-item"
+                  class:active={nfKind === 'http'}
+                  onclick={() => (nfKind = 'http')}
+                >http</button>
+              </div>
+            </div>
+            {#if nfKind === 'stdio'}
+              <label class="fld">
+                <span class="fld-label">Command</span>
+                <input class="input mono" placeholder="npx" bind:value={nfCommand} />
+              </label>
+              <label class="fld">
+                <span class="fld-label">Args</span>
+                <input
+                  class="input mono"
+                  placeholder="-y @modelcontextprotocol/server-filesystem ."
+                  bind:value={nfArgs}
+                />
+              </label>
+              <label class="fld fld-wide">
+                <span class="fld-label">Env (KEY=VALUE per line)</span>
+                <textarea class="input mono" rows="2" bind:value={nfEnv}></textarea>
+              </label>
+            {:else}
+              <label class="fld fld-wide">
+                <span class="fld-label">URL</span>
+                <input
+                  class="input mono"
+                  placeholder="http://localhost:3002/mcp"
+                  bind:value={nfUrl}
+                />
+              </label>
+              <label class="fld fld-wide">
+                <span class="fld-label">Headers (Name: value per line)</span>
+                <textarea
+                  class="input mono"
+                  rows="2"
+                  placeholder={"Authorization: Bearer …"}
+                  bind:value={nfHeaders}
+                ></textarea>
+              </label>
+            {/if}
+          </div>
+          <div class="mcp-add-actions">
+            <button class="btn primary" onclick={addMcpRow}>Add server</button>
+            <button class="btn ghost" onclick={() => (showMcpAdd = false)}>Cancel</button>
+          </div>
+        </div>
+      {:else}
+        <button class="btn ghost mcp-add-btn" onclick={() => (showMcpAdd = true)}>
+          <Icon name="plus" size={13} /> Add MCP server
+        </button>
+      {/if}
+
+      {#if mcpDirty || mcpError}
+        <div class="mcp-foot">
+          {#if mcpError}<span class="mcp-error">{mcpError}</span>{/if}
+          <button class="btn primary" disabled={mcpBusy || !mcpDirty} onclick={saveMcp}>
+            {mcpBusy ? 'Saving…' : 'Save MCP servers'}
+          </button>
+          {#if !mcpDirty && !mcpBusy}<span class="muted">no unsaved changes</span>{/if}
+        </div>
+      {/if}
     </section>
 
     <section class="group">
@@ -554,5 +929,196 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* ── MCP servers ─────────────────────────────────────────────────── */
+  .mcp-list {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+  }
+  .mcp-row {
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(38, 40, 44, 0.6);
+  }
+  .mcp-row:last-child {
+    border-bottom: none;
+  }
+  .mcp-row.mcp-off {
+    opacity: 0.55;
+  }
+  .mcp-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mcp-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--fg-3);
+    flex: none;
+  }
+  .mcp-dot.dot-ok {
+    background: #4caf7d;
+  }
+  .mcp-dot.dot-busy {
+    background: #d9a441;
+    animation: mcp-pulse 1s ease-in-out infinite;
+  }
+  .mcp-dot.dot-err {
+    background: var(--err, #d95f4e);
+  }
+  @keyframes mcp-pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+  .mcp-name {
+    font-size: 13px;
+    color: var(--fg-1);
+  }
+  .mcp-kind {
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-3);
+    border: 1px solid #26282c;
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+  .mcp-state {
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-3);
+  }
+  .mcp-state.state-ok {
+    color: #4caf7d;
+  }
+  .mcp-state.state-err {
+    color: var(--err, #d95f4e);
+  }
+  .mcp-spacer {
+    flex: 1;
+  }
+  .mcp-enable {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-3);
+    cursor: pointer;
+    user-select: none;
+  }
+  .mcp-sub {
+    margin: 5px 0 0 16px;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mcp-info {
+    color: var(--fg-3);
+  }
+  .mcp-editor {
+    margin: 10px 0 2px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 520px;
+  }
+  .mcp-add {
+    margin-top: 10px;
+  }
+  .mcp-add-grid {
+    display: grid;
+    grid-template-columns: 1fr 130px;
+    gap: 10px 14px;
+    padding: 14px;
+  }
+  .mcp-add-actions {
+    display: flex;
+    gap: 8px;
+    padding: 0 14px 14px;
+  }
+  .mcp-add-btn {
+    margin-top: 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .mcp-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .mcp-error {
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 12px;
+    color: var(--err, #d95f4e);
+  }
+  .mcp-empty {
+    padding: 14px;
+    margin: 0;
+    font-size: 13px;
+  }
+  .fld {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .fld-wide {
+    grid-column: 1 / -1;
+  }
+  .fld-label {
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-3);
+  }
+  .input {
+    background: rgba(18, 19, 21, 0.7);
+    border: 1px solid #26282c;
+    border-radius: 5px;
+    color: var(--fg-1);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 6px 9px;
+    outline: none;
+  }
+  .input:focus {
+    border-color: #3d4148;
+  }
+  .input.mono {
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 12px;
+  }
+  textarea.input {
+    resize: vertical;
+    min-height: 34px;
+  }
+  .seg-sm .seg-item {
+    padding: 3px 10px;
+    font-size: 11px;
+  }
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg-3);
+    cursor: pointer;
+  }
+  .icon-btn:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--fg-1);
+  }
+  .icon-btn.danger:hover {
+    color: var(--err, #d95f4e);
   }
 </style>

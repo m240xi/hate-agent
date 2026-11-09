@@ -26,11 +26,11 @@ use crate::types::{ToolCall, ToolName};
 /// Bytes of formatted output we allow into model context per call.
 /// ~48KB ≈ 12k tokens — enough for a large file view, small enough that
 /// a tool-happy loop can't flood the window.
-const SENT_CAP: usize = 48 * 1024;
+pub(crate) const SENT_CAP: usize = 48 * 1024;
 /// Bytes of *unshaped* output we bother counting exactly. Beyond this
 /// `full_tokens` saturates — the sent count (what actually costs) is
 /// always exact.
-const FULL_COUNT_CAP: usize = 256 * 1024;
+pub(crate) const FULL_COUNT_CAP: usize = 256 * 1024;
 /// Hard caps on collected results before shaping.
 const MAX_LIST_ENTRIES: usize = 500;
 const MAX_GLOB_MATCHES: usize = 200;
@@ -785,7 +785,7 @@ fn segment_match(pat: &str, text: &str) -> bool {
 /// Truncate `text` to `cap` bytes on a char boundary, keeping the head
 /// and tail so both the start (imports, signatures) and end (returns,
 /// errors) of long outputs survive.
-fn shape(text: &str, cap: usize) -> String {
+pub(crate) fn shape(text: &str, cap: usize) -> String {
     if text.len() <= cap {
         return text.to_string();
     }

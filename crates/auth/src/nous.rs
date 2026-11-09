@@ -1,21 +1,3 @@
-//! Nous Portal OAuth: device-code login and refresh-token rotation.
-//!
-//! Wire facts (verified against `hermes-agent` source):
-//! - Device code: `POST {portal}/api/oauth/device/code` (form:
-//!   `client_id`, `scope`).
-//! - Token poll: `POST {portal}/api/oauth/token` (form:
-//!   `grant_type=urn:ietf:params:oauth:grant-type:device_code`,
-//!   `client_id`, `device_code`). `authorization_pending` → keep polling;
-//!   `slow_down` → +1s interval (cap 30s).
-//! - Refresh: `POST {portal}/api/oauth/token` with header
-//!   `x-nous-refresh-token: <rt>` and form `grant_type=refresh_token`.
-//! - Refresh tokens are **single-use**: every response's new
-//!   `refresh_token` is persisted to the store *before* the access token
-//!   is used, or the next refresh revokes the whole session.
-//! - Portal may return `inference_base_url`; it is host-allowlisted
-//!   before use so a compromised/MITM'd response can't redirect bearer
-//!   tokens to an arbitrary host.
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,16 +7,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::store::{AuthError, AuthStore, CredentialBlob, OAuthTokens};
 
-/// Default Portal base (web app + OAuth endpoints).
 pub const DEFAULT_PORTAL_URL: &str = "https://portal.nousresearch.com";
-/// Paid-tier inference endpoint (OpenAI-compatible).
 pub const DEFAULT_INFERENCE_URL: &str = "https://inference-api.nousresearch.com/v1";
-/// Free-tier (`nous/welcome`) inference endpoint.
 pub const DEFAULT_WELCOME_URL: &str = "https://welcome-api.nousresearch.com/v1";
-/// OAuth client id. The Portal does not enforce a secret for the
-/// device-code grant; this identifies the app in its logs.
 pub const CLIENT_ID: &str = "hermes-cli";
-/// Scope requested at device-code time.
 pub const SCOPE: &str = "inference:invoke";
 
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -44,22 +20,13 @@ const EDGE_BACKOFF_CAP_SECS: u64 = 60;
 const REFRESH_SKEW_SECS: u64 = 60;
 const DEFAULT_TOKEN_TTL_SECS: u64 = 3600;
 
-/// What the UI/CLI needs to show the user during device login.
 #[derive(Debug, Clone)]
 pub struct DeviceFlowInfo {
-    /// Code the user types into the Portal page.
     pub user_code: String,
-    /// Page the user opens to approve.
     pub verification_url: String,
-    /// URL with the code pre-filled, when the Portal provides one.
     pub verification_url_complete: Option<String>,
-    /// Seconds until the device code expires.
     pub expires_in: u64,
-    /// Server-suggested poll interval, seconds.
     pub interval: u64,
-    /// Opaque device code carried between begin/complete. Not `pub`:
-    /// callers display the user-facing fields and hand the whole struct
-    /// back to [`PortalAuth::complete_device_flow`].
     device_code: String,
 }
 
@@ -101,22 +68,18 @@ struct OAuthErrorBody {
     error: Option<String>,
 }
 
-/// Portal OAuth client bound to a credential store.
 pub struct PortalAuth {
     http: reqwest::Client,
     portal_base: String,
     store: Arc<dyn AuthStore>,
-    /// Keychain/config key for this provider (`"nous"`).
     provider: String,
 }
 
 impl PortalAuth {
-    /// Client against the production Portal.
     pub fn new(store: Arc<dyn AuthStore>) -> Self {
         Self::with_portal(store, DEFAULT_PORTAL_URL)
     }
 
-    /// Client against a custom Portal base (tests, staging, self-host).
     pub fn with_portal(store: Arc<dyn AuthStore>, portal_base: &str) -> Self {
         Self {
             http: reqwest::Client::builder()
@@ -129,10 +92,6 @@ impl PortalAuth {
         }
     }
 
-    /// Step 1 of device login: ask the Portal for a device code.
-    ///
-    /// # Errors
-    /// [`AuthError::OAuth`] on transport or malformed response.
     pub async fn begin_device_flow(&self) -> Result<DeviceFlowInfo, AuthError> {
         let resp = self
             .http
@@ -164,12 +123,6 @@ impl PortalAuth {
         })
     }
 
-    /// Step 2: poll until the user approves, the code expires, or `cancel`
-    /// fires. On success the token bundle is persisted immediately.
-    ///
-    /// # Errors
-    /// [`AuthError::OAuth`] on protocol failure/expiry,
-    /// [`AuthError::Store`] if persisting fails.
     pub async fn complete_device_flow(
         &self,
         info: &DeviceFlowInfo,
@@ -183,12 +136,6 @@ impl PortalAuth {
         Ok(blob)
     }
 
-    /// Full login: begin + poll + store. Returns the flow info *before*
-    /// polling starts via the `on_info` callback so callers can display
-    /// the user code while the poll runs.
-    ///
-    /// # Errors
-    /// Same as [`Self::begin_device_flow`] + [`Self::complete_device_flow`].
     pub async fn login(
         &self,
         cancel: &CancellationToken,
@@ -199,14 +146,6 @@ impl PortalAuth {
         self.complete_device_flow(&info, cancel).await
     }
 
-    /// Load stored tokens, refreshing when the access token is inside the
-    /// skew window. Rotated refresh tokens are persisted *inside* the
-    /// refresh call before returning — callers must not delay the store.
-    ///
-    /// # Errors
-    /// [`AuthError::NeedsLogin`] when no credential exists or the refresh
-    /// token was rejected; [`AuthError::OAuth`]/[`AuthError::Store`]
-    /// otherwise.
     pub async fn tokens(&self) -> Result<OAuthTokens, AuthError> {
         let blob = self
             .store
@@ -224,11 +163,6 @@ impl PortalAuth {
         self.refresh(&tokens).await
     }
 
-    /// Validated inference base URL: stored override if allowlisted,
-    /// else the paid-tier default.
-    ///
-    /// # Errors
-    /// [`AuthError::OAuth`] if the stored URL fails the allowlist.
     pub fn inference_base_url(&self) -> Result<String, AuthError> {
         match self.store.get(&self.provider)? {
             Some(CredentialBlob::OAuth { tokens }) => match tokens.inference_base_url.as_deref() {
@@ -239,10 +173,6 @@ impl PortalAuth {
         }
     }
 
-    /// Remove stored Nous credentials (logout).
-    ///
-    /// # Errors
-    /// [`AuthError::Store`] on keychain failure.
     pub fn logout(&self) -> Result<(), AuthError> {
         self.store.delete(&self.provider)
     }
@@ -304,7 +234,6 @@ impl PortalAuth {
                 .ok()
                 .and_then(|b| b.error);
 
-            // RFC 8628 pending/slow_down are JSON errors on a 400.
             match error_code.as_deref() {
                 Some("authorization_pending") => {
                     edge_backoff = 0;
@@ -329,8 +258,6 @@ impl PortalAuth {
                 None => {}
             }
 
-            // Edge/WAF mitigation or transient service failure: back off
-            // and keep polling — the user may still be approving.
             if status == 408 || status == 429 || status >= 500 || (status == 403 && mitigated) {
                 edge_backoff = match retry_after {
                     Some(secs) => secs.clamp(1, EDGE_BACKOFF_CAP_SECS),
@@ -350,13 +277,6 @@ impl PortalAuth {
         }
     }
 
-    /// Refresh an expired/expiring access token. On success the rotated
-    /// bundle is written to the store *before* returning — a crash between
-    /// refresh and persist would orphan the session.
-    ///
-    /// # Errors
-    /// [`AuthError::NeedsLogin`] on `invalid_grant` (re-login required);
-    /// [`AuthError::OAuth`] on other failures.
     async fn refresh(&self, tokens: &OAuthTokens) -> Result<OAuthTokens, AuthError> {
         let resp = self
             .http
@@ -373,9 +293,6 @@ impl PortalAuth {
                 .json()
                 .await
                 .map_err(|e| AuthError::OAuth(format!("refresh decode: {e}")))?;
-            // Carry forward fields the refresh response omits — most
-            // importantly the refresh token itself when the Portal does
-            // not rotate it on this call.
             let refreshed = tokens_from_response(&body, Some(tokens));
             let blob = CredentialBlob::OAuth {
                 tokens: refreshed.clone(),
@@ -404,8 +321,6 @@ impl PortalAuth {
                 "Portal temporarily unavailable (HTTP {status})"
             )));
         }
-        // Vercel edge mitigation (403/429 + x-vercel-mitigated) — keep
-        // credentials, tell the caller to retry.
         if matches!(status, 403 | 429) {
             return Err(AuthError::OAuth(format!(
                 "Portal edge challenged refresh (HTTP {status}); retry shortly"
@@ -417,15 +332,11 @@ impl PortalAuth {
     }
 }
 
-/// `CredentialSource` backed by Portal OAuth: bearer prefers the
-/// short-lived `agent_key` when present and unexpired, else the access
-/// token. Refresh happens inside [`PortalAuth::tokens`].
 pub struct NousCredentialSource {
     auth: Arc<PortalAuth>,
 }
 
 impl NousCredentialSource {
-    /// Wrap a shared [`PortalAuth`].
     pub fn new(auth: Arc<PortalAuth>) -> Self {
         Self { auth }
     }
@@ -460,8 +371,6 @@ fn tokens_from_response(body: &TokenResponse, prior: Option<&OAuthTokens>) -> OA
     let now = now_secs();
     OAuthTokens {
         access_token: body.access_token.clone(),
-        // Prefer the rotated token; keep the prior only when the response
-        // omits one (some deployments don't rotate every call).
         refresh_token: body
             .refresh_token
             .clone()
@@ -488,9 +397,6 @@ fn tokens_from_response(body: &TokenResponse, prior: Option<&OAuthTokens>) -> OA
     }
 }
 
-/// Host allowlist for Portal-supplied inference URLs. Permits the Nous
-/// domains plus localhost for development; everything else is rejected
-/// so a hostile token response can't exfiltrate the bearer.
 fn validate_inference_url(url: &str) -> Result<String, AuthError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| AuthError::OAuth(format!("invalid inference_base_url: {e}")))?;
@@ -545,7 +451,6 @@ fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
         .ok()
 }
 
-/// Sleep in ≤1s ticks so cancellation lands within a second.
 async fn cancellable_sleep(dur: Duration, cancel: &CancellationToken) -> Result<(), AuthError> {
     let deadline = Instant::now() + dur;
     loop {

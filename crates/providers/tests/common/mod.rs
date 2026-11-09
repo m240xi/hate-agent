@@ -1,14 +1,6 @@
-//! Shared test helper: a one-shot HTTP/1.1 server on localhost.
-//!
-//! Each test binds an ephemeral port, serves exactly one request with a
-//! canned response, and returns the base URL to point a provider at.
-//! No external test deps — raw `tokio::net` is enough for SSE fixtures.
-
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// Serve `body` once with `status`/`content_type`; returns `http://addr/v1`.
-/// The spawned task ends after one response (or client disconnect).
 pub async fn serve_once(status: u16, content_type: &'static str, body: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -18,8 +10,6 @@ pub async fn serve_once(status: u16, content_type: &'static str, body: &'static 
         let Ok((mut sock, _)) = listener.accept().await else {
             return;
         };
-        // Read request head + declared body so the client sees a clean
-        // response instead of a reset mid-upload.
         let mut buf = Vec::with_capacity(8192);
         let header_end;
         let content_length;
@@ -66,9 +56,7 @@ pub async fn serve_once(status: u16, content_type: &'static str, body: &'static 
     format!("http://{addr}/v1")
 }
 
-/// Serve `body` but never respond — for cancellation tests. Returns the
-/// base URL; the connection is held open until the test runtime ends.
-#[allow(dead_code)] // unused in test crates that never cancel
+#[allow(dead_code)]
 pub async fn serve_hang() -> String {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -79,7 +67,6 @@ pub async fn serve_hang() -> String {
             let Ok((sock, _)) = listener.accept().await else {
                 return;
             };
-            // Hold the socket open without responding.
             tokio::spawn(async move {
                 let _held = sock;
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;

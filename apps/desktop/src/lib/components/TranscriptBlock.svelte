@@ -5,8 +5,6 @@
   import { copyText, fmtTok, turnLabel, usageLabel, usageTitle } from '../format';
   import type { TranscriptBlock } from '../types';
 
-  // Renders one transcript block by kind: user message, assistant text
-  // (streaming-aware), collapsed thinking, or a tool card.
   interface Props {
     block: TranscriptBlock;
   }
@@ -25,8 +23,6 @@
     if (await copyText(block.text ?? '')) flashCopied();
   }
 
-  // Code-block copy buttons live inside `{@html}` output, so one
-  // delegated listener on the message handles all of them.
   async function onMessageClick(e: MouseEvent): Promise<void> {
     const btn = (e.target as HTMLElement | null)?.closest('.copy-code');
     if (!btn) return;
@@ -134,7 +130,6 @@
     border-radius: 3px;
     color: var(--accent);
   }
-  /* Token counts — same quiet register as the tool cards' savings. */
   .usage {
     font-size: 10px;
     color: var(--fg-3);
@@ -181,8 +176,6 @@
     color: var(--fg-0);
     line-height: 1.55;
     min-width: 0;
-    /* Long URLs, paths, and identifiers wrap instead of widening the
-       transcript; code blocks scroll on their own. */
     overflow-wrap: anywhere;
   }
   .assistant-text :global(pre) {
@@ -214,8 +207,6 @@
   .assistant-text :global(.copy-code:hover) {
     color: var(--fg-0);
   }
-  /* Markdown output — `{@html}` content doesn't carry Svelte's scope
-     attribute, so these must be :global. */
   .assistant-text :global(p) {
     margin: 0 0 6px;
   }

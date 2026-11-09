@@ -1,6 +1,4 @@
 <script lang="ts">
-  // Segmented mode switch — sits in the topbar on every non-landing
-  // surface. Home is reached via the wordmark.
   import { session, type AppMode } from '../store.svelte';
   import Icon from './Icon.svelte';
 

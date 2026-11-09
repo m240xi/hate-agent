@@ -1,5 +1,3 @@
-//! Anthropic `/v1/messages` adapter tests over canned SSE.
-
 mod common;
 
 use std::sync::Arc;
@@ -92,7 +90,6 @@ async fn text_usage_and_done() {
             _ => None,
         })
         .expect("usage emitted");
-    // input 10 + cache_read 4 + cache_creation 2
     assert_eq!(usage.input, 16);
     assert_eq!(usage.cached_input, 4);
     assert_eq!(usage.output, 5);
@@ -162,7 +159,6 @@ async fn missing_message_stop_is_error() {
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
         "event: message_delta\n",
         "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
-        // no message_stop, body ends
     );
     let base = common::serve_once(200, "text/event-stream", body).await;
     let provider = AnthropicProvider::new(base, Arc::new(StaticCred("k")));

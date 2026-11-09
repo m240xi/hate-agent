@@ -1,37 +1,20 @@
-//! Session persistence for the desktop app: a SQLite `sessions.db` in the
-//! app data dir. Two writers share each row without clobbering:
-//!
-//! - the session actor (via [`SqliteJournal`]) owns `data` — the
-//!   [`PersistedSession`] JSON with message history and counters;
-//! - the frontend owns `ui_state` — its transcript/draft blob, written
-//!   through `session_save_ui`.
-//!
-//! Connections open per operation; writes are once-per-turn so the cost
-//! is noise next to a provider round-trip.
-
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hate_core::{PersistedSession, SessionJournal, SessionMeta};
 use rusqlite::{Connection, params};
 
-/// What `session_open` returns: list metadata plus both payloads.
 pub struct StoredSession {
-    /// Row metadata (`title`/`model`/`workspace`/`updated_at`).
     pub meta: SessionMeta,
-    /// Actor state to restore; `None` for rows that never ran a turn.
     pub persisted: Option<PersistedSession>,
-    /// Frontend blob, raw JSON text (`None` until first save).
     pub ui_state: Option<String>,
 }
 
-/// Path handle + schema owner for `sessions.db`.
 pub struct SessionDb {
     path: PathBuf,
 }
 
 impl SessionDb {
-    /// Open (creating if needed) the database and ensure the schema.
     pub fn open() -> Result<Self, String> {
         let dir = dirs::data_dir()
             .unwrap_or_else(std::env::temp_dir)
@@ -67,8 +50,6 @@ impl SessionDb {
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
     }
 
-    /// Insert an empty row so the session appears in lists before its
-    /// first turn. `INSERT OR IGNORE` keeps re-opens idempotent.
     pub fn create(&self, key: &str, mode: &str) -> Result<(), String> {
         self.conn()?
             .execute(
@@ -80,7 +61,6 @@ impl SessionDb {
         Ok(())
     }
 
-    /// Full row read for `session_open`.
     pub fn load(&self, key: &str) -> Result<Option<StoredSession>, String> {
         let conn = self.conn()?;
         let mut stmt = conn
@@ -123,7 +103,6 @@ impl SessionDb {
         }))
     }
 
-    /// Metadata rows for the session browser, newest first.
     pub fn list(&self, mode: Option<&str>) -> Result<Vec<SessionMeta>, String> {
         let conn = self.conn()?;
         let sql = "SELECT id, mode, title, provider, model, workspace, updated_at
@@ -151,7 +130,6 @@ impl SessionDb {
         Ok(out)
     }
 
-    /// Persist the frontend's UI blob (transcript/draft/etc).
     pub fn save_ui(&self, key: &str, ui_state: &str) -> Result<(), String> {
         self.conn()?
             .execute(
@@ -170,7 +148,6 @@ impl SessionDb {
     }
 }
 
-/// Fixed column order shared by both `list` queries.
 fn meta_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     Ok(SessionMeta {
         id: r.get(0)?,
@@ -183,7 +160,6 @@ fn meta_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     })
 }
 
-/// [`SessionJournal`] over [`SessionDb`] — the actor's save sink.
 pub struct SqliteJournal {
     db: SessionDb,
 }
@@ -229,8 +205,6 @@ impl SessionJournal for SqliteJournal {
                 )
                 .map_err(|e| e.to_string())?;
             if updated == 0 {
-                // Row missing (shouldn't happen — session_new inserts) —
-                // create it rather than drop the history.
                 conn.execute(
                     "INSERT INTO sessions (id, mode, title, provider, model, workspace,
                         updated_at, data) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",

@@ -1,17 +1,3 @@
-//! Dynamic skills: markdown knowledge files the agent authors itself.
-//!
-//! A skill is a small markdown document with frontmatter (name, title,
-//! trigger keywords) stored under `<config>/hate-agent/skills/`. The
-//! session prompt carries a compact *index* of every skill plus the
-//! full body of any skill whose triggers match the workspace signals;
-//! the model can pull the rest on demand via `skill_view` and author
-//! new ones via `skill_save`. A background reflection pass can also
-//! write one automatically after enough conversation.
-//!
-//! Token discipline: the index is one line per skill (bounded count),
-//! inlined bodies are byte-capped, and nothing is injected unless it
-//! matches — an empty skill library costs ~40 tokens of guidance.
-
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -23,41 +9,26 @@ use crate::provider::ToolSpec;
 use crate::tools::{SENT_CAP, ToolOutput, shape};
 use crate::types::ToolCall;
 
-/// Skills included in the index, max.
 const MAX_INDEX: usize = 40;
-/// Bytes of matched skill bodies inlined into the prompt.
 const MAX_INLINE_BYTES: usize = 6 * 1024;
-/// Matched skills inlined, max.
 const MAX_INLINE_SKILLS: usize = 2;
-/// Stored skill body cap — a skill bigger than this is a document, not
-/// a prompt injection.
 pub const MAX_SKILL_BYTES: usize = 16 * 1024;
-/// Minimum body length a reflection result must have to be saved —
-/// guards against the model emitting a two-line non-skill.
 pub const MIN_SKILL_BYTES: usize = 200;
 
-/// One learned skill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
-    /// Slug used as filename stem (`roblox-luau`).
     pub name: String,
-    /// Human title (`Roblox Luau Development`).
     pub title: String,
-    /// Lowercase trigger keywords matched against workspace signals.
     pub triggers: Vec<String>,
-    /// Unix seconds of last write.
     pub updated: u64,
-    /// Markdown body (no frontmatter).
     pub body: String,
 }
 
 impl Skill {
-    /// Whether any trigger matches `signals` (both lowercase).
     pub fn matches(&self, signals: &[String]) -> bool {
         self.triggers.iter().any(|t| signals.iter().any(|s| s == t))
     }
 
-    /// One-line index entry for the prompt.
     fn index_line(&self) -> String {
         if self.triggers.is_empty() {
             format!("- {} — {}", self.name, self.title)
@@ -83,9 +54,6 @@ impl Skill {
         out
     }
 
-    /// Parse a skill file. Tolerant: unknown keys ignored, missing
-    /// title falls back to the name, a body without frontmatter still
-    /// loads (name from the filename).
     fn parse(name: &str, text: &str) -> Skill {
         let mut title = name.replace('-', " ");
         let mut triggers: Vec<String> = Vec::new();
@@ -132,16 +100,12 @@ impl Skill {
     }
 }
 
-/// Directory-backed skill library. All operations hit disk — the file
-/// count is tiny and disk stays the single source of truth (the app
-/// and CLI may both write).
 pub struct SkillStore {
     dir: PathBuf,
     counter: O200kCounter,
 }
 
 impl SkillStore {
-    /// Bind to `dir` (created lazily on first save).
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
@@ -149,17 +113,14 @@ impl SkillStore {
         }
     }
 
-    /// Default location: `<config>/hate-agent/skills`.
     pub fn default_dir() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("hate-agent").join("skills"))
     }
 
-    /// The directory this store writes to.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    /// All skills, sorted by name. Unreadable files are skipped.
     pub fn load(&self) -> Vec<Skill> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return Vec::new();
@@ -182,18 +143,12 @@ impl SkillStore {
         out
     }
 
-    /// One skill by slug.
     pub fn get(&self, name: &str) -> Option<Skill> {
         let path = self.dir.join(format!("{name}.md"));
         let text = std::fs::read_to_string(path).ok()?;
         Some(Skill::parse(name, &text))
     }
 
-    /// Write a skill. Name is slugged and sanitized — it can never
-    /// escape the skills directory.
-    ///
-    /// # Errors
-    /// `Err` with the io message on write failure or an empty name.
     pub fn save(&self, skill: &Skill) -> Result<Skill, String> {
         let name = slugify(&skill.name);
         if name.is_empty() {
@@ -212,10 +167,6 @@ impl SkillStore {
         Ok(skill)
     }
 
-    /// Remove a skill. Returns whether a file was deleted.
-    ///
-    /// # Errors
-    /// `Err` on io failure other than not-found.
     pub fn delete(&self, name: &str) -> Result<bool, String> {
         let path = self.dir.join(format!("{}.md", slugify(name)));
         match std::fs::remove_file(&path) {
@@ -225,9 +176,6 @@ impl SkillStore {
         }
     }
 
-    /// The prompt section: index + bodies of skills matching `signals`.
-    /// `None` only when the store is unusable (never — an empty index
-    /// still advertises `skill_save`).
     pub fn render_prompt(&self, signals: &[String]) -> String {
         let skills = self.load();
         let mut out = String::with_capacity(2048);
@@ -267,7 +215,6 @@ impl SkillStore {
         out
     }
 
-    /// Advertised schemas for the two skill tools.
     pub fn specs(&self) -> Vec<ToolSpec> {
         vec![
             spec(
@@ -300,8 +247,6 @@ impl SkillStore {
         ]
     }
 
-    /// Execute one skill call. Never fails the turn — errors are
-    /// `ok: false` tool content.
     pub fn execute(&self, call: &ToolCall) -> ToolOutput {
         let result = match call.name.as_str() {
             "skill_view" => self.view(call),
@@ -311,8 +256,6 @@ impl SkillStore {
         self.output_for(result)
     }
 
-    /// Error-shaped output for calls denied by policy — same accounting
-    /// path as real results.
     pub fn tool_error(&self, msg: String) -> ToolOutput {
         self.output_for(Err(msg))
     }
@@ -396,8 +339,6 @@ impl SkillStore {
     }
 }
 
-/// Slug a skill name: lowercase alphanumerics and single dashes. Used
-/// for filenames, so it is the traversal guard.
 pub fn slugify(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut dash = false;
@@ -416,12 +357,9 @@ pub fn slugify(s: &str) -> String {
     out
 }
 
-/// Domain signals from a workspace: bounded walk collecting file
-/// extensions and known config filenames, mapped to lowercase tokens.
 pub fn workspace_signals(root: &Path) -> Vec<String> {
     const MAX_ENTRIES: usize = 3000;
     const MAX_DEPTH: usize = 3;
-    /// Extension → tokens.
     const EXT_TOKENS: &[(&str, &[&str])] = &[
         ("lua", &["lua", "roblox"]),
         ("luau", &["luau", "roblox"]),
@@ -447,7 +385,6 @@ pub fn workspace_signals(root: &Path) -> Vec<String> {
         ("sql", &["sql"]),
         ("sh", &["shell"]),
     ];
-    /// Exact filenames → tokens.
     const FILE_TOKENS: &[(&str, &[&str])] = &[
         ("Cargo.toml", &["rust", "cargo"]),
         ("tauri.conf.json", &["tauri"]),
@@ -505,7 +442,6 @@ pub fn workspace_signals(root: &Path) -> Vec<String> {
     tokens.into_iter().collect()
 }
 
-/// Keyword tokens from free text — lowercase words of 3+ chars.
 pub fn text_signals(text: &str) -> Vec<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     let mut word = String::new();
@@ -529,7 +465,6 @@ pub fn text_signals(text: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
-/// System prompt for the background reflection call.
 pub const REFLECTION_SYSTEM: &str = "\
 You write compact skill files for an AI coding agent. Given a digest of a \
 session, produce a durable skill capturing what was actually used: commands, \
@@ -540,7 +475,6 @@ TRIGGERS: <comma-separated lowercase keywords for matching future workspaces>\n\
 <body>\n\
 The body is markdown, 40-120 lines.";
 
-/// Parse a reflection result into `(title, triggers, body)`.
 pub fn parse_reflection(text: &str) -> Option<(String, Vec<String>, String)> {
     let mut title = None;
     let mut triggers = Vec::new();
@@ -549,8 +483,6 @@ pub fn parse_reflection(text: &str) -> Option<(String, Vec<String>, String)> {
     for line in text.lines() {
         let trimmed = line.trim();
         let upper = trimmed.to_ascii_uppercase();
-        // `to_ascii_uppercase` preserves byte length, so fixed offsets
-        // into the original line stay valid.
         if upper.starts_with("TITLE:") {
             title = Some(trimmed[6..].trim().to_string());
         } else if upper.starts_with("TRIGGERS:") {
@@ -573,8 +505,6 @@ pub fn parse_reflection(text: &str) -> Option<(String, Vec<String>, String)> {
     Some((title, triggers, body))
 }
 
-/// Compact digest of a session for the reflection call: the user's
-/// asks, tools used, and detected signals.
 pub fn build_digest(messages: &[crate::provider::Message], signals: &[String]) -> String {
     let mut user_lines: Vec<String> = Vec::new();
     let mut tools: BTreeSet<String> = BTreeSet::new();
@@ -620,7 +550,6 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out.replace('\n', " ")
 }
 
-/// Unix seconds — shared with the session's reflection pass.
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -701,7 +630,6 @@ mod tests {
         assert!(prompt.contains("- roblox-luau — roblox-luau skill"));
         assert!(prompt.contains("### Skill: roblox-luau skill"));
         assert!(!prompt.contains("### Skill: rust-tauri skill"));
-        // Index always lists both; only the match is inlined.
         assert!(prompt.contains("- rust-tauri — rust-tauri skill"));
         let _ = std::fs::remove_dir_all(&dir);
     }

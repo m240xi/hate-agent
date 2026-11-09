@@ -1,9 +1,3 @@
-//! Retry policy: 3 attempts, exponential backoff + jitter, only on
-//! transient failures (429/5xx/connect). Once *any* delta has been
-//! yielded the stream is committed — retrying mid-response would
-//! duplicate text, so later errors surface immediately; retries are
-//! bounded, never unbounded.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,14 +8,10 @@ use tracing::warn;
 
 use hate_core::provider::{ChatRequest, Delta, Provider, ProviderError};
 
-/// Total attempts per request (initial try + retries).
 const MAX_ATTEMPTS: u32 = 3;
-/// First backoff step; doubles each attempt, capped at 8s.
 const BASE_DELAY: Duration = Duration::from_millis(400);
 const MAX_DELAY: Duration = Duration::from_secs(8);
 
-/// Whether an error is worth retrying. Auth, decode, and cancel are
-/// never retried; 429/5xx/network are.
 fn retriable(e: &ProviderError) -> bool {
     match e {
         ProviderError::Network(_) => true,
@@ -33,8 +23,6 @@ fn retriable(e: &ProviderError) -> bool {
     }
 }
 
-/// Backoff for attempt `n` (1-based): `BASE * 2^(n-1)` + up to 25% jitter,
-/// honoring a server `Retry-After` when the error carried one.
 fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
     if let Some(d) = retry_after {
         return d.min(MAX_DELAY);
@@ -44,14 +32,11 @@ fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
     exp.saturating_add(jitter).min(MAX_DELAY)
 }
 
-/// Wrap any provider so every `stream()` call gets the retry policy.
-/// Cheap to construct; the inner provider is shared.
 pub struct RetryingProvider {
     inner: Arc<dyn Provider>,
 }
 
 impl RetryingProvider {
-    /// Wrap `inner` with the standard retry policy.
     pub fn new(inner: Arc<dyn Provider>) -> Self {
         Self { inner }
     }
@@ -68,8 +53,6 @@ impl Provider for RetryingProvider {
 
         tokio::spawn(async move {
             let mut attempt: u32 = 0;
-            // Once any Ok(delta) is forwarded the response is committed —
-            // a later failure must surface, not restart.
             let mut committed = false;
 
             loop {
@@ -83,7 +66,7 @@ impl Provider for RetryingProvider {
                             committed = true;
                             let is_done = matches!(delta, Delta::Done);
                             if tx.send(Ok(delta)).await.is_err() {
-                                return; // consumer gone
+                                return;
                             }
                             if is_done {
                                 return;
@@ -97,7 +80,7 @@ impl Provider for RetryingProvider {
                 }
 
                 let Some(err) = failure else {
-                    return; // clean end without Done — inner's contract issue, pass through
+                    return;
                 };
 
                 if committed || attempt >= MAX_ATTEMPTS || !retriable(&err) {

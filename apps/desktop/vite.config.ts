@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
-// Tauri dev expects a fixed port and no auto-clear so cargo output stays visible.
 export default defineConfig({
   plugins: [svelte()],
   clearScreen: false,

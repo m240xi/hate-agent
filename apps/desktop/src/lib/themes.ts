@@ -1,11 +1,7 @@
-// Theme registry — ids match `data-theme` values in app.css. The
-// preview colors are approximations of each palette's bg-1/accent/fg-0
-// for the Settings picker chips; keep them in sync when tuning themes.
 export interface ThemeMeta {
   id: string;
   label: string;
   hint: string;
-  /** Preview swatch colors. */
   bg: string;
   accent: string;
   fg: string;

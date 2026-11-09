@@ -18,7 +18,6 @@
     return String(n);
   }
 
-  // Session clock — ticks only while a session is live.
   let now = $state(Date.now());
   $effect(() => {
     if (session.sessionBeganAt === null) return;
@@ -44,9 +43,6 @@
     session.sessionTotals.input + session.sessionTotals.output,
   );
 
-  // Task inspector: plan steps, live token/cost meter against the model's
-  // real context window, session stats, checkpoints, changed files.
-  // Pure consumer of SessionStore.
 </script>
 
 <div class="inspector">
@@ -283,7 +279,6 @@
   }
   .cp-at {
     font-size: 10px;
-    /* The timestamp gives way before the rewind button does. */
     flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;

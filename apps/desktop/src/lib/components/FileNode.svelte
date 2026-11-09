@@ -4,8 +4,6 @@
   import FileNode from './FileNode.svelte';
   import type { FileNode as FileNodeData } from '../types';
 
-  // Recursive file tree node with git status dots. Click selects; the
-  // editor surface is not built yet.
   interface Props {
     node: FileNodeData;
     depth?: number;
@@ -13,7 +11,6 @@
 
   let { node, depth = 0 }: Props = $props();
 
-  // Uncontrolled open state: shallow dirs start open, user toggles win.
   let openOverride = $state<boolean | null>(null);
   const open = $derived(openOverride ?? depth < 2);
   const selected = $derived(session.selectedPath === node.path);

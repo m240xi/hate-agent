@@ -1,10 +1,3 @@
-// Minimal safe markdown → HTML for assistant messages. The input is
-// HTML-escaped *before* any markdown transform runs, so the only tags
-// in the output are ones this file emits — `{@html}` can't be abused
-// by model output. Covers what chat models actually emit: fenced +
-// inline code, bold/italic/strike, headings, lists, quotes, links,
-// rules, and paragraphs.
-
 const ESCAPES: Record<string, string> = {
   '&': '&amp;',
   '<': '&lt;',
@@ -16,18 +9,13 @@ function esc(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ESCAPES[c] ?? c);
 }
 
-/** Only web-safe link targets — `javascript:`/`data:` never render. */
 function safeHref(url: string): string | null {
   const u = url.trim();
   if (/^(https?:\/\/|mailto:|\/|#)/i.test(u)) return u;
-  // Relative paths without a scheme are fine too.
   if (!/^[a-z][a-z0-9+.-]*:/i.test(u)) return u;
   return null;
 }
 
-/** Inline formatting on already-escaped text. Code spans are split
- *  out FIRST — their contents are literal, so `**` inside backticks
- *  must never become a tag. */
 function inline(text: string): string {
   const parts = text.split(/(`[^`\n]+`)/g);
   return parts
@@ -46,8 +34,6 @@ function formatInline(s: string): string {
   s = s.replace(
     /\[([^\]]+)\]\(([^)\s]+)\)/g,
     (m, label: string, url: string) => {
-      // `url` comes from already-escaped text — emit it verbatim or the
-      // `&` in query strings would double-escape.
       const href = safeHref(url);
       return href
         ? `<a href="${href}" target="_blank" rel="noopener">${label}</a>`
@@ -69,8 +55,6 @@ function renderBlocks(md: string): string {
   while (i < lines.length) {
     const line = lines[i] ?? '';
 
-    // Fenced code block — content verbatim (already safe: we escape on
-    // output, not input, so nothing inside can become a tag).
     const fence = line.match(/^```(\w*)\s*$/);
     if (fence) {
       const buf: string[] = [];
@@ -79,10 +63,8 @@ function renderBlocks(md: string): string {
         buf.push(lines[i] ?? '');
         i++;
       }
-      i++; // closing fence (or EOF)
+      i++;
       const lang = fence[1] ? ` class="lang-${esc(fence[1])}"` : '';
-      // The button is inert markup; TranscriptBlock handles the click
-      // by delegation and copies the sibling <code> text.
       out.push(
         `<pre><button type="button" class="copy-code" aria-label="Copy code">copy</button><code${lang}>${esc(buf.join('\n'))}</code></pre>`,
       );
@@ -94,23 +76,20 @@ function renderBlocks(md: string): string {
       continue;
     }
 
-    // Heading.
     const h = line.match(/^(#{1,6})\s+(.*)$/);
     if (h) {
-      const level = Math.min(h[1]?.length ?? 1, 4); // cap visual weight
+      const level = Math.min(h[1]?.length ?? 1, 4);
       out.push(`<h${level}>${inline(esc(h[2] ?? ''))}</h${level}>`);
       i++;
       continue;
     }
 
-    // Horizontal rule.
     if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
       out.push('<hr>');
       i++;
       continue;
     }
 
-    // Blockquote — consecutive `>` lines group into one quote.
     if (/^\s*>/.test(line)) {
       const buf: string[] = [];
       while (i < lines.length && /^\s*>/.test(lines[i] ?? '')) {
@@ -121,7 +100,6 @@ function renderBlocks(md: string): string {
       continue;
     }
 
-    // Lists — consecutive `-`/`*`/`+` or `1.` items group together.
     const ulItem = line.match(/^\s*[-*+]\s+(.*)$/);
     const olItem = line.match(/^\s*\d+[.)]\s+(.*)$/);
     if (ulItem || olItem) {
@@ -139,7 +117,6 @@ function renderBlocks(md: string): string {
       continue;
     }
 
-    // Paragraph — gather until blank line or a block starter.
     const buf: string[] = [];
     while (
       i < lines.length &&
@@ -160,7 +137,6 @@ function renderBlocks(md: string): string {
   return out.join('');
 }
 
-/** Render markdown to safe HTML. Empty input → empty string. */
 export function renderMarkdown(md: string): string {
   if (!md.trim()) return '';
   return renderBlocks(md);

@@ -4,9 +4,6 @@
   import Icon from './Icon.svelte';
   import type { ThinkingLevel } from '../ipc';
 
-  // Thinking-level picker. Options the selected model's catalog entry
-  // doesn't list are disabled (effort vocabularies differ per model —
-  // e.g. kimi-k3 accepts max/high/low, no medium).
   const OPTIONS: { value: ThinkingLevel; label: string; hint: string }[] = [
     { value: 'off', label: 'auto', hint: 'provider default effort' },
     { value: 'low', label: 'low', hint: 'light reasoning' },
@@ -14,8 +11,6 @@
     { value: 'high', label: 'high', hint: 'full reasoning budget' },
   ];
 
-  /** Our UI levels → effort strings a catalog may list. `off` always
-   *  allowed: it omits the field and lets the provider decide. */
   const LEVEL_EFFORTS: Record<Exclude<ThinkingLevel, 'off'>, string[]> = {
     low: ['low', 'minimal'],
     medium: ['medium'],

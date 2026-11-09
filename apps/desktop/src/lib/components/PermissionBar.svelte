@@ -2,8 +2,6 @@
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
 
-  // Inline permission bar above the composer — exact command/diff plus
-  // Run / Run & remember / Deny. Never a modal, never confirm().
   const req = $derived(session.pendingPermission);
 
   const detail = $derived.by(() => {

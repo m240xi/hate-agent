@@ -1,15 +1,11 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
 
-  // Generic upward-opening popover: trigger button + floating panel.
-  // Closes on Esc, outside click, or when the panel calls `close()`.
   interface Props {
     trigger: Snippet;
     panel: Snippet<[{ close: () => void }]>;
-    /** Called whenever the panel opens/closes (for focus/interval needs). */
     onOpenChange?: (open: boolean) => void;
     align?: 'left' | 'right';
-    /** Panel width (px or css length). Height stays content-driven. */
     width?: string;
   }
 

@@ -1,7 +1,3 @@
-// TypeScript mirror of hate-core's Event enum (crates/core/src/event.rs).
-// Serde emits `{"type": "<snake_case variant>", ...fields}` — keep this file
-// in sync; the Rust enum is the source of truth.
-
 export interface TokenUsage {
   input: number;
   cached_input: number;
@@ -30,7 +26,6 @@ export interface TurnOutcome {
   cost_usd: number | null;
 }
 
-// Serde's default externally-tagged enum shape: {"Provider": {…}}.
 export type FailureReason =
   | { LimitExceeded: { limit: string; value: number } }
   | { Provider: { message: string } }
@@ -55,8 +50,6 @@ export type SessionEvent =
   | { type: 'awaiting_user'; prompt: string }
   | { type: 'done'; outcome: string };
 
-// ── UI view models ────────────────────────────────────────────────────────
-
 export interface TranscriptBlock {
   id: number;
   kind: 'user' | 'text' | 'thinking' | 'tool' | 'error';
@@ -68,20 +61,11 @@ export interface TranscriptBlock {
   sentTokens?: number;
   preview?: string;
   expanded?: boolean;
-  /** Usage of the provider request that produced this block (assistant
-   *  text, thinking, or — for a tool-only request — its first tool card). */
   usage?: TokenUsage;
-  /** `thinking` blocks: reasoning tokens for this request. */
   thinkingTokens?: number;
-  /** True when `thinkingTokens` is a local count because the provider
-   *  bills thinking inside output instead of reporting it. */
   thinkingEstimated?: boolean;
-  /** `user` blocks: whole-turn rollup, filled when the turn completes. */
   turn?: TurnSummary;
-  /** `user` blocks: this message was sent as a plan-mode turn. */
   plan?: boolean;
-  /** `text` blocks: written by the app (command feedback, notices),
-   *  not by the model. */
   local?: boolean;
 }
 

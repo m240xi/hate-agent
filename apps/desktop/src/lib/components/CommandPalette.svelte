@@ -4,8 +4,6 @@
   import { THEMES } from '../themes';
   import Icon from './Icon.svelte';
 
-  // `/` command palette. Only commands that do real work today are
-  // enabled; backend-dependent ones render disabled with a reason.
   interface Props {
     onclose: () => void;
   }

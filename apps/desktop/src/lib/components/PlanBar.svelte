@@ -2,9 +2,6 @@
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
 
-  // Inline bar above the composer when a plan turn produced steps:
-  // approve and run, keep planning, or drop it. Same shape as the
-  // permission bar — never a modal.
   const steps = $derived(session.plan.length);
 </script>
 

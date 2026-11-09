@@ -1,14 +1,3 @@
-//! MCP client: connect to Model Context Protocol servers — stdio child
-//! processes (the dominant deployment: `npx`, `uvx`, plugins) and
-//! streamable-HTTP endpoints (hosted/localhost bridges like the Roblox
-//! Studio MCP) — and expose their tools to the session beside the
-//! workspace tools.
-//!
-//! Wire names are namespaced `mcp__<server>__<tool>` so they can never
-//! collide with built-ins. Results go through the same shaping/token
-//! accounting as workspace tools, and non-read-only calls pass the same
-//! permission gate as `bash`/`write_file`.
-
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -29,51 +18,29 @@ use crate::provider::ToolSpec;
 use crate::tools::{FULL_COUNT_CAP, SENT_CAP, ToolOutput, shape};
 use crate::types::{ToolCall, ToolName};
 
-/// Wire-name prefix for every MCP tool — also the session's routing key.
 pub const MCP_PREFIX: &str = "mcp__";
-/// Per-call ceiling; Studio-style bridges can be slow but not forever.
 const CALL_TIMEOUT: Duration = Duration::from_secs(180);
-/// Handshake + `tools/list` ceiling per server at (re)configure time.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-/// Cap on servers connected concurrently during configure.
 const MAX_SERVERS: usize = 16;
-/// Cap on tools taken from one server — a pathological server can't
-/// flood the provider's tool list.
 const MAX_TOOLS_PER_SERVER: usize = 48;
-/// Tool-description budget: one line, hard cap. MCP servers (Roblox's
-/// included) ship multi-paragraph docs with examples — the model only
-/// needs enough to pick the tool and fill args.
 const DESC_CHARS: usize = 220;
-/// Cap on `description`/`title` strings *inside* input schemas.
 const SCHEMA_TEXT_CHARS: usize = 140;
-/// Serialized input-schema budget per tool. Enums and structure are
-/// the call contract and survive; prose gets cut first.
 const SCHEMA_BYTES: usize = 4096;
 
-/// One configured MCP server. Flat shape keeps the settings form and
-/// the JSON file identical; `kind` selects which fields are meaningful.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
-    /// Unique display name — becomes the `mcp__<name>__` wire prefix.
     pub name: String,
-    /// `"stdio"` or `"http"`.
     pub kind: String,
-    /// Disabled servers stay in config but never connect.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// stdio: executable (`npx`, `uvx`, a binary path).
     #[serde(default)]
     pub command: Option<String>,
-    /// stdio: arguments after the command.
     #[serde(default)]
     pub args: Vec<String>,
-    /// stdio: extra environment (`PATH` etc. inherited regardless).
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// http: streamable-HTTP endpoint (`http://localhost:3002/mcp`).
     #[serde(default)]
     pub url: Option<String>,
-    /// http: headers sent on every request (`Authorization: Bearer …`).
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
 }
@@ -82,18 +49,13 @@ const fn default_enabled() -> bool {
     true
 }
 
-/// On-disk shape: just the server list.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct McpConfigFile {
-    /// Configured servers, in display order.
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
 }
 
 impl McpConfigFile {
-    /// Read `path` → server configs. Missing file → empty; unreadable
-    /// or malformed JSON → warn + empty (a bad file must never keep
-    /// the agent from starting).
     pub fn load(path: &Path) -> Vec<McpServerConfig> {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Vec::new();
@@ -108,69 +70,40 @@ impl McpConfigFile {
     }
 }
 
-/// Live status of one configured server, for the settings UI.
 #[derive(Debug, Clone, Serialize)]
 pub struct McpServerStatus {
-    /// Configured name.
     pub name: String,
-    /// `"stdio"` | `"http"`.
     pub kind: String,
-    /// Config `enabled` flag.
     pub enabled: bool,
-    /// `"connected"` | `"connecting"` | `"error"` | `"disabled"`.
     pub state: String,
-    /// Tools advertised by the server (0 until connected).
     pub tools: usize,
-    /// Server-reported name/version once connected.
     pub info: String,
-    /// Last connect/call error, if any.
     pub detail: String,
 }
 
-/// A connected server: the rmcp service plus its cached tool table.
 struct McpServer {
-    /// Config name (unslugged, for status/errors).
     name: String,
-    /// Running rmcp service — `call_tool`/`list_*` go through it.
     service: RunningService<RoleClient, ()>,
-    /// Cached tools with wire names resolved.
     tools: Vec<McpTool>,
-    /// `server_info` from the initialize handshake, for the UI.
     info: String,
 }
 
-/// One advertised MCP tool, mapped to our wire name.
 struct McpTool {
-    /// `mcp__<server>__<tool>` as sent to the provider.
     wire: String,
-    /// Original name the server expects back.
     orig: String,
-    /// Advertised schema (already namespaced).
     spec: ToolSpec,
-    /// `readOnlyHint == true` → permission gate auto-allows.
     read_only: bool,
 }
 
-/// All configured MCP servers, connectable at runtime. Sessions hold an
-/// `Arc` and see `configure()` reloads on their next turn — the hub is
-/// the single source of truth, no per-session snapshots.
 pub struct McpHub {
-    /// Live connected servers (empty while a configure is in flight).
     servers: RwLock<Vec<Arc<McpServer>>>,
-    /// Last applied config — `mcp_list` merges this with live status.
     configs: RwLock<Vec<McpServerConfig>>,
-    /// Serializes `configure` calls so overlapping saves can't interleave
-    /// spawns; readers never take this lock.
     reload: tokio::sync::Mutex<()>,
-    /// In-flight `configure` count — `status()` reports "connecting"
-    /// instead of "error" while one is running.
     configuring: std::sync::atomic::AtomicUsize,
-    /// Token counter for error-path `ToolOutput`s.
     counter: O200kCounter,
 }
 
 impl McpHub {
-    /// Empty hub — `configure` populates it.
     pub fn new() -> Self {
         Self {
             servers: RwLock::new(Vec::new()),
@@ -181,8 +114,6 @@ impl McpHub {
         }
     }
 
-    /// Load `<path>` if it exists, then connect every enabled server.
-    /// Missing/unreadable file → empty hub, never an error (first run).
     pub async fn from_config_file(path: &Path) -> Self {
         let hub = Self::new();
         let servers = McpConfigFile::load(path);
@@ -192,8 +123,6 @@ impl McpHub {
         hub
     }
 
-    /// Persist `configs` to `path` (pretty JSON, `servers: []` when
-    /// empty) — the file is the source of truth across restarts.
     pub fn save_config(path: &Path, configs: &[McpServerConfig]) -> Result<(), String> {
         let file = McpConfigFile {
             servers: configs.to_vec(),
@@ -205,10 +134,6 @@ impl McpHub {
         std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
     }
 
-    /// Replace the server set: drop old connections, connect every
-    /// enabled config (bounded, 20s each), swap in the survivors.
-    /// Failed servers stay configured but absent — their tools simply
-    /// don't exist until a later configure succeeds.
     pub async fn configure(&self, configs: Vec<McpServerConfig>) {
         let _guard = self.reload.lock().await;
         self.configs
@@ -223,8 +148,6 @@ impl McpHub {
             .collect();
         self.configuring
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // Connect concurrently — one dead server must not serialize-
-        // block the rest behind its 20s handshake timeout.
         let results = futures_util::future::join_all(enabled.iter().map(|cfg| async move {
             match tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await {
                 Ok(Ok(s)) => Some(s),
@@ -241,18 +164,14 @@ impl McpHub {
         .await;
         self.configuring
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        // Old services drop here → rmcp cancels transports, child
-        // processes are killed by TokioChildProcess's Drop.
         *self.servers.write().expect("mcp servers poisoned") =
             results.into_iter().flatten().collect();
     }
 
-    /// Configs as last applied (for `mcp_list`).
     pub fn configs(&self) -> Vec<McpServerConfig> {
         self.configs.read().expect("mcp configs poisoned").clone()
     }
 
-    /// Merge config + live state into UI rows.
     pub fn status(&self) -> Vec<McpServerStatus> {
         let live = self.servers.read().expect("mcp servers poisoned");
         self.configs
@@ -282,7 +201,6 @@ impl McpHub {
             .collect()
     }
 
-    /// All advertised tools across connected servers.
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.servers
             .read()
@@ -292,9 +210,6 @@ impl McpHub {
             .collect()
     }
 
-    /// `Some((reason, detail))` when the call needs user approval.
-    /// Servers that declare `readOnlyHint` skip the gate entirely —
-    /// everything else prompts, same policy as `bash`.
     pub fn gate_reason(&self, call: &ToolCall) -> Option<(String, Option<String>)> {
         let found = {
             let servers = self.servers.read().expect("mcp servers poisoned");
@@ -315,9 +230,6 @@ impl McpHub {
         Some((format!("calls MCP tool {server}.{orig}"), Some(detail)))
     }
 
-    /// Execute one `mcp__…` call: route → `tools/call` → shaped text.
-    /// Timeouts and transport errors become honest tool errors the
-    /// model can react to; they never fail the turn.
     pub async fn execute(&self, call: &ToolCall, cancel: &CancellationToken) -> ToolOutput {
         let Some(server) = self
             .servers
@@ -365,8 +277,6 @@ impl McpHub {
         }
     }
 
-    /// Error-shaped output for denied/unknown calls — same accounting
-    /// path as real results.
     pub fn tool_error(&self, msg: String) -> ToolOutput {
         self.err(msg)
     }
@@ -375,7 +285,6 @@ impl McpHub {
         self.output(Err(msg))
     }
 
-    /// Shared result → [`ToolOutput`]: shape, count both sides, preview.
     fn output(&self, result: Result<String, String>) -> ToolOutput {
         match result {
             Ok(full) => {
@@ -414,9 +323,6 @@ impl Default for McpHub {
     }
 }
 
-/// Spawn + handshake one server. Returns `Err` with a human-readable
-/// reason — the hub logs it and moves on; one bad server never blocks
-/// the others.
 async fn connect(cfg: &McpServerConfig) -> Result<Arc<McpServer>, String> {
     let service: RunningService<RoleClient, ()> = match cfg.kind.as_str() {
         "stdio" => {
@@ -431,6 +337,8 @@ async fn connect(cfg: &McpServerConfig) -> Result<Arc<McpServer>, String> {
                 for (k, v) in &cfg.env {
                     c.env(k, v);
                 }
+                #[cfg(windows)]
+                c.creation_flags(0x0800_0000);
             });
             let transport = TokioChildProcess::new(cmd).map_err(|e| format!("spawn: {e}"))?;
             ().serve(transport)
@@ -462,11 +370,6 @@ async fn connect(cfg: &McpServerConfig) -> Result<Arc<McpServer>, String> {
     finish_connect(&cfg.name, service).await
 }
 
-/// Resolve a bare command name through PATH+PATHEXT so Windows `.cmd`/
-/// `.bat` shims (`npx`, `uvx`) spawn correctly — `CreateProcess` won't
-/// find them on its own. Paths (anything with a separator) and names
-/// `which` can't resolve fall back to a literal `Command::new`, which
-/// still covers App-Paths-style registrations.
 fn command_for(command: &str) -> Command {
     if !command.contains(['/', '\\'])
         && let Ok(c) = rmcp::transport::which_command(command)
@@ -476,8 +379,6 @@ fn command_for(command: &str) -> Command {
     Command::new(command)
 }
 
-/// Post-handshake setup shared by every transport: `tools/list` →
-/// cached tool table → [`McpServer`].
 async fn finish_connect(
     name: &str,
     service: RunningService<RoleClient, ()>,
@@ -493,8 +394,6 @@ async fn finish_connect(
     for t in remote.into_iter().take(MAX_TOOLS_PER_SERVER) {
         let orig = t.name.to_string();
         let base = format!("{MCP_PREFIX}{slug}__{}", slugify(&orig));
-        // Same-slug collisions get a numeric suffix — wire names must
-        // stay unique across the whole tool list.
         let n = used.entry(base.clone()).or_insert(0);
         *n += 1;
         let wire = if *n == 1 {
@@ -502,8 +401,6 @@ async fn finish_connect(
         } else {
             format!("{base}_{}", *n)
         };
-        // ToolSpec descriptions are one-line; MCP servers sometimes send
-        // multi-paragraph text — flatten and cap.
         let description: String = t
             .description
             .as_deref()
@@ -551,10 +448,6 @@ async fn finish_connect(
     }))
 }
 
-/// Bound an MCP `inputSchema` for the wire: truncate prose fields
-/// (`description`/`title`) recursively, then — if the schema is still
-/// over budget — strip every prose field. Structure, `enum`s, `type`s,
-/// and `required` are the call contract and always survive.
 fn sanitize_schema(schema: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
     let v = serde_json::Value::Object(schema.clone());
     let trimmed = trim_schema_text(&v, SCHEMA_TEXT_CHARS, false);
@@ -564,8 +457,6 @@ fn sanitize_schema(schema: &serde_json::Map<String, serde_json::Value>) -> serde
     trim_schema_text(&v, 0, true)
 }
 
-/// Recursive schema walk. `max` caps prose fields (`0` = remove them);
-/// `strip_all` removes prose entirely regardless of length.
 fn trim_schema_text(v: &serde_json::Value, max: usize, strip_all: bool) -> serde_json::Value {
     match v {
         serde_json::Value::Object(map) => serde_json::Value::Object(
@@ -604,8 +495,6 @@ fn trim_schema_text(v: &serde_json::Value, max: usize, strip_all: bool) -> serde
     }
 }
 
-/// Lowercase `[a-z0-9_]` slug for wire names — keeps `mcp__…` names
-/// valid on every provider's tool-name rules.
 fn slugify(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_us = false;
@@ -628,10 +517,6 @@ fn slugify(s: &str) -> String {
     }
 }
 
-/// `CallToolResult` → the text the model sees. Text blocks pass
-/// through; embedded text resources contribute their text; binary
-/// content becomes an honest placeholder (vision wiring is future
-/// work); `structured_content` is appended as JSON when present.
 fn render_result(res: &rmcp::model::CallToolResult) -> String {
     let mut out = String::new();
     for block in &res.content {
@@ -751,10 +636,6 @@ mod tests {
         assert!(text.contains("\"a\": 1"));
     }
 
-    // ── wire-level: real rmcp client ↔ fake server over duplex ────────
-
-    /// Minimal MCP server: newline-JSON-RPC answering `initialize`,
-    /// `tools/list`, `tools/call` with canned results.
     async fn fake_server(io: tokio::io::DuplexStream) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let (rd, mut wr) = tokio::io::split(io);
@@ -763,7 +644,6 @@ mod tests {
             let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
-            // Notifications carry no id — nothing to answer.
             let Some(id) = msg.get("id").cloned() else {
                 continue;
             };
@@ -831,7 +711,6 @@ mod tests {
         let hub = McpHub::new();
         hub.servers.write().expect("servers poisoned").push(srv);
 
-        // Advertised specs are namespaced and carry the server's schema.
         let specs = hub.specs();
         assert_eq!(specs.len(), 2);
         assert!(specs.iter().any(|s| s.name.as_str() == "mcp__fake__ping"));
@@ -841,7 +720,6 @@ mod tests {
                 .any(|s| s.name.as_str() == "mcp__fake__write_thing")
         );
 
-        // readOnlyHint → gate auto-allows; unannotated → prompts.
         let ping = ToolCall {
             id: "1".to_string(),
             name: ToolName::new("mcp__fake__ping"),
@@ -855,13 +733,11 @@ mod tests {
         };
         assert!(hub.gate_reason(&write).is_some());
 
-        // A real tools/call round-trip through rmcp → fake server.
         let out = hub.execute(&ping, &CancellationToken::new()).await;
         assert!(out.ok, "ping failed: {}", out.content);
         assert!(out.content.contains("pong:ping"));
         assert!(out.content.contains("hi"));
 
-        // Unknown wire name → honest error, not a panic.
         let bad = ToolCall {
             id: "3".to_string(),
             name: ToolName::new("mcp__fake__nope"),

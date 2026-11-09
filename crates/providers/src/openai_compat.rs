@@ -1,11 +1,3 @@
-//! Generic OpenAI-compatible `/chat/completions` adapter.
-//!
-//! Covers Nous Portal inference, Ollama, LM Studio, `OpenRouter`, `DeepSeek`,
-//! Gemini's compat endpoint, and anything else that speaks the dialect.
-//! Vendor quirks handled here: `reasoning_content`/`reasoning` thinking
-//! deltas (DeepSeek/Nous), `tool_calls` index-fragment accumulation,
-//! `stream_options.include_usage`, and `prompt_tokens_details.cached_tokens`.
-
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -24,24 +16,17 @@ use hate_core::{TokenUsage, ToolCall, ToolName};
 
 use crate::sse::{self, SharedCredential};
 
-/// OpenAI-compatible chat completions adapter.
 pub struct OpenAiCompatProvider {
     client: reqwest::Client,
-    /// e.g. `https://inference-api.nousresearch.com/v1` — no trailing slash.
     base_url: String,
     credential: SharedCredential,
-    /// Nous Portal speaks a `reasoning` object, not bare `reasoning_effort`.
     nous_dialect: bool,
-    /// o200k BPE counter, loaded lazily on first `count_tokens`.
     counter: OnceLock<hate_context::O200kCounter>,
 }
 
 impl OpenAiCompatProvider {
-    /// Build an adapter for `base_url` (the `/v1` root, not `/chat/completions`).
     pub fn new(base_url: impl Into<String>, credential: SharedCredential) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
-        // Dialect is a property of the endpoint, not the config name —
-        // a user-named provider pointed at Nous still gets Nous wire.
         let nous_dialect = base_url.contains("nousresearch.com");
         Self {
             client: sse::http_client(),
@@ -57,8 +42,6 @@ impl OpenAiCompatProvider {
     }
 }
 
-// ── wire types (request) ──────────────────────────────────────────────────
-
 #[derive(Serialize)]
 struct WireRequest {
     model: String,
@@ -70,10 +53,8 @@ struct WireRequest {
     max_tokens: u32,
     stream: bool,
     stream_options: StreamOptions,
-    /// Generic OpenAI-style effort hint (`"low"|"medium"|"high"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
-    /// Nous Portal shape: `{"enabled": true, "effort": "…"}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningParam>,
 }
@@ -95,9 +76,6 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
         out.push(json!({"role": "system", "content": system}));
     }
     for m in &req.messages {
-        // An empty assistant turn (failed/odd round, possibly from
-        // another provider before a mid-session swap) carries nothing;
-        // several OpenAI-compatible servers 400 on it.
         if let Message::Assistant {
             content,
             tool_calls,
@@ -114,7 +92,6 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
                 tool_calls,
             } => {
                 let mut v = json!({"role": "assistant"});
-                // OpenAI wants content:null (not "") when only tool calls ran.
                 if content.is_empty() && !tool_calls.is_empty() {
                     v["content"] = Value::Null;
                 } else {
@@ -168,8 +145,6 @@ fn wire_tools(specs: &[ToolSpec]) -> Vec<Value> {
         .collect()
 }
 
-// ── wire types (response) ─────────────────────────────────────────────────
-
 #[derive(Debug, Deserialize)]
 struct Chunk {
     #[serde(default)]
@@ -189,10 +164,8 @@ struct Choice {
 struct DeltaBody {
     #[serde(default)]
     content: Option<String>,
-    /// DeepSeek/Nous reasoning field.
     #[serde(default)]
     reasoning_content: Option<String>,
-    /// Alternate reasoning field some vendors emit.
     #[serde(default)]
     reasoning: Option<String>,
     #[serde(default)]
@@ -223,8 +196,6 @@ struct ModelsResponse {
     data: Vec<ModelListEntry>,
 }
 
-/// OpenRouter-shaped catalog entry — plain `OpenAI` `/models` endpoints
-/// only fill `id`; routers (Nous Portal) publish the rest.
 #[derive(Debug, Deserialize)]
 struct ModelListEntry {
     id: String,
@@ -244,7 +215,6 @@ struct ModelListEntry {
 
 #[derive(Debug, Deserialize)]
 struct EntryPricing {
-    /// USD per *token* as a decimal string.
     #[serde(default)]
     prompt: Option<String>,
     #[serde(default)]
@@ -267,7 +237,6 @@ struct EntryArchitecture {
     input_modalities: Vec<String>,
 }
 
-/// Per-token USD string → USD per 1M tokens. `None` on absent/garbage.
 fn price_per_mtok(raw: Option<&str>) -> Option<f64> {
     raw?.parse::<f64>().ok().map(|v| v * 1_000_000.0)
 }
@@ -304,23 +273,18 @@ impl Usage {
         TokenUsage {
             input: self.prompt_tokens,
             cached_input: self.prompt_tokens_details.map_or(0, |d| d.cached_tokens),
-            // Convention: `output` excludes thinking; they sum to the
-            // billed completion_tokens.
             output: self.completion_tokens.saturating_sub(thinking),
             thinking,
         }
     }
 }
 
-/// In-flight accumulation for one streamed tool call (keyed by `index`).
 #[derive(Default)]
 struct PendingToolCall {
     id: String,
     name: String,
     arguments: String,
 }
-
-// ── provider impl ─────────────────────────────────────────────────────────
 
 impl Provider for OpenAiCompatProvider {
     fn stream(
@@ -353,11 +317,6 @@ impl Provider for OpenAiCompatProvider {
                 hate_context::O200kCounter::new()
                     .expect("o200k BPE table is embedded; load cannot fail")
             });
-            // o200k approximation over the request's text surface: system
-            // prompt + message contents + tool schemas. Chat-template
-            // overhead is a few tokens and constant — acceptable for the
-            // compaction thresholds this feeds (o200k is the sanctioned
-            // approximation for OpenAI-compatible models).
             let mut text = String::new();
             if let Some(s) = &req.system {
                 text.push_str(s);
@@ -466,15 +425,13 @@ impl Provider for OpenAiCompatProvider {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            vision: false, // model-dependent; no per-model vision map yet
+            vision: false,
             tools: true,
             cache: CacheMode::Automatic,
-            thinking: false, // not detected per-model; deltas still handled if emitted
+            thinking: false,
         }
     }
 }
-
-// ── streaming pump ────────────────────────────────────────────────────────
 
 #[instrument(skip_all)]
 #[allow(clippy::too_many_arguments)]
@@ -489,8 +446,6 @@ async fn pump(
 ) -> Result<(), ProviderError> {
     let messages = wire_messages(&req);
     let tools = wire_tools(&req.tools);
-    // `Off` omits the field entirely — the endpoint's own default then
-    // applies (Nous defaults to medium effort per its API docs).
     let (reasoning_effort, reasoning) = match req.thinking {
         ThinkingLevel::Off => (None, None),
         level if nous_dialect => (
@@ -618,8 +573,6 @@ async fn pump(
             }
         }
 
-        // Do NOT break on finish_reason: OpenAI sends the usage chunk
-        // *after* it. Keep reading until [DONE] or body end.
         if choice.finish_reason.is_some() {
             flush_tools!();
             saw_finish = true;
@@ -630,8 +583,6 @@ async fn pump(
     if saw_done_marker || saw_finish {
         let _ = tx.send(Ok(Delta::Done)).await;
     } else {
-        // Body ended with neither [DONE] nor a finish_reason — the stream
-        // was truncated. Report honestly rather than fake completion.
         let _ = tx
             .send(Err(ProviderError::Stream(
                 "stream ended before finish_reason/[DONE]".to_string(),

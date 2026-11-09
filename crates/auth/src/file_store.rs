@@ -1,27 +1,12 @@
-//! File-backed secret store for blobs too large for the OS keychain.
-//!
-//! Windows Credential Manager caps generic-credential blobs at ~2560
-//! bytes; a Nous OAuth bundle (two JWTs + metadata) exceeds that, so
-//! `auth login` literally cannot complete there. OAuth material
-//! therefore lives in `%APPDATA%/hate-agent/secrets/<provider>.json` —
-//! inside the per-user profile, same protection model as Hermes'
-//! `~/.hermes/auth.json` and Claude Code's credentials file. Unix gets
-//! an explicit 0600; Windows relies on the profile's user-only ACL.
-
 use std::path::PathBuf;
 
 use crate::store::{AuthError, AuthStore, CredentialBlob};
 
-/// Directory holding per-provider secret files.
 pub struct FileStore {
     dir: PathBuf,
 }
 
 impl FileStore {
-    /// Store under `<data_dir>/hate-agent/secrets/`.
-    ///
-    /// # Errors
-    /// [`AuthError::Store`] when no data dir exists.
     pub fn new() -> Result<Self, AuthError> {
         let dir = dirs::data_dir()
             .ok_or_else(|| AuthError::Store("no data dir".to_string()))?
@@ -30,14 +15,12 @@ impl FileStore {
         Ok(Self { dir })
     }
 
-    /// Store rooted at an explicit directory (tests).
     #[cfg(test)]
     pub(crate) fn at(dir: PathBuf) -> Self {
         Self { dir }
     }
 
     fn path(&self, provider: &str) -> PathBuf {
-        // Provider names are config keys; keep filenames safe regardless.
         let safe: String = provider
             .chars()
             .map(|c| {
@@ -79,8 +62,6 @@ impl AuthStore for FileStore {
             .map_err(|e| AuthError::Store(format!("serialize: {e}")))?;
         std::fs::write(&tmp, text)
             .map_err(|e| AuthError::Store(format!("write {}: {e}", tmp.display())))?;
-        // Atomic-ish replace: rename over the old file where the OS
-        // allows; fall back to remove-then-rename on Windows.
         if std::fs::rename(&tmp, &path).is_err() {
             let _ = std::fs::remove_file(&path);
             std::fs::rename(&tmp, &path)

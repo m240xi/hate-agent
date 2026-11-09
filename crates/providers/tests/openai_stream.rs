@@ -1,7 +1,3 @@
-//! End-to-end adapter tests: canned SSE over a real (localhost) HTTP
-//! server through `Provider::stream`. Covers delta mapping, tool-call
-//! accumulation, usage extraction, and truncation honesty.
-
 mod common;
 
 use std::sync::Arc;
@@ -71,7 +67,6 @@ async fn text_usage_and_done() {
 
     assert!(matches!(&deltas[0], Delta::Text(t) if t == "Hello"));
     assert!(matches!(&deltas[1], Delta::Text(t) if t == ", world"));
-    // Usage arrives before Done even though finish_reason came earlier.
     let usage = deltas
         .iter()
         .find_map(|d| match d {
@@ -82,7 +77,7 @@ async fn text_usage_and_done() {
     assert_eq!(usage.input, 10);
     assert_eq!(usage.cached_input, 4);
     assert_eq!(usage.thinking, 2);
-    assert_eq!(usage.output, 3); // completion - reasoning
+    assert_eq!(usage.output, 3);
     assert!(matches!(deltas.last(), Some(Delta::Done)));
 }
 
@@ -137,7 +132,6 @@ async fn truncated_stream_is_error_not_done() {
     let base = common::serve_once(200, "text/event-stream", body).await;
     let provider = OpenAiCompatProvider::new(base, cred());
     let items = collect(&provider).await;
-    // Text delta arrives, then an honest Stream error — never a fake Done.
     assert!(matches!(&items[0], Ok(Delta::Text(_))));
     assert!(matches!(items.last(), Some(Err(ProviderError::Stream(_)))));
 }
@@ -171,14 +165,11 @@ async fn cancellation_ends_stream_quickly() {
 async fn count_tokens_uses_real_counter() {
     let provider = OpenAiCompatProvider::new("http://127.0.0.1:1/v1", cred());
     let n = provider.count_tokens(&req()).await.expect("count");
-    // "sys" + "hi" ≈ 3-6 o200k tokens; chars/4 would say 3 — assert a
-    // plausible BPE range, not the heuristic.
     assert!((1..=20).contains(&n), "unexpected count {n}");
 }
 
 #[test]
 fn tool_call_types_roundtrip() {
-    // Sanity on the domain types the adapter emits.
     let call = ToolCall {
         id: "x".to_string(),
         name: ToolName::new("read"),

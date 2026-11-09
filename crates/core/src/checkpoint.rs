@@ -1,35 +1,14 @@
-//! Filesystem checkpoints: before mutating tools touch disk, the
-//! original bytes of each affected file are captured; at turn end the
-//! actor persists them as a restorable bundle. `restore_checkpoint`
-//! puts a bundle back — rewinding a turn's file changes.
-//!
-//! Layout under the session root (`<data>/hate-agent/checkpoints/<key>`):
-//! ```text
-//! <ckpt_id>/manifest.json   {"version":1,"turn":N,"files":[{path,existed,blob}]}
-//! <ckpt_id>/files/<i>       original bytes (only when `existed`)
-//! ```
-//!
-//! `bash` mutations are NOT captured — a shell can touch anything; the
-//! manifest records nothing for it. Rewind is exact for `write_file` /
-//! `edit_file` and best-effort elsewhere (documented limitation).
-
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::json;
 
-/// One turn's captured originals, drained from the tool surface.
 pub struct CheckpointBundle {
-    /// Checkpoint id — also the on-disk directory name.
     pub id: String,
-    /// Session checkpoint root (`<data>/hate-agent/checkpoints/<key>`).
     pub root: PathBuf,
-    /// workspace-relative path → original bytes (`None` = file absent).
     pub files: BTreeMap<String, Option<Vec<u8>>>,
 }
 
-/// Persist a bundle: manifest + blob files. Best-effort — a checkpoint
-/// write failure must never fail the turn that produced it.
 pub fn write_checkpoint(bundle: &CheckpointBundle) -> Result<(), String> {
     let dir = bundle.root.join(&bundle.id);
     let files_dir = dir.join("files");
@@ -55,14 +34,6 @@ pub fn write_checkpoint(bundle: &CheckpointBundle) -> Result<(), String> {
     Ok(())
 }
 
-/// Restore a checkpoint into `workspace_root`: files that existed are
-/// copied back from their blobs; files the turn created are removed.
-/// Returns the number of entries restored. Paths are re-validated —
-/// a manifest is data, not truth.
-///
-/// # Errors
-/// `Err` when the manifest is unreadable/malformed or a restore write
-/// fails; individual bad paths are skipped, not fatal.
 pub fn restore_checkpoint(ckpt_dir: &Path, workspace_root: &Path) -> Result<usize, String> {
     let manifest_path = ckpt_dir.join("manifest.json");
     let raw =
@@ -81,7 +52,6 @@ pub fn restore_checkpoint(ckpt_dir: &Path, workspace_root: &Path) -> Result<usiz
         let Some(path) = entry["path"].as_str() else {
             continue;
         };
-        // Reject anything that could escape the workspace.
         let rel = Path::new(path);
         if rel.is_absolute()
             || rel.components().any(|c| {
@@ -106,11 +76,8 @@ pub fn restore_checkpoint(ckpt_dir: &Path, workspace_root: &Path) -> Result<usiz
             if std::fs::write(&target, &data).is_ok() {
                 restored += 1;
             }
-        } else {
-            // The turn created this file — rewind removes it.
-            if target.exists() && std::fs::remove_file(&target).is_ok() {
-                restored += 1;
-            }
+        } else if target.exists() && std::fs::remove_file(&target).is_ok() {
+            restored += 1;
         }
     }
     Ok(restored)

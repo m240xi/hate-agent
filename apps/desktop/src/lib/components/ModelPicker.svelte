@@ -4,13 +4,9 @@
   import Icon from './Icon.svelte';
   import type { ProviderModel } from '../ipc';
 
-  // Model picker: searchable, vendor-grouped catalog with pricing and
-  // context metadata, plus a session-stats footer (ctx fill, turns,
-  // elapsed, cumulative tokens) — the Claude-Code-style status line.
   let query = $state('');
   let highlightId = $state('');
 
-  /** Row identity = provider + id: two providers can list the same id. */
   function rowKey(m: ProviderModel): string {
     return `${m.provider ?? ''}::${m.id}`;
   }
@@ -27,15 +23,12 @@
   }
 
   interface Section {
-    /** Provider config key (`nous`, `claude`, …) — stable `#each` key. */
     key: string;
-    /** Human label for the provider header. */
     label: string;
     count: number;
     vendors: VendorGroup[];
   }
 
-  /** Friendly provider names — the picker's top-level sections. */
   const PROVIDER_LABELS: Record<string, string> = {
     nous: 'Hermes',
     claude: 'Claude',
@@ -61,9 +54,6 @@
     );
   }
 
-  /** Aggregator catalogs prefix the vendor: "Anthropic: Claude Fable
-   *  Latest". The picker shows just the model name — the id line
-   *  underneath still carries the full slug for disambiguation. */
   const VENDOR_PREFIX =
     /^(anthropic|openai|google|deepmind|meta|mistral|xai|deepseek|qwen|moonshot(?:ai)?|z\.?ai|zhipu|minimax|nous|openrouter|amazon|aws|nvidia|cohere|ai21|databricks|snowflake|ibm|writer|inflection)\s*:\s*/i;
 
@@ -72,18 +62,12 @@
     return n.replace(VENDOR_PREFIX, '') || n;
   }
 
-  /** Vendor family from an aggregator id (`anthropic/x` → `anthropic`).
-   *  A leading `~` marks "latest" aliases and folds into its family. */
   function vendorOf(m: ProviderModel): string {
     const id = m.id.replace(/^~/, '');
     const slash = id.indexOf('/');
     return slash > 0 ? id.slice(0, slash) : '';
   }
 
-  // Sections are providers first, vendor families second — so Hermes's
-  // anthropic/openai/deepseek models live under one "Hermes" header
-  // instead of masquerading as providers. Single-vendor catalogs (a
-  // plain Anthropic key) skip the sub-header and render flat.
   const sections = $derived.by<Section[]>(() => {
     const q = query.trim().toLowerCase();
     const byProvider = new Map<string, Map<string, ProviderModel[]>>();
@@ -115,7 +99,6 @@
         };
       })
       .sort((a, b) => {
-        // The session's provider first, then alphabetical by label.
         const da = a.key === current ? 0 : 1;
         const db = b.key === current ? 0 : 1;
         return da - db || a.label.localeCompare(b.label);
@@ -124,14 +107,11 @@
 
   const flat = $derived(sections.flatMap((s) => s.vendors.flatMap((v) => v.items)));
 
-  // Keep the keyboard highlight on the first match whenever the
-  // filtered list changes.
   $effect(() => {
     void query;
     highlightId = flat[0] ? rowKey(flat[0]) : '';
   });
 
-  // Live elapsed clock — only ticks while the panel is open.
   $effect(() => {
     if (!panelOpen || session.sessionBeganAt === null) return;
     const t = setInterval(() => (now = Date.now()), 1000);
@@ -168,7 +148,6 @@
     return String(n);
   }
 
-  /** USD per 1M tokens → compact price; null = unpriced/unknown. */
   function fmtPrice(v: number | null | undefined): string {
     if (v == null) return '—';
     if (v === 0) return 'free';
@@ -361,8 +340,6 @@
     color: var(--fg-3);
     opacity: 0.7;
   }
-  /* Vendor family inside a provider — sits under the sticky provider
-     header, smaller and indented so the hierarchy reads at a glance. */
   .mp-subgroup {
     display: flex;
     align-items: baseline;

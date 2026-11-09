@@ -4,7 +4,6 @@
   import FileNode from './FileNode.svelte';
   import type { SymbolHit } from '../types';
 
-  // Left pane: symbol search box + file tree.
   let query = $state('');
 
   const KIND_BADGE: Record<SymbolHit['kind'], string> = {

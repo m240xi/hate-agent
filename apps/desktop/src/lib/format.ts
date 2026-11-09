@@ -1,25 +1,17 @@
-// Shared display formatting for token counts, usage records, and
-// clipboard writes. Pure functions — no store access.
-
 import type { PlanStep, TokenUsage, TranscriptBlock, TurnSummary } from './types';
 
-/** Compact token count: 950, 12.3k, 1.2M. */
 export function fmtTok(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
 }
 
-/** One provider request, compact: `in 12.3k (9.1k cached) · out 412`.
- *  `input` already includes the cached portion (core's convention). */
 export function usageLabel(u: TokenUsage, withThinking = true): string {
   const cached = u.cached_input > 0 ? ` (${fmtTok(u.cached_input)} cached)` : '';
-  // Thinking headers already show the reasoning count — don't say it twice.
   const think = withThinking && u.thinking > 0 ? ` · think ${fmtTok(u.thinking)}` : '';
   return `in ${fmtTok(u.input)}${cached} · out ${fmtTok(u.output)}${think}`;
 }
 
-/** Exact numbers for the hover tooltip. */
 export function usageTitle(u: TokenUsage): string {
   const fresh = Math.max(0, u.input - u.cached_input);
   return [
@@ -39,7 +31,6 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
 
-/** Whole-turn rollup shown on the user's message once the turn ends. */
 export function turnLabel(t: TurnSummary): string {
   const parts = [usageLabel(t.usage)];
   if (t.toolCalls > 0) parts.push(`${t.toolCalls} tool${t.toolCalls === 1 ? '' : 's'}`);
@@ -48,8 +39,6 @@ export function turnLabel(t: TurnSummary): string {
   return parts.join(' · ');
 }
 
-/** Copy text to the clipboard; falls back to a hidden textarea where
- *  the async clipboard API is unavailable. Resolves to success. */
 export async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
@@ -71,8 +60,6 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
-/** Pull plan steps out of a plan-mode reply: numbered lines when the
- *  model numbered them, otherwise top-level bullets. */
 export function parsePlan(text: string): PlanStep[] {
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   const pick = (re: RegExp): string[] =>
@@ -90,13 +77,10 @@ export function parsePlan(text: string): PlanStep[] {
   });
 }
 
-/** The transcript as Markdown, for `/export`. Tool calls collapse to
- *  one line each; thinking is omitted. */
 export function transcriptMarkdown(blocks: TranscriptBlock[]): string {
   let out = '';
   let lastWasTool = false;
   const push = (chunk: string, isTool: boolean): void => {
-    // Consecutive tool lines form one list; everything else is a paragraph.
     if (out) out += isTool && lastWasTool ? '\n' : '\n\n';
     out += chunk;
     lastWasTool = isTool;

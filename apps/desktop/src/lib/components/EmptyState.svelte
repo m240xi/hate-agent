@@ -1,7 +1,4 @@
 <script lang="ts">
-  // Empty state — not a hero image. How this works plus the three most
-  // useful commands. Provider setup lives in Settings; with more
-  // providers coming this view stays provider-agnostic.
   import { session } from '../store.svelte';
 </script>
 

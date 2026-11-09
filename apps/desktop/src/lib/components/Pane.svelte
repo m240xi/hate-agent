@@ -2,8 +2,6 @@
   import type { Snippet } from 'svelte';
   import Icon from './Icon.svelte';
 
-  // Collapsible, resizable side pane. Width drags on the inner edge;
-  // collapsed state leaves a slim rail with an expand affordance.
   interface Props {
     side: 'left' | 'right';
     title: string;

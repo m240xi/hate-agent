@@ -3,15 +3,11 @@
   import { session } from '../store.svelte';
   import TranscriptBlock from './TranscriptBlock.svelte';
 
-  // Center transcript: aria-live polite, pin-to-bottom scroll that never
-  // yanks the view when the user has scrolled up.
   let scrollEl = $state<HTMLDivElement | null>(null);
   let pinned = $state(true);
   let showJump = $state(false);
 
   const VIRTUALIZE_AT = 200;
-  // "Show earlier" grows the window a page at a time — virtualization
-  // exists for render cost, not to hide history.
   let revealExtra = $state(0);
   const visibleBlocks = $derived(
     session.blocks.length > VIRTUALIZE_AT + revealExtra
@@ -36,7 +32,6 @@
     scrollEl?.scrollTo({ top: scrollEl.scrollHeight, behavior: 'smooth' });
   }
 
-  // Auto-scroll only while pinned — reading position is sacred.
   $effect(() => {
     session.blocks.length;
     session.blocks.at(-1)?.text;
@@ -87,11 +82,6 @@
     gap: 10px;
     overflow-x: hidden;
   }
-  /* Blocks in a scrolling flex column must never shrink: a child with
-     `overflow: hidden` (tool cards) has no minimum height, so once the
-     transcript is taller than the window flexbox squashes it to a
-     sliver instead of letting the column scroll. They may get narrower
-     than their content, though — long lines wrap or scroll inside. */
   .transcript > :global(*) {
     flex-shrink: 0;
     min-width: 0;

@@ -3,9 +3,6 @@
   import Icon from './Icon.svelte';
   import type { SessionMeta } from '../ipc';
 
-  // Session browser — the "past chats / New Session" surface shown in
-  // place of a conversation when pickerMode is set (first visit per
-  // mode, the topbar sessions button, or after deleting the active one).
   interface Props {
     mode: SessionMode;
   }

@@ -1,8 +1,4 @@
 <script lang="ts">
-  // Chat — the same session backend with chat-only chrome: a centered
-  // reading column, no workspace panes. Code and Chat share the wire;
-  // the split is presentation plus tool gating — chat sessions spawn
-  // with no workspace tools (MCP servers still apply).
   import { session } from '../store.svelte';
   import Transcript from './Transcript.svelte';
   import Composer from './Composer.svelte';

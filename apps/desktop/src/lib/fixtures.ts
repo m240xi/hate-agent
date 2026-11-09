@@ -1,8 +1,3 @@
-// Fixture data for the shell — used by browser dev mode (outside
-// Tauri, no backend) and the /dev/components gallery. The store
-// replays these as events so every component exercises its real render
-// path.
-
 import type { CheckpointEntry, ChangedFile, FileNode, PlanStep, SymbolHit, TranscriptBlock } from './types';
 
 export const fixtureTree: FileNode[] = [
@@ -74,9 +69,6 @@ export const fixtureChangedFiles: ChangedFile[] = [
   { path: 'src/tools/output.rs', added: 56, removed: 0 },
 ];
 
-// A canned transcript the fixture player streams through the real event
-// pipeline in browser dev mode, exercising delta/tool/thinking rendering
-// without a backend.
 export const fixtureScript: Array<{ delay: number; event: unknown }> = [
   {
     delay: 300,
@@ -85,8 +77,6 @@ export const fixtureScript: Array<{ delay: number; event: unknown }> = [
       text: "I'll trace the retry path first — locating where backoff is computed before touching anything.\n\n",
     },
   },
-  // Real event order: a request's usage arrives after its text/thinking
-  // and before the tools it called start.
   {
     delay: 200,
     event: {
@@ -206,8 +196,6 @@ export const fixtureUsage = {
   thinking: 96,
 };
 
-// Seed transcript shown instantly (before the script streams), so the
-// layout is never empty on first paint.
 export const fixtureInitialBlocks: TranscriptBlock[] = [
   {
     id: 1,

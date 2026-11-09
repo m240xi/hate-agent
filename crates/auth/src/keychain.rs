@@ -1,19 +1,12 @@
-//! OS keychain backend for [`AuthStore`] via the `keyring` crate.
-//!
-//! Service name is `hate-agent`; the keychain "user" is the provider
-//! name (`nous`, `anthropic`, `openai`, …). Blobs are stored as JSON.
-
 use keyring::Entry;
 
 use crate::store::{AuthError, AuthStore, CredentialBlob};
 
-/// Keychain-backed credential store.
 pub struct KeyringStore {
     service: String,
 }
 
 impl KeyringStore {
-    /// Store under the `hate-agent` service name.
     pub fn new() -> Self {
         Self {
             service: "hate-agent".to_string(),

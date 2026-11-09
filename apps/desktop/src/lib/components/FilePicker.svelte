@@ -4,8 +4,6 @@
   import Icon from './Icon.svelte';
   import type { FileNode } from '../types';
 
-  // `@` file fuzzy-find — flattens the tree to paths, substring-filters,
-  // Enter appends `@path ` to the draft.
   interface Props {
     onclose: () => void;
   }

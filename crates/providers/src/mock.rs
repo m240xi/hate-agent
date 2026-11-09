@@ -1,9 +1,3 @@
-//! `MockProvider` — replays a scripted delta sequence with zero network.
-//!
-//! Used by session-loop tests, CLI `--dry-run`, and the bench harness's
-//! warm-up path. It implements the real `Provider` trait so nothing
-//! downstream can tell it apart from a live adapter.
-
 use std::sync::Arc;
 
 use futures_util::stream::BoxStream;
@@ -16,19 +10,13 @@ use hate_core::provider::{
     BoxFuture, CacheMode, Capabilities, ChatRequest, Delta, ModelInfo, Provider, ProviderError,
 };
 
-/// A provider that emits a fixed script of deltas.
 pub struct MockProvider {
-    /// Deltas to emit, in order. [`Delta::Done`] is appended automatically
-    /// if the script doesn't end with one.
     pub script: Vec<Delta>,
-    /// Usage record emitted just before `Done` (zeros if unset).
     pub usage: TokenUsage,
-    /// Artificial per-delta delay — keeps cancellation tests honest.
     pub delta_delay: std::time::Duration,
 }
 
 impl MockProvider {
-    /// A provider that says `text` and reports `usage`.
     pub fn echo(text: impl Into<String>, usage: TokenUsage) -> Self {
         Self {
             script: vec![Delta::Text(text.into())],
@@ -63,7 +51,6 @@ impl Provider for MockProvider {
                         () = tokio::time::sleep(delay) => {}
                     }
                 }
-                // Inject the usage record right before Done.
                 if matches!(delta, Delta::Done) {
                     let _ = tx.send(Ok(Delta::Usage(usage))).await;
                 }
@@ -81,8 +68,6 @@ impl Provider for MockProvider {
         req: &'a ChatRequest,
     ) -> BoxFuture<'a, Result<u64, ProviderError>> {
         Box::pin(async move {
-            // Same o200k approximation as the OpenAI-compatible adapter —
-            // the mock must count like the real thing it stands in for.
             static COUNTER: std::sync::OnceLock<O200kCounter> = std::sync::OnceLock::new();
             let counter =
                 COUNTER.get_or_init(|| O200kCounter::new().expect("o200k BPE table is embedded"));
@@ -124,7 +109,6 @@ impl Provider for MockProvider {
     }
 }
 
-/// Convenience: `Arc<MockProvider>` for `SessionConfig.provider`.
 pub fn mock_arc(script: Vec<Delta>, usage: TokenUsage) -> Arc<dyn Provider> {
     Arc::new(MockProvider {
         script,

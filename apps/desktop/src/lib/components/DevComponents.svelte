@@ -1,7 +1,4 @@
 <script lang="ts">
-  // /dev/components — component gallery. Every component rendered with
-  // fixture data; theme toggle shows dark and light. This route is the
-  // review surface that keeps the UI honest without a designer.
   import { onMount } from 'svelte';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';

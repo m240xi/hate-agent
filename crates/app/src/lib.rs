@@ -1,7 +1,3 @@
-//! hate-app: the Tauri layer. This crate is deliberately thin — commands
-//! and event forwarding only. Every decision about agent behavior lives in
-//! `hate-core` and below; nothing here should ever grow logic.
-
 #![deny(unsafe_code)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -11,7 +7,6 @@ mod sessions_db;
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
 
-/// Application entry point. Called by `src/main.rs`.
 pub fn run() {
     let builder = Builder::new().commands(collect_commands![
         commands::app_info,
@@ -56,8 +51,6 @@ pub fn run() {
         commands::update_install,
     ]);
 
-    // Emit TypeScript bindings for the frontend's typed invoke wrapper.
-    // Path is compile-time absolute so it works regardless of the runtime cwd.
     #[cfg(debug_assertions)]
     builder
         .export(
@@ -77,8 +70,6 @@ pub fn run() {
             app.manage(commands::Sessions::default());
             app.manage(commands::AuthState::default());
             app.manage(commands::UpdateState::default());
-            // MCP servers connect once at startup; sessions share the
-            // hub so a settings save reaches every session next turn.
             let mcp = commands::McpState::load();
             if !mcp.pending.is_empty() {
                 let hub = mcp.hub.clone();

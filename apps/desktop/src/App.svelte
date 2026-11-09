@@ -24,9 +24,6 @@
     return () => session.destroy();
   });
 
-  // Custom titlebar: press-and-drag on empty bar space drags the window;
-  // double-click toggles maximize. Interactive children are exempt via
-  // the closest() check, so no Tauri drag-region attribute is needed.
   async function onTopbarDown(e: MouseEvent): Promise<void> {
     if (!inTauri || e.button !== 0) return;
     const el = e.target as HTMLElement;
@@ -53,7 +50,6 @@
     await getCurrentWindow().close();
   }
 
-  // Persist pane sizes in localStorage (global, not per-workspace).
   $effect(() => {
     localStorage.setItem('hate:pane:left', String(session.leftWidth));
     localStorage.setItem('hate:pane:right', String(session.rightWidth));
@@ -74,9 +70,6 @@
     session.workspacePath?.split(/[\\/]/).filter(Boolean).pop() ?? null,
   );
 
-  // Entering Chat/Code resumes that mode's last session or opens the
-  // session browser — never a silent blank slate. `untrack` keeps the
-  // effect keyed on mode only (enterMode reads lots of session state).
   $effect(() => {
     const m = session.mode;
     untrack(() => {

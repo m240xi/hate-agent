@@ -1,9 +1,3 @@
-//! hate-core: session state machine, turn assembly, and event types.
-//!
-//! This crate is the agent's brain and contains zero Tauri dependency. The
-//! desktop app and the headless CLI are both thin adapters over the session
-//! handle.
-
 #![deny(unsafe_code)]
 
 mod checkpoint;

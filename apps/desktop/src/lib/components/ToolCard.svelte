@@ -4,9 +4,6 @@
   import { usageLabel, usageTitle } from '../format';
   import type { TranscriptBlock } from '../types';
 
-  // One-line collapsible tool card. Header shows the essentials
-  // (`edit src/x.rs +12 -4`); expanding reveals the shaped preview and the
-  // full-vs-sent token savings.
   interface Props {
     block: TranscriptBlock;
   }
@@ -89,7 +86,6 @@
 
 <style>
   .tool-card {
-    /* Never shrink inside the transcript's flex column — see Transcript. */
     flex: none;
     min-width: 0;
     border: 1px solid var(--border);
@@ -120,7 +116,6 @@
     font-size: 11.5px;
     font-weight: 600;
     color: var(--fg-0);
-    /* Long tool names (MCP) give way before the status and savings do. */
     flex: 0 1 auto;
     min-width: 40px;
     max-width: 60%;

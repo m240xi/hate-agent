@@ -1,7 +1,3 @@
-//! Session actor tests: turn lifecycle, event stream, usage accounting,
-//! and the 250ms-class cancellation path — all against a scripted
-//! in-process provider (no network, deterministic).
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,8 +8,6 @@ use hate_core::provider::{
 use hate_core::{Command, Event, Limits, Outcome, SessionConfig, TokenUsage, spawn_session};
 use tokio_util::sync::CancellationToken;
 
-/// Scripted provider: emits `script` deltas with optional per-delta
-/// delay, honoring cancellation between deltas.
 struct Scripted {
     script: Vec<Delta>,
     usage: TokenUsage,
@@ -113,7 +107,6 @@ async fn echo_turn_emits_deltas_usage_and_completion() {
 
     let mut text = String::new();
     let mut saw_usage = false;
-    // Generous deadline so a hung actor fails the test, not the suite.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let outcome = loop {
         let ev = tokio::time::timeout_at(deadline, rx.recv())
@@ -152,7 +145,6 @@ async fn second_message_continues_session() {
         session
             .command(Command::UserMessage("hi".to_string()))
             .expect("command");
-        // Drain until TurnComplete.
         loop {
             match rx.recv().await.expect("stream") {
                 Event::TurnComplete { .. } => break,
@@ -166,7 +158,6 @@ async fn second_message_continues_session() {
 
 #[tokio::test]
 async fn cancel_interrupts_in_flight_stream() {
-    // 100 deltas × 50ms = 5s of stream; cancel must land near-instantly.
     let script: Vec<Delta> = (0..100)
         .map(|i| Delta::Text(format!("d{i} ")))
         .chain(std::iter::once(Delta::Done))
@@ -183,7 +174,6 @@ async fn cancel_interrupts_in_flight_stream() {
         .command(Command::UserMessage("go".to_string()))
         .expect("command");
 
-    // Wait for the first delta so the turn is definitely in flight.
     let start = std::time::Instant::now();
     loop {
         match rx.recv().await.expect("stream") {
@@ -272,9 +262,6 @@ async fn provider_error_surfaces_as_failed() {
     }
 }
 
-/// Multi-round scripted provider: each `stream()` call replays the next
-/// script and records the request's messages so tests can assert what
-/// the loop fed back.
 struct Rounds {
     rounds: std::sync::Mutex<std::collections::VecDeque<Vec<Delta>>>,
     seen: std::sync::Mutex<Vec<String>>,
@@ -399,7 +386,6 @@ async fn tool_calls_execute_and_feed_results_back() {
     assert!(saw_tool_events, "tool lifecycle events emitted");
     assert_eq!(tool_calls, 1);
 
-    // Two provider requests: round 2 must contain the tool result.
     let seen = provider.seen.lock().unwrap();
     assert_eq!(seen.len(), 2, "expected two provider rounds");
     assert!(
@@ -512,7 +498,6 @@ async fn gated_tool_waits_for_permission_then_denies() {
     assert!(saw_request, "permission request emitted");
     assert!(denied, "denial surfaced as failed tool result");
 
-    // Round 2 must carry the denial text back to the model.
     let seen = provider.seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert!(seen[1].contains("denied"), "denial fed back: {seen:?}");
@@ -526,8 +511,6 @@ async fn allow_session_skips_repeat_prompts() {
     let dir = tempfile::tempdir().unwrap();
     let tools = Arc::new(WorkspaceTools::new(dir.path()).unwrap());
 
-    // Two identical gated calls across two rounds — after allow_session
-    // on the first, the second must run without another prompt.
     let call = || {
         Delta::ToolCall(ToolCall {
             id: "c1".into(),
@@ -585,9 +568,6 @@ async fn allow_session_skips_repeat_prompts() {
     assert!(dir.path().join("x.txt").exists());
 }
 
-// ── context compaction ────────────────────────────────────────────────────
-
-/// Journal that retains the last snapshot for assertions.
 #[derive(Default)]
 struct CaptureJournal(std::sync::Mutex<Option<hate_core::PersistedSession>>);
 
@@ -604,10 +584,6 @@ impl hate_core::SessionJournal for CaptureJournal {
     }
 }
 
-/// The risky path: compaction mutates `convo` inside `run_turn`, and the
-/// actor must adopt the *compacted* history — not rebuild it from the
-/// turn's appended tail. This drives enough turns to force compaction
-/// and asserts the journaled history stays bounded with a note present.
 #[tokio::test]
 async fn compaction_bounds_journaled_history() {
     use hate_core::provider::Message;
@@ -636,8 +612,6 @@ async fn compaction_bounds_journaled_history() {
         mcp: None,
         skills: None,
         auto_skills: false,
-        // Tiny window → compacts as soon as history reaches the tail+4
-        // minimum; the system prompt alone already exceeds 72% of it.
         context_window: 400,
     });
     let mut rx = session.subscribe();
@@ -680,7 +654,6 @@ async fn compaction_bounds_journaled_history() {
     );
 }
 
-/// Drive one user message to its terminal event (complete or failed).
 async fn drive_turn(
     session: &hate_core::SessionHandle,
     rx: &mut tokio::sync::broadcast::Receiver<Event>,
@@ -701,20 +674,15 @@ async fn drive_turn(
     }
 }
 
-/// Stale tool outputs decay: a big `read_file` result from turn 1 must
-/// arrive elided in turn 2's request — head+tail stub, honest marker —
-/// while the journal keeps the full text.
 #[tokio::test]
 async fn stale_tool_outputs_elide_next_turn() {
     let dir = tempfile::tempdir().unwrap();
-    // >8KB so the shaped tool output exceeds the decay cap.
     std::fs::write(dir.path().join("big.txt"), "x".repeat(20 * 1024)).unwrap();
     let tools = Arc::new(hate_core::WorkspaceTools::new(dir.path()).expect("workspace tools"));
 
     let provider = Arc::new(Rounds {
         rounds: std::sync::Mutex::new(
             vec![
-                // Turn 1, round 1: ask for the file.
                 vec![
                     Delta::ToolCall(hate_core::ToolCall {
                         id: "c1".to_string(),
@@ -723,9 +691,7 @@ async fn stale_tool_outputs_elide_next_turn() {
                     }),
                     Delta::Done,
                 ],
-                // Turn 1, round 2: done.
                 vec![Delta::Text("read it".to_string()), Delta::Done],
-                // Turn 2: done immediately.
                 vec![Delta::Text("ok".to_string()), Delta::Done],
             ]
             .into_iter()
@@ -765,17 +731,12 @@ async fn stale_tool_outputs_elide_next_turn() {
         turn2_req.contains("re-run the tool"),
         "stub must tell the model how to recover"
     );
-    // The stub is small — full 20KB must NOT be in the request.
     assert!(
         !turn2_req.contains(&"x".repeat(9000)),
         "full tool output leaked into turn 2 request"
     );
 }
 
-// ── dynamic skills ────────────────────────────────────────────────────────
-
-/// Provider that records every request's system prompt so tests can
-/// assert what prompt assembly produced.
 struct CaptureSystem {
     script: Vec<Delta>,
     systems: Arc<std::sync::Mutex<Vec<Option<String>>>>,
@@ -821,7 +782,6 @@ impl Provider for CaptureSystem {
     }
 }
 
-/// `skill_save` from the model lands on disk and in the event stream.
 #[tokio::test]
 async fn skill_save_tool_persists_and_emits() {
     use hate_core::{SkillStore, ToolCall, ToolName};
@@ -892,8 +852,6 @@ async fn skill_save_tool_persists_and_emits() {
     assert!(saved.body.contains("Rojo"));
 }
 
-/// A skill matching the workspace signals is inlined into the system
-/// prompt at spawn.
 #[tokio::test]
 async fn matching_skill_injected_into_system_prompt() {
     use hate_core::{Skill, SkillStore, WorkspaceTools};
@@ -953,8 +911,6 @@ async fn matching_skill_injected_into_system_prompt() {
     );
 }
 
-/// Three completed turns with auto-skills on triggers one reflection
-/// call; its output becomes a skill file and a `SkillSaved` event.
 #[tokio::test]
 async fn reflection_authors_skill_after_three_turns() {
     use hate_core::SkillStore;
@@ -994,7 +950,6 @@ async fn reflection_authors_skill_after_three_turns() {
     drive_turn(&session, &mut rx, "adding a part with luau").await;
     drive_turn(&session, &mut rx, "now a click detector").await;
 
-    // Reflection runs in the background after turn 3 — wait for it.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut saw_event = false;
     loop {
@@ -1014,9 +969,6 @@ async fn reflection_authors_skill_after_three_turns() {
     assert_eq!(saved.triggers, vec!["roblox", "luau"]);
 }
 
-/// Mid-session provider swap: after `SetProvider`, the next turn must
-/// run on the new adapter — never the old provider with the new model
-/// id (that produced 404s when a cross-provider pick leaked).
 #[tokio::test]
 async fn set_provider_swaps_adapter_mid_session() {
     use hate_core::provider::Provider;
@@ -1049,7 +1001,6 @@ async fn set_provider_swaps_adapter_mid_session() {
     });
     let mut rx = session.subscribe();
 
-    // Turn 1 on provider A.
     session
         .command(Command::UserMessage("hi".to_string()))
         .expect("command");
@@ -1068,7 +1019,6 @@ async fn set_provider_swaps_adapter_mid_session() {
     }
     assert_eq!(text, "from-a");
 
-    // Swap to provider B and drive another turn.
     session
         .command(Command::SetProvider {
             provider: b,
@@ -1095,9 +1045,6 @@ async fn set_provider_swaps_adapter_mid_session() {
     assert_eq!(text, "from-b", "turn 2 must run on the swapped adapter");
 }
 
-/// The system prompt names the running model, and the name follows a
-/// mid-session provider swap — otherwise models guess their identity
-/// or parrot an earlier model's self-description from history.
 #[tokio::test]
 async fn system_prompt_names_current_model_after_swap() {
     let systems = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1142,7 +1089,6 @@ async fn system_prompt_names_current_model_after_swap() {
     assert!(!second.contains("deepseek-v4-flash"));
 }
 
-/// Shared setup for tool-loop tests: a workspace session over `Rounds`.
 fn tool_session(
     dir: &std::path::Path,
     rounds: Vec<Vec<Delta>>,
@@ -1178,10 +1124,6 @@ fn read_call(id: &str, path: &str) -> Delta {
     })
 }
 
-/// A batch of read-only calls runs concurrently but lands in call
-/// order, and a repeat of an unchanged read later in the same turn is
-/// answered with a stub instead of the file — then really re-read on
-/// the next turn, when the memo is gone.
 #[tokio::test]
 async fn read_batches_keep_order_and_duplicate_reads_cost_a_stub() {
     let dir = tempfile::tempdir().unwrap();
@@ -1198,7 +1140,6 @@ async fn read_batches_keep_order_and_duplicate_reads_cost_a_stub() {
             ],
             vec![read_call("c3", "a.txt"), Delta::Done],
             vec![Delta::Text("done".into()), Delta::Done],
-            // Turn 2: the same read must really run again.
             vec![read_call("c4", "a.txt"), Delta::Done],
             vec![Delta::Text("done again".into()), Delta::Done],
         ],
@@ -1231,28 +1172,22 @@ async fn read_batches_keep_order_and_duplicate_reads_cost_a_stub() {
     }
     let ids: Vec<&str> = finished.iter().map(|f| f.0.as_str()).collect();
     assert_eq!(ids, ["c1", "c2", "c3"], "results recorded in call order");
-    // The duplicate reports what it saved: full = the original's cost.
     assert_eq!(finished[2].1, finished[0].2);
 
     drive_turn(&session, &mut rx, "again").await;
 
     let seen = provider.seen.lock().unwrap();
     assert_eq!(seen.len(), 5);
-    // Round 2 carries both bodies, a before b.
     let (a, b) = (
         seen[1].find("AAA-unique-body").expect("a fed back"),
         seen[1].find("BBB-unique-body").expect("b fed back"),
     );
     assert!(a < b);
-    // Round 3: the repeat read is a stub — the body appears once, not twice.
     assert!(seen[2].contains("duplicate call"), "{}", seen[2]);
     assert_eq!(seen[2].matches("AAA-unique-body").count(), 1);
-    // Turn 2's read is real again (two bodies now in history).
     assert_eq!(seen[4].matches("AAA-unique-body").count(), 2);
 }
 
-/// `max_tool_rounds` is a configured limit: tripping it is an honest
-/// `Failed`, and completed rounds stay in history.
 #[tokio::test]
 async fn tool_round_limit_is_configurable_and_fails_honestly() {
     let dir = tempfile::tempdir().unwrap();
@@ -1289,9 +1224,6 @@ async fn tool_round_limit_is_configurable_and_fails_honestly() {
     assert_eq!(provider.seen.lock().unwrap().len(), 2, "no third request");
 }
 
-/// `/plan <task>` runs a read-only turn: the directive rides in the
-/// user message, reads work, and a mutation is refused in Rust without
-/// ever prompting — then a normal turn can write again.
 #[tokio::test]
 async fn plan_turn_is_read_only_without_prompting() {
     let dir = tempfile::tempdir().unwrap();
@@ -1334,9 +1266,6 @@ async fn plan_turn_is_read_only_without_prompting() {
     );
     assert!(!dir.path().join("new.txt").exists(), "write was blocked");
 
-    // Plan mode lasts exactly one turn: the next, normal message must
-    // not carry the directive anywhere in its request — a lingering
-    // directive makes the model keep planning instead of answering.
     drive_turn(&session, &mut rx, "hello there").await;
     drive_turn(&session, &mut rx, "and again").await;
 
@@ -1356,7 +1285,6 @@ async fn plan_turn_is_read_only_without_prompting() {
         "the task itself stays in history"
     );
     assert!(seen[2].contains("hello there") && seen[2].contains("plan mode is off"));
-    // The off-note is said once, not on every later message.
     assert_eq!(
         seen[3].matches("plan mode is off").count(),
         1,
@@ -1366,8 +1294,6 @@ async fn plan_turn_is_read_only_without_prompting() {
     assert!(!seen[3].contains("[plan mode —"));
 }
 
-/// A chat session (no workspace tools) gets a directive that doesn't
-/// name tools it lacks.
 #[tokio::test]
 async fn plan_turn_in_chat_session_names_no_workspace_tools() {
     let provider = Arc::new(Rounds {

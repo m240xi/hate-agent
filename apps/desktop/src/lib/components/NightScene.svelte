@@ -1,24 +1,12 @@
 <script lang="ts">
-  // NightScene — the landing's moving background: a procedural pixel-art
-  // night landscape drawn into a low-res canvas and upscaled with
-  // `image-rendering: pixelated`, so it reads as real pixel art, not a
-  // blurred gradient. ~8fps like GG Coder's idle loop; a single still
-  // frame under prefers-reduced-motion.
-  //
-  // Palette is the app's mono chrome plus ONE warm accent — the
-  // glow around the sleeping cat — which is the whole 3am-club
-  // signature.
-  //
-  // Sprite is user-supplied pixel art (gattino.gif, 2 frames).
   import { onMount } from 'svelte';
   import catUrl from '../../assets/sprites/gattino.png?url';
 
   let canvas = $state<HTMLCanvasElement | null>(null);
 
-  const L_H = 230; // logical pixel height; width follows the aspect ratio
+  const L_H = 230;
   const FPS_MS = 125;
 
-  // Deterministic layout per resize so the scene doesn't reshuffle.
   function mulberry(seed: number): () => number {
     let s = seed >>> 0;
     return () => {
@@ -47,34 +35,23 @@
     sp: number;
   }
 
-  // Sprite sheets — frame geometry in source pixels. `cols` is the
-  // number of frames per row; frames are read row-major, so a grid
-  // sheet (cat) and a strip sheet (fox) share the same math.
   const SHEET_FILES = {
     cat: catUrl,
   } as const;
   type SheetId = keyof typeof SHEET_FILES;
 
   const SHEETS: Record<SheetId, { fw: number; fh: number; cols: number; count: number; oy: number }> = {
-    // User-supplied gattino gif — 2 frames of 64px, ~900ms each.
     cat: { fw: 64, fh: 64, cols: 2, count: 2, oy: 0 },
   };
 
   interface Pal {
     sheet: SheetId;
-    /** Center x in scene pixels. */
     x: number;
-    /** Baseline y — bottom of the feet (or fire base for `fire`). */
     base: number;
-    /** Animation speed, frames per second. */
     fps: number;
-    /** Mirror horizontally — all animal sheets face left natively. */
     flip?: boolean;
-    /** Uniform scale. */
     scale: number;
-    /** Bilinear minification — for painterly (non-pixel) sources. */
     smooth?: boolean;
-    /** Sleeping: breathing bob + rising z particles. */
     zzz?: boolean;
   }
 
@@ -107,7 +84,6 @@
       });
     }
 
-    // Far ridge: two slow sines plus jitter — soft rolling silhouette.
     const ridge: number[] = [];
     const p1 = rnd() * 9;
     const p2 = rnd() * 9;
@@ -117,14 +93,12 @@
       ridge.push(Math.round(horizon - 16 - n));
     }
 
-    // Pine treeline: random-walk base with sharp spike peaks.
     const trees: number[] = [];
     let h = 20;
     for (let x = 0; x < w; x++) {
       h += (rnd() - 0.5) * 2.4;
       h = Math.max(10, Math.min(34, h));
       let col = Math.round(horizon - 4 - h);
-      // occasional tapered peak — a tall pine crown
       if (rnd() < 0.05) {
         const peak = 6 + Math.floor(rnd() * 8);
         const spread = 2 + Math.floor(rnd() * 2);
@@ -162,7 +136,6 @@
       });
     }
 
-    // The pal — a little cat asleep on the ground, center stage.
     const pals: Pal[] = [
       { sheet: 'cat', x: Math.round(w * 0.5), base: L_H - 7, fps: 1.1, scale: 0.75, zzz: true },
     ];
@@ -173,7 +146,6 @@
     const { w } = s;
     ctx.imageSmoothingEnabled = false;
 
-    // Sky — black with a barely-there warm lift at the horizon.
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, w, L_H);
     const sky = ctx.createLinearGradient(0, s.horizon - 26, 0, s.horizon + 2);
@@ -182,7 +154,6 @@
     ctx.fillStyle = sky;
     ctx.fillRect(0, s.horizon - 26, w, 28);
 
-    // Stars — twinkle at different speeds.
     for (const st of s.stars) {
       const a = st.b * (0.55 + 0.45 * Math.sin(t * 0.001 * st.sp + st.ph));
       ctx.fillStyle = `rgba(232, 230, 223, ${a.toFixed(3)})`;
@@ -195,7 +166,6 @@
       }
     }
 
-    // Moon — pixel disc, upper right, two darker craters.
     const mx = Math.round(w * 0.79);
     const my = 34;
     const mr = 8;
@@ -210,27 +180,23 @@
     ctx.fillRect(mx + 2, my + 1, 2, 2);
     ctx.fillRect(mx - 1, my + 3, 1, 1);
 
-    // Far ridge silhouette.
     ctx.fillStyle = '#0a0a0e';
     for (let x = 0; x < w; x++) {
       const y = s.ridge[x] ?? s.horizon;
       ctx.fillRect(x, y, 1, s.horizon + 2 - y);
     }
 
-    // Pine treeline silhouette — darker, spikier.
     ctx.fillStyle = '#050505';
     for (let x = 0; x < w; x++) {
       const y = s.trees[x] ?? s.horizon;
       ctx.fillRect(x, y, 1, s.horizon + 3 - y);
     }
-    // A few front tufts one shade up so the line reads as depth.
     ctx.fillStyle = '#0c0c0f';
     for (let x = 0; x < w; x += 13) {
       const y = s.trees[Math.min(w - 1, x + 3)] ?? s.horizon;
       ctx.fillRect(x + 3, y - 2, 1, 3);
     }
 
-    // Meadow — near-black ground with sparse grass ticks.
     ctx.fillStyle = '#030403';
     ctx.fillRect(0, s.horizon + 2, w, L_H - s.horizon - 2);
     ctx.fillStyle = '#0d120c';
@@ -239,8 +205,6 @@
       if (g >= 0) ctx.fillRect(x, s.horizon + 4 + g, 1, 1);
     }
 
-    // Pals — sprite sheets on the ground. A faint warm halo sits
-    // behind each: the sleeping cat is the warm spot in the cold night.
     for (const p of s.pals) {
       const img = images.get(p.sheet);
       if (!img) continue;
@@ -255,7 +219,6 @@
       pool.addColorStop(1, 'rgba(255,150,60,0)');
       ctx.fillStyle = pool;
       ctx.fillRect(p.x - 24, p.base - dh - 14, 48, dh + 28);
-      // Sleeping pals breathe — a slow sub-pixel rise and fall.
       const bob = p.zzz ? Math.sin(t * 0.0016) * 0.7 : 0;
       const dy = Math.round(p.base - dh + bob);
       const dx = Math.round(p.x - dw / 2);
@@ -271,7 +234,6 @@
       }
       if (p.smooth) ctx.imageSmoothingEnabled = false;
 
-      // Sleep bubbles — tiny pixel z's drifting up and fading out.
       if (p.zzz) {
         const zx = p.x + dw * 0.3;
         const zy = p.base - dh - 4;
@@ -293,7 +255,6 @@
       }
     }
 
-    // Fireflies — slow elliptical drift, blinking in and out.
     for (const f of s.flies) {
       const blink = Math.sin(t * 0.0016 * f.sp * 6 + f.ph * 3);
       if (blink < -0.2) continue;
@@ -312,7 +273,6 @@
     let scene = build(300);
     let timer: ReturnType<typeof setInterval> | null = null;
 
-    // Decode the sprite sheets, then repaint once they're ready.
     void Promise.all(
       (Object.keys(SHEET_FILES) as SheetId[]).map(
         (id) =>

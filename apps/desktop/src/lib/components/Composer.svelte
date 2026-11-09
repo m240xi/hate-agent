@@ -7,9 +7,6 @@
   import ThinkingMenu from './ThinkingMenu.svelte';
   import PlanBar from './PlanBar.svelte';
 
-  // Bottom composer: Enter sends, Shift+Enter newline, Esc cancels,
-  // `/` opens the command palette, `@` opens file fuzzy-find,
-  // Shift+Tab cycles thinking level.
   let ta = $state<HTMLTextAreaElement | null>(null);
   let paletteOpen = $state(false);
   let pickerOpen = $state(false);
@@ -35,7 +32,6 @@
       session.cycleThinking();
       return;
     }
-    // ↑ on an empty composer recalls the last message for editing.
     if (e.key === 'ArrowUp' && session.draft.length === 0) {
       const last = session.lastUserText();
       if (last) {
@@ -45,8 +41,6 @@
       }
       return;
     }
-    // `/` at position 0 opens the palette; `@` anywhere opens file picker.
-    // The trigger char is consumed — pickers own their own input.
     if (e.key === '/' && session.draft.length === 0) {
       e.preventDefault();
       paletteOpen = true;
@@ -156,13 +150,10 @@
   .composer-wrap {
     padding: 8px 16px 12px;
     background: var(--bg-0);
-    /* Sized by its content, never squeezed by the transcript above. */
     flex: none;
     min-width: 0;
     container-type: inline-size;
   }
-  /* The shortcut hint is the first thing to go when the column is
-     narrow — the controls beside it must stay whole. */
   @container (max-width: 560px) {
     .hint {
       display: none;
@@ -231,7 +222,6 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    /* A long queue scrolls instead of pushing the composer off screen. */
     max-height: 96px;
     overflow-y: auto;
   }
@@ -289,8 +279,6 @@
     gap: 10px;
     padding: 4px 8px 6px 12px;
   }
-  /* The model picker gives way (its label ellipsizes) before anything
-     is pushed out of the composer. */
   .composer-meta > :global(.pop:not(.pop-left)) {
     flex: 0 1 auto;
     min-width: 56px;

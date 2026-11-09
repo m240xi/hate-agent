@@ -1,11 +1,3 @@
-//! Anthropic `/v1/messages` adapter.
-//!
-//! Vendor specifics handled here: `x-api-key` auth (not Bearer), the
-//! top-level `system` field, content-block message shapes, tool results
-//! grouped into a single user message (Anthropic requires it),
-//! `content_block_*` SSE events, `cache_read_input_tokens` accounting,
-//! and `count_tokens` via the free `/v1/messages/count_tokens` endpoint.
-
 use std::sync::Arc;
 
 use futures_util::{StreamExt, stream::BoxStream};
@@ -24,23 +16,9 @@ use hate_core::{TokenUsage, ToolCall, ToolName};
 use crate::sse::{self, SharedCredential, SseFrame};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// Beta flags Anthropic requires on OAuth-subscription tokens
-/// (Pro/Max logins) instead of `x-api-key`: `oauth-2025-04-20` enables
-/// OAuth auth at all; `claude-code-20250219` marks the request as a
-/// Claude Code client — without it the Sonnet/Opus gate answers with a
-/// headerless 429.
 const OAUTH_BETA: &str = "oauth-2025-04-20,claude-code-20250219";
-/// Subscription inference is scoped to Claude Code: the entitlement
-/// gate rejects OAuth requests unless the FIRST system block is
-/// *exactly* this line (not merely a prefix of a larger block — that
-/// yields a headerless 429 that looks like rate limiting).
 const CLAUDE_CODE_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-/// Attach vendor auth headers: subscription OAuth tokens ride as
-/// `Authorization: Bearer` + the OAuth beta flags + `x-app: cli`;
-/// plain API keys keep the `x-api-key` header. `key` is whatever
-/// [`CredentialSource::bearer`] returned — the source decides which
-/// style applies via `is_oauth`.
 fn apply_auth(rb: reqwest::RequestBuilder, key: &str, oauth: bool) -> reqwest::RequestBuilder {
     if oauth {
         rb.header("authorization", format!("Bearer {key}"))
@@ -51,8 +29,6 @@ fn apply_auth(rb: reqwest::RequestBuilder, key: &str, oauth: bool) -> reqwest::R
     }
 }
 
-/// Anthropic messages adapter. `base_url` is the API root
-/// (`https://api.anthropic.com`); `/v1/messages` is appended.
 pub struct AnthropicProvider {
     client: reqwest::Client,
     base_url: String,
@@ -60,8 +36,6 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    /// Build an adapter for `base_url` (API root, no `/v1` suffix needed —
-    /// both `https://api.anthropic.com` and `.../v1` are normalized).
     pub fn new(base_url: impl Into<String>, credential: SharedCredential) -> Self {
         let base = base_url.into().trim_end_matches('/').to_string();
         let base = base.strip_suffix("/v1").unwrap_or(&base).to_string();
@@ -85,8 +59,6 @@ impl AnthropicProvider {
     }
 }
 
-// ── wire types (request) ──────────────────────────────────────────────────
-
 #[derive(Serialize)]
 struct WireRequest {
     model: String,
@@ -97,7 +69,6 @@ struct WireRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<Value>,
     stream: bool,
-    /// Extended-thinking control; omitted entirely when off.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingParam>,
 }
@@ -119,10 +90,6 @@ struct CountRequest {
     tools: Vec<Value>,
 }
 
-/// Anthropic's tool ids must match `^[a-zA-Z0-9_-]+$`; other providers
-/// mint ids like `functions.read_file:0` (Kimi). Map invalid chars to
-/// `_` — deterministic, so a `tool_use` and its `tool_result` still
-/// pair up after a mid-session provider swap.
 fn wire_tool_id(id: &str) -> String {
     let s: String = id
         .chars()
@@ -137,15 +104,6 @@ fn wire_tool_id(id: &str) -> String {
     if s.is_empty() { "tool".to_string() } else { s }
 }
 
-/// Convert core messages to Anthropic's shape. Consecutive `Tool`
-/// messages must collapse into ONE user message of `tool_result` blocks —
-/// the API rejects split results.
-///
-/// History may come from another provider (mid-session swap), so the
-/// conversion is defensive: empty/whitespace-only text is dropped
-/// (Anthropic 400s on empty text blocks), tool ids are sanitized, and
-/// when this request advertises no tools, prior tool traffic is
-/// rendered as text (Anthropic rejects `tool_use` blocks without tools).
 fn wire_messages(req: &ChatRequest) -> Vec<Value> {
     fn flush_results(out: &mut Vec<Value>, pending: &mut Vec<Value>) {
         if !pending.is_empty() {
@@ -207,9 +165,6 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
                         }));
                     }
                 }
-                // An empty assistant turn (failed/odd round from another
-                // provider) carries nothing — drop it rather than send an
-                // empty text block.
                 if !blocks.is_empty() {
                     out.push(json!({"role": "assistant", "content": blocks}));
                 }
@@ -218,10 +173,6 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
     }
     flush_results(&mut out, &mut pending_results);
 
-    // Explicit prompt caching (CacheMode::Explicit): mark the LAST
-    // content block of the LAST message — caches the whole prefix, and
-    // the breakpoint moving forward each round is what makes
-    // multi-round tool loops incremental instead of re-billed.
     if let Some(last) = out.last_mut()
         && let Some(content) = last.get_mut("content")
     {
@@ -245,13 +196,6 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
     out
 }
 
-/// System prompt as a content-block array carrying the first cache
-/// breakpoint — Anthropic only caches block form, not bare strings.
-/// For OAuth (`oauth`), the Claude Code identity line goes in as its
-/// own FIRST block — the entitlement gate checks that block verbatim
-/// and answers a headerless 429 when it's merely part of a larger
-/// block. The real prompt follows with the cache breakpoint, so the
-/// identity line never pollutes the model-facing instructions.
 fn cached_system(system: Option<&String>, oauth: bool) -> Option<Value> {
     system.map(|s| {
         if oauth {
@@ -284,15 +228,11 @@ fn wire_tools(specs: &[ToolSpec]) -> Vec<Value> {
             })
         })
         .collect();
-    // Second breakpoint: everything through the tool schemas is static
-    // per session — prime it once, hit it every request.
     if let Some(last) = tools.last_mut() {
         last["cache_control"] = json!({"type": "ephemeral"});
     }
     tools
 }
-
-// ── SSE event payloads ────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct EventPayload {
@@ -359,9 +299,6 @@ struct ContentBlockStart {
 
 #[derive(Debug, Deserialize)]
 struct DeltaBody {
-    /// `content_block_delta` deltas carry `type`; `message_delta`'s
-    /// `delta` (`{"stop_reason": …}`) does not — default keeps both
-    /// parseable.
     #[serde(rename = "type", default)]
     kind: String,
     #[serde(default)]
@@ -386,22 +323,14 @@ struct ApiError {
     message: String,
 }
 
-/// Per-content-block accumulation for `tool_use` `input_json` deltas.
 enum BlockAcc {
-    /// text or thinking block — deltas already streamed through.
     Passthrough,
-    /// `tool_use` block being assembled.
     Tool {
-        /// Provider-assigned `tool_use` id.
         id: String,
-        /// Tool name.
         name: String,
-        /// Accumulated `input_json_delta` fragments.
         json: String,
     },
 }
-
-// ── provider impl ─────────────────────────────────────────────────────────
 
 impl Provider for AnthropicProvider {
     fn stream(
@@ -472,7 +401,6 @@ impl Provider for AnthropicProvider {
             let oauth = credential.is_oauth();
             let mut out = Vec::new();
             let mut page = String::new();
-            // Paginate defensively; 10 pages × 1000 is far beyond reality.
             for _ in 0..10 {
                 let mut rb = apply_auth(client.get(&url), &key, oauth)
                     .header("anthropic-version", ANTHROPIC_VERSION)
@@ -495,7 +423,7 @@ impl Provider for AnthropicProvider {
                 out.extend(body.data.into_iter().map(|e| ModelInfo {
                     id: e.id.clone(),
                     name: e.display_name.or(Some(e.id)),
-                    meta: None, // Anthropic's catalog doesn't publish pricing/context
+                    meta: None,
                 }));
                 if body.has_more {
                     match last {
@@ -520,8 +448,6 @@ impl Provider for AnthropicProvider {
     }
 }
 
-// ── streaming pump ────────────────────────────────────────────────────────
-
 #[allow(clippy::too_many_arguments)]
 async fn pump(
     client: &reqwest::Client,
@@ -531,9 +457,6 @@ async fn pump(
     cancel: CancellationToken,
     tx: &mpsc::Sender<Result<Delta, ProviderError>>,
 ) -> Result<(), ProviderError> {
-    // Thinking tokens bill *inside* max_tokens, so the budget is added
-    // on top of the requested output ceiling (Anthropic requires
-    // budget_tokens < max_tokens).
     let thinking = match req.thinking {
         hate_core::provider::ThinkingLevel::Off => None,
         hate_core::provider::ThinkingLevel::Low => Some(4_096),
@@ -590,7 +513,6 @@ async fn pump(
         };
 
         let SseFrame { event, data } = frame;
-        // Anthropic puts the type in the JSON payload; `event:` mirrors it.
         let payload: EventPayload = match serde_json::from_str(&data) {
             Ok(p) => p,
             Err(e) => {
@@ -598,7 +520,7 @@ async fn pump(
                 continue;
             }
         };
-        let _ = event; // payload.type is authoritative
+        let _ = event;
 
         match payload.kind.as_str() {
             "message_start" => {
@@ -647,7 +569,7 @@ async fn pump(
                             acc.push_str(&json);
                         }
                     }
-                    _ => {} // signature_delta, citations, etc.
+                    _ => {}
                 }
             }
             "content_block_stop" => {
@@ -679,13 +601,11 @@ async fn pump(
                 if let Some(u) = payload.usage {
                     output_tokens = u.output_tokens;
                 }
-                // Anthropic's output_tokens is cumulative — send the
-                // combined usage record once, here.
                 let usage = TokenUsage {
                     input: input.input + input.cache_read + input.cache_creation,
                     cached_input: input.cache_read,
                     output: output_tokens,
-                    thinking: 0, // thinking bills inside output_tokens
+                    thinking: 0,
                 };
                 if tx.send(Ok(Delta::Usage(usage))).await.is_err() {
                     return Ok(());
@@ -703,12 +623,10 @@ async fn pump(
                 });
                 return Err(map_api_error(&e));
             }
-            _ => {} // ping, content_block_* we don't care about
+            _ => {}
         }
     }
 
-    // Some streams end at body-close without message_stop; still report
-    // usage if we never got the final delta.
     if !usage_sent {
         let usage = TokenUsage {
             input: input.input + input.cache_read + input.cache_creation,
@@ -800,25 +718,18 @@ mod tests {
             vec![bash_spec()],
         );
 
-        // System → block array with cache_control.
         let sys = cached_system(r.system.as_ref(), false).expect("system present");
         assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
-        // API-key path keeps the prompt verbatim — no Claude Code prefix.
         assert_eq!(sys[0]["text"], "you are helpful");
-        // OAuth path: the identity line is its own FIRST block, verbatim
-        // — the entitlement gate rejects it when merged into a larger
-        // block — and the real prompt follows with the cache breakpoint.
         let oauth_sys = cached_system(r.system.as_ref(), true).expect("system present");
         assert_eq!(oauth_sys[0]["text"], CLAUDE_CODE_PREFIX);
         assert!(oauth_sys[0].get("cache_control").is_none());
         assert_eq!(oauth_sys[1]["text"], "you are helpful");
         assert_eq!(oauth_sys[1]["cache_control"]["type"], "ephemeral");
 
-        // Last tool carries the second breakpoint.
         let tools = wire_tools(&r.tools);
         assert_eq!(tools[0]["cache_control"]["type"], "ephemeral");
 
-        // Last message (collapsed tool_result user msg) → last block.
         let msgs = wire_messages(&r);
         let last = msgs.last().expect("messages");
         let blocks = last["content"].as_array().expect("block array");
@@ -826,7 +737,6 @@ mod tests {
             blocks.last().expect("block")["cache_control"]["type"],
             "ephemeral"
         );
-        // Earlier messages stay breakpoint-free.
         assert!(
             msgs[0]["content"].is_string() || msgs[0]["content"][0].get("cache_control").is_none()
         );
@@ -843,12 +753,9 @@ mod tests {
         let msgs = wire_messages(&r);
         assert!(msgs[0]["content"].is_array());
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
-        // No tools → no tool breakpoint.
         assert_eq!(wire_tools(&r.tools).len(), 0);
     }
 
-    /// History inherited from another provider after a mid-session
-    /// swap: foreign tool ids, empty assistant turns, blank user turns.
     #[test]
     fn foreign_history_is_wire_safe() {
         let foreign = "functions.bash:0";
@@ -889,12 +796,9 @@ mod tests {
         );
         assert_eq!(msgs[1]["content"][0]["id"], "functions_bash_0");
         assert_eq!(msgs[2]["content"][0]["tool_use_id"], "functions_bash_0");
-        // Empty assistant + blank user dropped: user, assistant(tool),
-        // user(result), user("next").
         assert_eq!(msgs.len(), 4);
         assert!(!json.contains(r#""text":"""#), "empty text block: {json}");
 
-        // Same history, no tools advertised → tool traffic as text.
         let msgs = wire_messages(&req(messages, Vec::new()));
         let json = serde_json::to_string(&msgs).unwrap();
         assert!(!json.contains("tool_use"), "tool_use without tools: {json}");

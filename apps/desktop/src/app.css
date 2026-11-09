@@ -1,12 +1,3 @@
-/* hate-agent design tokens — "3am club": OLED black, warm-neutral
-   monochrome chrome, no hue in the interface itself. Semantic colors
-   (ok/warn/err/info) stay muted so status still reads at a glance.
-   Motion: 140ms ease-out on enter only. */
-
-/* Pixel faces for the landing (GG Royale's picks): Alagard (Hewett Tsoi,
-   free with credit — see docs/deps.md) for the wordmark and plate
-   buttons, m5x7 (Daniel Linssen, CC0) for small pixel text. Drawn on a
-   16px grid — use at 16px or whole multiples. */
 @font-face {
   font-family: 'Alagard';
   src: url('./assets/fonts/alagard/alagard.ttf') format('truetype');
@@ -21,13 +12,11 @@
 :root {
   color-scheme: dark;
 
-  /* surfaces — pure black window, then warm-tinted grays */
   --bg-0: #000000;
   --bg-1: #0a0a0c;
   --bg-2: #121215;
   --bg-3: #1a1a1e;
 
-  /* foreground steps — warm off-whites, never blue */
   --fg-0: #f0eee9;
   --fg-1: #c3c0b8;
   --fg-2: #8d8a82;
@@ -36,13 +25,11 @@
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.16);
 
-  /* monochrome accent — warm white fill, ink text on it */
   --accent: #efede6;
   --accent-dim: #6e6b64;
   --accent-fg: #0c0c0e;
   --accent-soft: rgba(239, 237, 230, 0.08);
 
-  /* muted semantics — visible but never neon */
   --ok: #82c184;
   --warn: #d9b45c;
   --err: #d96a5c;
@@ -142,11 +129,6 @@
   --err: #b0483a;
   --info: #3d6a85;
 }
-
-/* ── custom palettes ────────────────────────────────────────────────
-   Same token contract as dark/light; only the values change. All
-   three stay dark — hue lives in surfaces + accent, semantics keep
-   enough separation to read at a glance. */
 
 :root[data-theme='phosphor'] {
   color-scheme: dark;
@@ -269,7 +251,6 @@ select {
   color: var(--accent-fg);
 }
 
-/* Scrollbars — thin, quiet */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--bg-3) transparent;
@@ -286,7 +267,6 @@ select {
   background: transparent;
 }
 
-/* Enter-only motion */
 @keyframes rise-in {
   from {
     opacity: 0;

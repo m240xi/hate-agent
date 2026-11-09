@@ -1,6 +1,3 @@
-//! `hate` — the headless CLI. Same `hate-core` session the desktop app
-//! drives; this binary is what the benchmark harness calls.
-
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -179,7 +176,6 @@ async fn auth(cmd: AuthCommands) -> i32 {
                     }
                 }
             }
-            // Also report providers with credentials but no config entry.
             if !any {
                 println!("no providers configured — run `hate auth login`");
             }
@@ -220,9 +216,6 @@ async fn login_nous(ctx: &AuthContext) -> i32 {
     }
 }
 
-/// Claude subscription login: PKCE authorize URL → browser → paste the
-/// code the callback page shows. Also registers a provider entry in
-/// config.toml when missing so the credential is reachable.
 async fn login_claude(ctx: &AuthContext, provider: &str) -> i32 {
     let auth = ClaudeAuth::for_provider(Arc::clone(&ctx.store), provider);
     let login = auth.begin_login();
@@ -237,8 +230,6 @@ async fn login_claude(ctx: &AuthContext, provider: &str) -> i32 {
     }
     match auth.complete_login(&login.pending, &line).await {
         Ok(_) => {
-            // Self-heal the provider entry so `hate run`/`hate models`
-            // can actually resolve the new credential.
             match hate_auth::Config::load() {
                 Ok(mut config) => {
                     config.providers.entry(provider.to_string()).or_insert(
@@ -264,7 +255,6 @@ async fn login_claude(ctx: &AuthContext, provider: &str) -> i32 {
     }
 }
 
-/// Shared setup for `run`/`models`: resolve provider + credential + model.
 fn resolve_target(
     ctx: &AuthContext,
     provider: Option<String>,
@@ -351,8 +341,6 @@ async fn run(
         }
     };
 
-    // Best-effort context window for compaction thresholds — one
-    // catalog call; failure just disables compaction.
     let context_window = provider
         .list_models()
         .await
@@ -362,9 +350,6 @@ async fn run(
         .and_then(|meta| meta.context_tokens)
         .map_or(0, u64::from);
 
-    // MCP servers from the shared `mcp.json` — same file the desktop
-    // app manages, so `hate run` sees identical tools. Missing file →
-    // empty hub, zero cost.
     let mcp_path = dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("hate-agent")
@@ -381,8 +366,7 @@ async fn run(
         thinking,
         limits: Limits::default(),
         ledger: ledger(),
-        persist: None, // one-shot CLI runs stay ephemeral
-        // `hate run` operates on the current directory — read tools on.
+        persist: None,
         tools: std::env::current_dir()
             .ok()
             .and_then(|p| WorkspaceTools::new(p).ok())
@@ -394,7 +378,6 @@ async fn run(
         context_window,
     });
 
-    // Ctrl-C cancels the in-flight turn (Esc is the desktop equivalent).
     let handle = session.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {

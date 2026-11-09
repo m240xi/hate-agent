@@ -14,8 +14,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # Tauri's build scripts shell out to pkg-config; the workspace can't
-      # even `cargo check` on a bare runner without these.
       - name: Install Tauri Linux dependencies
         run: |
           sudo apt-get update

@@ -1,6 +1,3 @@
-//! Retry policy tests: classification, backoff bounds, and end-to-end
-//! retry over a scripted flaky provider (no network).
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -24,7 +21,6 @@ fn req() -> ChatRequest {
     }
 }
 
-/// Fails `failures` times with `err`, then emits `ok` deltas + Done.
 struct Flaky {
     failures: usize,
     err: ProviderError,
@@ -144,8 +140,6 @@ async fn does_not_retry_auth_errors() {
 
 #[tokio::test]
 async fn committed_stream_surfaces_later_errors() {
-    // Provider yields a delta, then fails — retry would duplicate text,
-    // so the error must surface instead.
     struct CommitThenFail;
     impl Provider for CommitThenFail {
         fn stream(

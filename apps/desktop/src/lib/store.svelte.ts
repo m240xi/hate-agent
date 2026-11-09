@@ -1,7 +1,3 @@
-// SessionStore — the ONLY state hub. Fed by Tauri `core-event` emissions
-// (or the fixture script when running outside Tauri). Components read
-// state; they never decide agent behavior.
-
 import { untrack } from 'svelte';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import {
@@ -40,8 +36,6 @@ function isThinkingLevel(v: string | null): v is ThinkingLevel {
   return v !== null && (THINKING_LEVELS as readonly string[]).includes(v);
 }
 
-/** Non-chat entries (embeddings, rerankers, batch SKUs) don't belong in
- *  the composer picker — the catalog is a full router listing. */
 function filterChatModels(models: ProviderModel[]): ProviderModel[] {
   const SKIP = /embed|bge-|e5-|gte-|voyage|paraphrase|rerank|:batch/i;
   return models
@@ -49,7 +43,6 @@ function filterChatModels(models: ProviderModel[]): ProviderModel[] {
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-/** Human-readable text for a serde externally-tagged `FailureReason`. */
 function failureText(r: FailureReason): string {
   if ('Provider' in r) return r.Provider.message;
   if ('LimitExceeded' in r) return `limit exceeded: ${r.LimitExceeded.limit}`;
@@ -72,8 +65,6 @@ function fmtK(n: number): string {
   return String(n);
 }
 
-/** The frontend-owned half of a persisted session — serialized to the
- *  `ui_state` column. The backend owns message history separately. */
 interface UiState {
   blocks: TranscriptBlock[];
   draft: string;
@@ -94,23 +85,17 @@ interface UiState {
   planMode: boolean;
 }
 
-/** Sent when the user approves a plan — the plan itself is already in
- *  the conversation, so this stays short. */
 const RUN_PLAN_TEXT =
   'Approved. Carry out the plan above step by step, then verify the result.';
 
 class SessionStore {
-  // ── transcript ──────────────────────────────────────────────────────────
-  // Empty in the real app — fixtures only load for browser dev playback.
   blocks = $state<TranscriptBlock[]>([]);
 
-  // ── left pane ───────────────────────────────────────────────────────────
   tree = $state<FileNode[]>([]);
   symbols = $state<SymbolHit[]>([]);
   indexTruncated = $state(false);
   selectedPath = $state<string | null>(null);
 
-  // ── right pane ──────────────────────────────────────────────────────────
   plan = $state<PlanStep[]>([]);
   usage = $state<TokenUsage>({ input: 0, cached_input: 0, output: 0, thinking: 0 });
   budgetTokens = 200_000;
@@ -118,7 +103,6 @@ class SessionStore {
   changedFiles = $state<ChangedFile[]>([]);
   model = $state('');
   provider = $state('');
-  /** Config name of the active provider (`nous`, …) — for `provider_set_model`. */
   providerName = $state('');
   sessionState = $state<'idle' | 'running' | 'awaiting_permission' | 'awaiting_user' | 'done' | 'failed'>(
     'idle',
@@ -126,119 +110,75 @@ class SessionStore {
   costUsd = $state(0);
   cacheRatio = $state(0);
 
-  // ── model picker / thinking ─────────────────────────────────────────────
   models = $state<ProviderModel[]>([]);
   modelsState = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
   modelsError = $state('');
   thinkingLevel = $state<ThinkingLevel>('off');
 
-  // ── session stats (Claude-Code-style status line) ───────────────────────
-  /** User messages sent this session — the turn counter. */
   sessionTurns = $state(0);
-  /** First-send timestamp; `null` before the session starts. */
   sessionBeganAt = $state<number | null>(null);
-  /** Cumulative token spend across completed turns. */
   sessionTotals = $state<TokenUsage>({ input: 0, cached_input: 0, output: 0, thinking: 0 });
-  /** Prompt tokens of the most recent request — the live context fill. */
   ctxUsed = $state(0);
 
-  // ── composer / permission ───────────────────────────────────────────────
   draft = $state('');
   pendingPermission = $state<PermissionRequest | null>(null);
   awaitingPrompt = $state<string | null>(null);
-  /** Messages typed while a turn was running — sent in order, one per
-   *  completed turn. */
   queue = $state<string[]>([]);
 
-  // ── plan mode ───────────────────────────────────────────────────────────
-  /** While on, every send is a read-only `/plan` turn. */
   planMode = $state(false);
-  /** A plan turn finished with steps — the plan bar offers Run/Revise. */
   planReady = $state(false);
 
-  // ── panes ───────────────────────────────────────────────────────────────
   leftCollapsed = $state(false);
   rightCollapsed = $state(false);
   leftWidth = $state(260);
   rightWidth = $state(300);
 
-  // ── sessions ────────────────────────────────────────────────────────────
-  /** Active persisted session id; `null` = none opened yet (ephemeral). */
   sessionId = $state<string | null>(null);
-  /** Metadata for the active session (title/model/mode for the topbar). */
   sessionMeta = $state<SessionMeta | null>(null);
-  /** Rows for the session browser, filtered to `pickerMode`. */
   sessions = $state<SessionMeta[]>([]);
   sessionsState = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  /** Non-null → the view shows the session browser instead of a chat. */
   pickerMode = $state<SessionMode | null>(null);
-  /** An open/new/delete IPC is in flight. */
   sessionBusy = $state(false);
-  /** Configured providers — drives the empty-state connect hint. */
   providers = $state<ProviderInfo[]>([]);
 
-  // ── updater ──────────────────────────────────────────────────────────────
-  /** Newer release found by `updateCheck`; shows the update bar. */
   updateAvailable = $state<{ version: string; notes: string | null } | null>(null);
-  /** `downloading` (bytes so far) | `installing` | `error`. */
   updateState = $state<'downloading' | 'installing' | 'error' | null>(null);
-  /** Bytes downloaded so far (0 before the first chunk). */
   updateDownloaded = $state(0);
-  /** Total download size in bytes, when the server reports one. */
   updateTotal = $state<number | null>(null);
 
-  // ── app shell ───────────────────────────────────────────────────────────
-  /** Landing picks the surface; persisted across launches. */
   mode = $state<AppMode>('home');
-  /** `auto` follows the OS; explicit themes force the palette.
-   *  Ids come from `themes.ts` — app.css defines each `data-theme`. */
   theme = $state<string>('auto');
-  /** Folder the code session operates in (from config.toml). */
   workspacePath = $state<string | null>(null);
 
-  // ── internals ───────────────────────────────────────────────────────────
   private unlisten: UnlistenFn | null = null;
   private unlistenUpdate: UnlistenFn | null = null;
   private fixtureTimers: ReturnType<typeof setTimeout>[] = [];
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Block index where the current provider request's output begins —
-   *  `tokens_counted` attributes usage to blocks from here on. */
   private roundStart = 0;
-  /** Usage of a request that produced no text or thinking; lands on the
-   *  first tool card it started. */
   private pendingToolUsage: TokenUsage | null = null;
-  /** The in-flight turn's user block, for the turn rollup. */
   private turnBlockId: number | null = null;
   private turnIsPlan = false;
-  /** The in-flight turn is carrying out an approved plan. */
   private planExecuting = false;
 
   get running(): boolean {
     return this.sessionState === 'running';
   }
 
-  /** Catalog row for the active model (undefined until models load). */
   get selectedModel(): ProviderModel | undefined {
-    // Provider-aware: two providers can list the same id (e.g. an
-    // aggregator mirroring a vendor catalog).
     return (
       this.models.find((m) => m.id === this.model && m.provider === this.providerName) ??
       this.models.find((m) => m.id === this.model)
     );
   }
 
-  /** Context window to measure `ctxUsed` against — real catalog value
-   *  when known, else the conservative default. */
   get ctxLimit(): number {
     return this.selectedModel?.context_tokens ?? this.budgetTokens;
   }
 
-  /** 0..1 fill of the current context window. */
   get ctxRatio(): number {
     return this.ctxLimit > 0 ? Math.min(1, this.ctxUsed / this.ctxLimit) : 0;
   }
 
-  /** Wire the event stream. Called once on app mount. */
   async start(): Promise<void> {
     const saved = localStorage.getItem('hate:mode');
     if (MODES.includes(saved as AppMode)) this.mode = saved as AppMode;
@@ -251,9 +191,6 @@ class SessionStore {
       const m = await import('./ipc');
       this.workspacePath = await m.workspaceGet().catch(() => null);
       void this.refreshIndex();
-      // Push the persisted thinking level into the session slot so the
-      // first spawned session inherits it (live swaps go through
-      // `session_set_options` too).
       void m
         .sessionSetOptions(
           null,
@@ -286,8 +223,6 @@ class SessionStore {
       });
       void this.checkForUpdate();
     } else {
-      // Browser dev mode: replay the fixture script so the shell demos
-      // itself without a backend.
       this.blocks = [...fixtureInitialBlocks];
       this.tree = fixtureTree;
       this.symbols = fixtureSymbols;
@@ -300,8 +235,6 @@ class SessionStore {
       this.costUsd = 0.0031;
       this.cacheRatio = 0.82;
       this.startFixturePlayback();
-      // Browser dev mode only: lets layout tests and manual poking feed
-      // arbitrary events through the real pipeline. Never set in Tauri.
       (window as unknown as { __hateSession?: SessionStore }).__hateSession = this;
     }
   }
@@ -313,48 +246,35 @@ class SessionStore {
     this.fixtureTimers = [];
   }
 
-  /** Ask GitHub for a newer release. Failures are silent — an offline
-   *  check must never surface as a session error. */
   async checkForUpdate(): Promise<void> {
     try {
       const m = await import('./ipc');
       const info = await m.updateCheck();
       if (info) this.updateAvailable = { version: info.version, notes: info.notes };
     } catch {
-      // no release endpoint reachable yet (first release, offline, dev)
     }
   }
 
-  /** Download + install the pending update; the backend restarts the
-   *  app when it finishes. Progress lands in updateState/updateDownloaded. */
   async installUpdate(): Promise<void> {
     this.updateState = 'installing';
     try {
       const m = await import('./ipc');
       await m.updateInstall();
-      // app.restart() fires backend-side when the installer finishes
     } catch (e) {
       this.updateState = 'error';
       this.note(`update failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  // ── commands ────────────────────────────────────────────────────────────
-
-  /** Send the composer draft. In Tauri this becomes a `session_send`
-   *  invoke; the first send auto-creates the persisted session. */
   send(override?: string): void {
     const text = (override ?? this.draft).trim();
     if (!text) return;
     if (override === undefined) this.draft = '';
-    // Busy → queue instead of dropping; drained as turns complete.
     if (this.sessionState === 'running' || this.sessionState === 'awaiting_permission') {
       this.queue.push(text);
       return;
     }
     const plan = this.planMode;
-    // Core recognises the `/plan ` prefix and runs a read-only turn;
-    // the transcript keeps the text as the user typed it.
     const wire = plan ? `/plan ${text}` : text;
     this.planReady = false;
     const begin = () => {
@@ -371,8 +291,6 @@ class SessionStore {
       this.scheduleUiSave();
 
       if (!inTauri()) {
-        // Outside Tauri there is no backend — leave the turn visibly
-        // "running" so the UI demonstrates the busy state honestly.
         return;
       }
       void import('./ipc')
@@ -424,17 +342,12 @@ class SessionStore {
     }
   }
 
-  // ── plan mode ───────────────────────────────────────────────────────────
-
-  /** `/plan` — toggle plan mode. Leaving it dismisses a pending plan bar
-   *  but keeps the steps in the inspector for reference. */
   togglePlan(): void {
     this.planMode = !this.planMode;
     if (!this.planMode) this.planReady = false;
     this.scheduleUiSave();
   }
 
-  /** Approve the pending plan: leave plan mode and run it. */
   runPlan(): void {
     if (!this.planReady || this.running) return;
     this.planMode = false;
@@ -444,12 +357,10 @@ class SessionStore {
     this.send(RUN_PLAN_TEXT);
   }
 
-  /** Keep planning — hide the bar; the next message revises the plan. */
   revisePlan(): void {
     this.planReady = false;
   }
 
-  /** Drop the plan and leave plan mode. */
   discardPlan(): void {
     this.planReady = false;
     this.planMode = false;
@@ -457,13 +368,10 @@ class SessionStore {
     this.scheduleUiSave();
   }
 
-  // ── transcript actions ──────────────────────────────────────────────────
-
   removeQueued(index: number): void {
     this.queue.splice(index, 1);
   }
 
-  /** Text of the most recent user message (composer ↑ recall, `/retry`). */
   lastUserText(): string | null {
     for (let i = this.blocks.length - 1; i >= 0; i--) {
       const b = this.blocks[i];
@@ -480,14 +388,12 @@ class SessionStore {
     return null;
   }
 
-  /** `/retry` — send the last user message again. */
   retryLast(): void {
     const text = this.lastUserText();
     if (text) this.send(text);
     else this.note('nothing to retry yet');
   }
 
-  /** `/copy` — copy the latest assistant reply. */
   async copyLastReply(): Promise<void> {
     for (let i = this.blocks.length - 1; i >= 0; i--) {
       const b = this.blocks[i];
@@ -500,7 +406,6 @@ class SessionStore {
     this.note('no reply to copy yet');
   }
 
-  /** `/export` — copy the whole transcript as Markdown. */
   async exportTranscript(): Promise<void> {
     if (this.blocks.length === 0) {
       this.note('nothing to export yet');
@@ -510,13 +415,10 @@ class SessionStore {
     this.note(ok ? 'transcript copied to the clipboard as Markdown' : 'clipboard unavailable');
   }
 
-  /** A local, non-model line in the transcript (command feedback). */
   note(text: string): void {
     this.blocks.push({ id: nextBlockId++, kind: 'text', text, streaming: false, local: true });
   }
 
-  /** Rewind the workspace to a checkpoint's pre-turn file state.
-   *  Leaves a transcript note so the rewind is visible in the record. */
   async rewindCheckpoint(id: string): Promise<void> {
     if (!inTauri()) return;
     try {
@@ -538,16 +440,11 @@ class SessionStore {
     }
   }
 
-  /** Reload the cross-provider model catalog. Called at startup and
-   *  after a provider is connected/disconnected/added so the picker
-   *  never goes stale mid-session. */
   async refreshModels(): Promise<void> {
     if (!inTauri()) return;
     const m = await import('./ipc');
     this.providers = await m.providersList().catch(() => []);
     this.modelsState = 'loading';
-    // Fan out across every configured provider so the picker can
-    // group by provider; unauthed/unreachable ones just yield [].
     const lists = await Promise.all(
       this.providers.map((p) =>
         m
@@ -566,16 +463,6 @@ class SessionStore {
     }
   }
 
-  /** Pick a model — persists to config.toml (CLI shares it) and
-   *  hot-swaps the live session. `provider` tags catalog rows from the
-   *  multi-provider fan-out; a pick from a *different* provider swaps
-   *  the session's adapter too (adapters are stateless), so it applies
-   *  from the next turn with no respawn.
-   *
-   *  Transactional: the UI's provider/model only change once the
-   *  backend has accepted the swap. If the provider can't be reached
-   *  (logged out, removed), the pick is refused with a visible note and
-   *  nothing moves — UI and session can never disagree. */
   async setModel(id: string, provider?: string | null): Promise<void> {
     const target = provider || this.providerName;
     if (!id || (id === this.model && target === this.providerName)) return;
@@ -588,8 +475,6 @@ class SessionStore {
     const crossProvider = !!target && target !== this.providerName;
     if (crossProvider) {
       try {
-        // Adapter + model swap as ONE backend operation — a model id
-        // must never ride into a session running another provider.
         await m.sessionSetProvider(target, id);
       } catch (e) {
         this.blocks.push({
@@ -601,7 +486,6 @@ class SessionStore {
       }
       this.providerName = target;
       this.provider = target;
-      // The backend also made `target` the default provider.
       this.providers = this.providers.map((p) => ({ ...p, is_default: p.name === target }));
     }
     this.model = id;
@@ -620,11 +504,6 @@ class SessionStore {
     this.scheduleUiSave();
   }
 
-  /** Push the UI's provider + model to the backend slot as one unit —
-   *  used whenever a session is primed (new/opened) so the next spawn
-   *  runs exactly the pair the composer shows. If the provider is
-   *  unusable, fall back to the configured default rather than leave
-   *  the UI showing a pair the backend won't run. */
   private async syncSelection(m: typeof import('./ipc')): Promise<void> {
     if (this.providerName) {
       try {
@@ -651,7 +530,6 @@ class SessionStore {
       .catch(() => {});
   }
 
-  /** Pick a thinking level — applies next turn, persisted locally. */
   setThinking(level: ThinkingLevel): void {
     if (level === this.thinkingLevel) return;
     this.thinkingLevel = level;
@@ -676,8 +554,6 @@ class SessionStore {
     this.setThinking(order[(i + 1) % order.length] ?? 'off');
   }
 
-  /** `/model` — cycle the provider catalog; persists + hot-swaps the
-   *  live session exactly like picking from the model menu. */
   async cycleModel(): Promise<void> {
     const list = this.models;
     if (list.length === 0) return;
@@ -688,23 +564,16 @@ class SessionStore {
     if (next) await this.setModel(next.id, next.provider);
   }
 
-  /** `/compact` — ask the backend to shrink context now; the
-   *  compaction event lands in the transcript when it finishes. */
   async compact(): Promise<void> {
     if (!inTauri()) return;
     const m = await import('./ipc');
     await m.sessionCompact().catch(() => {});
   }
 
-  // ── session lifecycle ───────────────────────────────────────────────────
-
-  /** Which persisted-session mode the current surface maps to. */
   sessionMode(): SessionMode {
     return this.mode === 'code' ? 'code' : 'chat';
   }
 
-  /** Entering Chat/Code resumes that mode's last session, or opens the
-   *  browser when none exists. Called from App's mode effect. */
   async enterMode(mode: SessionMode): Promise<void> {
     if (this.pickerMode === mode) {
       void this.refreshSessions(mode);
@@ -739,8 +608,6 @@ class SessionStore {
     }
   }
 
-  /** Open a persisted session — restores transcript UI and primes the
-   *  backend actor (message history reloads on next send). */
   async openSession(id: string): Promise<void> {
     if (!inTauri()) return;
     const m = await import('./ipc');
@@ -750,15 +617,11 @@ class SessionStore {
       this.sessionId = res.meta.id;
       this.sessionMeta = res.meta;
       this.applyUiState(res.ui_state);
-      // The journal is authoritative for provider/model — adopt it so
-      // the composer never shows a pair the session isn't running.
       if (res.meta.provider) {
         this.providerName = res.meta.provider;
         this.provider = res.meta.provider;
       }
       if (res.meta.model) this.model = res.meta.model;
-      // A code session owns its folder — adopt it so the file tree and
-      // future turns agree with what the session was created against.
       if (
         res.meta.mode === 'code' &&
         res.meta.workspace &&
@@ -768,8 +631,6 @@ class SessionStore {
         void m.workspaceSet(res.meta.workspace).catch(() => {});
         void this.refreshIndex();
       }
-      // Hand the session's provider + model + thinking to the backend
-      // slot as one unit so the next spawn runs what the UI shows.
       await this.syncSelection(m);
       localStorage.setItem(`hate:session:${res.meta.mode}`, id);
       this.pickerMode = null;
@@ -779,7 +640,6 @@ class SessionStore {
     }
   }
 
-  /** Start a fresh persisted session in the current mode. */
   async newSession(): Promise<void> {
     if (!inTauri()) {
       this.resetConversation();
@@ -793,8 +653,6 @@ class SessionStore {
       this.sessionId = meta.id;
       this.sessionMeta = meta;
       this.resetConversation();
-      // A fresh slot falls back to the default provider — pin it to the
-      // pair the composer shows instead.
       await this.syncSelection(m);
       localStorage.setItem(`hate:session:${meta.mode}`, meta.id);
       this.pickerMode = null;
@@ -804,8 +662,6 @@ class SessionStore {
     }
   }
 
-  /** Permanently delete a session; if it's the active one, fall back
-   *  to the browser for that mode. */
   async deleteSession(id: string): Promise<void> {
     if (!inTauri()) return;
     const m = await import('./ipc');
@@ -820,8 +676,6 @@ class SessionStore {
     }
   }
 
-  /** Wipe conversation state without touching persistence — used by
-   *  `newSession` and session restore. */
   private resetConversation(): void {
     this.blocks = [];
     nextBlockId = 1;
@@ -848,7 +702,6 @@ class SessionStore {
     this.roundStart = 0;
   }
 
-  /** Restore the frontend half of a session from its `ui_state` blob. */
   private applyUiState(raw: string | null): void {
     if (!raw) {
       this.resetConversation();
@@ -915,8 +768,6 @@ class SessionStore {
     return JSON.stringify(s);
   }
 
-  /** Debounced ui_state write — every transcript mutation schedules one;
-   *  the last write within ~800ms wins. */
   private scheduleUiSave(): void {
     if (!inTauri() || !this.sessionId) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
@@ -931,8 +782,6 @@ class SessionStore {
     }, 800);
   }
 
-  /** Guarantee an active persisted session before a send; falls back to
-   *  an ephemeral session when persistence is unavailable. */
   private async ensureSession(): Promise<void> {
     if (this.sessionId || !inTauri()) return;
     await this.newSession();
@@ -971,7 +820,6 @@ class SessionStore {
     }
   }
 
-  /** Native folder picker → persist to config.toml. */
   async pickWorkspace(): Promise<void> {
     if (!inTauri()) return;
     const m = await import('./ipc');
@@ -983,10 +831,6 @@ class SessionStore {
     }
   }
 
-  /** Rebuild the file tree + symbol index for the current workspace.
-   *  Called on workspace change, session open, and after each turn
-   *  (file tools may have mutated the tree). Keeps the stale tree on
-   *  failure rather than blanking the pane. */
   async refreshIndex(): Promise<void> {
     const root = this.workspacePath;
     if (!inTauri() || !root) {
@@ -998,17 +842,13 @@ class SessionStore {
     const m = await import('./ipc');
     try {
       const idx = await m.workspaceIndex(root);
-      // A workspace switch mid-walk must not clobber the new tree.
       if (this.workspacePath !== root) return;
       this.tree = idx.tree;
       this.symbols = idx.symbols;
       this.indexTruncated = idx.truncated;
     } catch {
-      // stale tree beats an empty pane
     }
   }
-
-  // ── event handling ──────────────────────────────────────────────────────
 
   handleEvent(e: SessionEvent): void {
     switch (e.type) {
@@ -1049,14 +889,11 @@ class SessionStore {
         break;
       case 'tokens_counted':
         this.usage = { ...e.usage };
-        // Per-request prompt size — the live context-window fill.
         this.ctxUsed = e.usage.input;
         this.recomputeDerived();
         this.attributeUsage(e.usage, e.thinking_est ?? 0);
         break;
       case 'compaction_started':
-        // Context was compacted — say so in the record; the model's
-        // memory shrank even though the transcript didn't.
         this.blocks.push({
           id: nextBlockId++,
           kind: 'text',
@@ -1073,7 +910,6 @@ class SessionStore {
         ];
         break;
       case 'skill_saved':
-        // The agent authored a reusable skill — visible, never silent.
         this.blocks.push({
           id: nextBlockId++,
           kind: 'text',
@@ -1105,13 +941,10 @@ class SessionStore {
         this.finishStreamingBlocks();
         break;
       case 'failed':
-        // Terminal failure — surface the reason; a silent dead turn is
-        // indistinguishable from "the app does nothing".
         this.pushError(failureText(e.reason));
         this.sessionState = 'failed';
         this.finishStreamingBlocks();
         if (this.planExecuting) {
-          // Whatever wasn't reached stays visibly unfinished.
           this.plan = this.plan.map((s) =>
             s.status === 'done' ? s : { ...s, status: 'failed' },
           );
@@ -1122,16 +955,9 @@ class SessionStore {
         this.pushError(e.error.message ?? 'unknown error');
         break;
     }
-    // Every event can mutate transcript state — debounce-persists the
-    // UI blob so a crash loses at most ~1s of chrome (message history
-    // is journaled by the actor at turn end regardless).
     this.scheduleUiSave();
   }
 
-  /** Pin one provider request's usage to what it produced: its reply
-   *  text, else its thinking, else (tool-only request) the first tool
-   *  card it starts. Thinking blocks get the reasoning share — exact
-   *  when the provider reports it, a local count otherwise. */
   private attributeUsage(usage: TokenUsage, thinkingEst: number): void {
     let textBlock: TranscriptBlock | undefined;
     let thinkBlock: TranscriptBlock | undefined;
@@ -1152,15 +978,11 @@ class SessionStore {
     const owner = textBlock ?? thinkBlock;
     if (owner) owner.usage = { ...usage };
     else this.pendingToolUsage = { ...usage };
-    // The request is over: its blocks stop streaming now, so the caret
-    // goes and the usage shows while the tools it called are running.
     if (textBlock) textBlock.streaming = false;
     if (thinkBlock) thinkBlock.streaming = false;
     this.roundStart = this.blocks.length;
   }
 
-  /** Turn-end bookkeeping: rollup on the user's message, plan capture,
-   *  and the next queued message. */
   private finishTurn(outcome: TurnOutcome): void {
     const idx = this.blocks.findIndex((b) => b.id === this.turnBlockId);
     const userBlock = idx >= 0 ? this.blocks[idx] : undefined;
@@ -1174,7 +996,6 @@ class SessionStore {
       };
     }
     if (this.turnIsPlan && completed && idx >= 0) {
-      // The plan is the turn's final reply.
       for (let i = this.blocks.length - 1; i > idx; i--) {
         const b = this.blocks[i];
         if (b?.kind === 'text' && b.text) {
@@ -1193,8 +1014,6 @@ class SessionStore {
     }
     this.turnBlockId = null;
     this.turnIsPlan = false;
-    // A pending plan needs the user's decision first; a cancelled turn
-    // should not be followed by more automatic sends.
     if (completed && !this.planReady && this.queue.length > 0) {
       const next = this.queue.shift();
       if (next) queueMicrotask(() => this.send(next));
@@ -1202,9 +1021,6 @@ class SessionStore {
   }
 
   private recomputeDerived(): void {
-    // Session-cumulative cache hit ratio: cached input over ALL input
-    // across completed turns. Per-round ratios fluctuate wildly during
-    // tool loops; the honest first-class metric is hits/session input.
     const t = this.sessionTotals;
     this.cacheRatio = t.input > 0 ? t.cached_input / t.input : 0;
   }
@@ -1245,11 +1061,7 @@ class SessionStore {
     }
   }
 
-  // ── fixture playback ────────────────────────────────────────────────────
-
   private startFixturePlayback(): void {
-    // Treat the canned transcript as one in-flight turn so usage
-    // attribution and the turn rollup demo exactly like a live session.
     this.turnBlockId = this.lastUserBlockId();
     this.roundStart = this.blocks.length;
     let t = 600;
@@ -1263,7 +1075,6 @@ class SessionStore {
         }, t),
       );
     }
-    // Loop the demo quietly after it finishes so the shell always feels alive.
     this.fixtureTimers.push(
       setTimeout(() => {
         this.sessionState = 'idle';

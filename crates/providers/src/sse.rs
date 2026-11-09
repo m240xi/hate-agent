@@ -1,12 +1,3 @@
-//! Minimal SSE (Server-Sent Events) frame parser.
-//!
-//! Both OpenAI-style (`data:` only) and Anthropic-style (`event:` +
-//! `data:`) streams ride on this. The parser is deliberately small: it
-//! handles multi-line `data:`, ignores comments/heartbeats (`:` lines)
-//! and unknown fields, and yields one [`SseFrame`] per blank-line
-//! dispatch. `[DONE]` is *not* special-cased — adapters decide what it
-//! means for their vendor.
-
 use std::sync::Arc;
 
 use futures_util::StreamExt;
@@ -16,29 +7,18 @@ use tokio_util::io::StreamReader;
 
 use hate_core::ProviderError;
 
-/// One dispatched SSE event.
 #[derive(Debug, Clone)]
 pub struct SseFrame {
-    /// Value of the `event:` field, when present (Anthropic uses this;
-    /// OpenAI-compatible streams usually omit it).
     pub event: Option<String>,
-    /// Joined `data:` payload (multi-line data joins with `\n`).
     pub data: String,
 }
 
-/// Parse an HTTP response body into SSE frames.
-///
-/// Runs a reader task internally; the returned stream yields
-/// `Result<SseFrame, ProviderError>` and ends when the body ends or the
-/// consumer is dropped. IO failures surface as [`ProviderError::Stream`].
 pub fn parse(
     response: reqwest::Response,
 ) -> impl futures_util::Stream<Item = Result<SseFrame, ProviderError>> {
     let (tx, mut rx) = mpsc::channel::<Result<SseFrame, ProviderError>>(64);
 
     tokio::spawn(async move {
-        // StreamReader needs the stream's error type to convert into
-        // io::Error; reqwest::Error doesn't, so map it here.
         let body = response
             .bytes_stream()
             .map(|r| r.map_err(std::io::Error::other));
@@ -50,7 +30,6 @@ pub fn parse(
         macro_rules! dispatch {
             () => {
                 if data.is_empty() {
-                    // No data accumulated — drop any stale event name too.
                     let _ = event.take();
                 } else {
                     let frame = SseFrame {
@@ -59,7 +38,7 @@ pub fn parse(
                     };
                     data.clear();
                     if tx.send(Ok(frame)).await.is_err() {
-                        return; // consumer gone
+                        return;
                     }
                 }
             };
@@ -72,19 +51,17 @@ pub fn parse(
                     if line.is_empty() {
                         dispatch!();
                     } else if line.starts_with(':') {
-                        // Comment / heartbeat — ignore.
                     } else if let Some((field, value)) = line.split_once(':') {
                         let value = value.strip_prefix(' ').unwrap_or(value);
                         match field {
                             "event" => event = Some(value.to_string()),
                             "data" => data.push(value.to_string()),
-                            _ => {} // id:, retry:, unknown — ignored
+                            _ => {}
                         }
                     }
-                    // Lines without ':' are ignored per the SSE spec.
                 }
                 Ok(None) => {
-                    dispatch!(); // flush a trailing unterminated frame
+                    dispatch!();
                     return;
                 }
                 Err(e) => {
@@ -100,12 +77,6 @@ pub fn parse(
     futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx))
 }
 
-/// Shared reqwest client with sane timeouts for streaming APIs.
-/// Connect must fail fast; the stream itself has no total timeout —
-/// cancellation is the caller's job.
-///
-/// A `User-Agent` is mandatory: Cloudflare-fronted endpoints (Nous
-/// Portal inference) 403 empty-UA requests before they reach the API.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("hate-agent/", env!("CARGO_PKG_VERSION")))
@@ -115,9 +86,6 @@ pub fn http_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
-/// Map an HTTP error response to a typed provider error. Honors
-/// `Retry-After` (delta-seconds form) so the retry layer can wait exactly
-/// as the server asked.
 pub async fn status_error(resp: reqwest::Response) -> ProviderError {
     let status = resp.status().as_u16();
     let retry_after = resp
@@ -138,6 +106,4 @@ pub async fn status_error(resp: reqwest::Response) -> ProviderError {
     }
 }
 
-/// A credential source boxed for adapters — re-exported so adapters and
-/// auth agree on one type without importing each other.
 pub type SharedCredential = Arc<dyn hate_core::CredentialSource>;

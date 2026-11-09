@@ -1,8 +1,4 @@
 <script lang="ts">
-  // Landing — a pixel night scene with the three mode plates over it.
-  // GG Coder's trick is that the home screen is a *place*, not a page:
-  // ours is the 3am version — black sky, campfire, fireflies, and the
-  // chunky plate buttons from the same playbook.
   import { onMount } from 'svelte';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
@@ -20,7 +16,6 @@
       version = (await m.appInfo()).version;
       inTauri = true;
     } catch {
-      /* fixture mode — plates still work */
     }
   });
 
@@ -92,7 +87,6 @@
     font-size: 16px;
     letter-spacing: 0.02em;
   }
-  /* The scene is always night — text over it stays light in every theme. */
   .version {
     color: rgba(240, 238, 233, 0.6);
     margin-bottom: 18px;
@@ -114,7 +108,6 @@
     text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
   }
 
-  /* Chunky game-plate buttons — dark plates, lit top edge, bottom lip. */
   .plates {
     display: flex;
     gap: 14px;

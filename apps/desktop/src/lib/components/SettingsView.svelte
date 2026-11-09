@@ -1,6 +1,4 @@
 <script lang="ts">
-  // Settings — providers & connections, workspace folder, app facts.
-  // All data comes from Tauri commands; nothing here is fixture state.
   import { onMount, onDestroy } from 'svelte';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { session } from '../store.svelte';
@@ -26,21 +24,17 @@
   let inTauri = $state(false);
   let error = $state<string | null>(null);
 
-  // Nous device-login state (mirrors EmptyState's flow).
   let login = $state<NousLoginInfo | null>(null);
   let loginBusy = $state(false);
   let loginError = $state<string | null>(null);
   let unlisten: UnlistenFn | null = null;
 
-  // Claude subscription login — browser OAuth + pasted callback code.
   let claudeLogin = $state<ClaudeLoginInfo | null>(null);
   let claudeCode = $state('');
   let claudeBusy = $state(false);
   let claudeError = $state<string | null>(null);
   let presetBusy = $state<string | null>(null);
 
-  // Per-provider key-entry drafts (never persisted to disk by us —
-  // they go straight to the OS keychain via auth_set_key).
   let keyDrafts = $state<Record<string, string>>({});
   let keyBusy = $state<string | null>(null);
 
@@ -55,8 +49,6 @@
     skillAuto = await m.skillsAutoGet().catch(() => true);
     appInfo = await m.appInfo().catch(() => null);
     await loadMcp();
-    // Provider connect/disconnect/add/remove changes the model catalog —
-    // reload it so the composer picker isn't stale.
     void session.refreshModels();
   }
 
@@ -91,7 +83,6 @@
         },
       );
     } catch {
-      /* fixture mode */
     }
   });
 
@@ -101,8 +92,6 @@
       clearTimeout(mcpSaveTimer);
       mcpSaveTimer = null;
     }
-    // Persist pending edits — the invoke completes even though the
-    // view is gone; the next mount reads the saved state.
     if (mcpDirty && inTauri) void flushMcpSave();
   });
 
@@ -239,25 +228,18 @@
     return 'not connected';
   }
 
-  // ── MCP servers ──────────────────────────────────────────────────────
-  // `mcpRows` is the editable working copy — loaded once, saved as a
-  // whole via `mcp_save` (the backend reconnects the hub atomically).
   let mcpRows = $state<McpServerInfo[]>([]);
   let mcpDirty = $state(false);
   let mcpBusy = $state(false);
   let mcpError = $state<string | null>(null);
   let mcpLoaded = $state(false);
-  let mcpOpen = $state<number | null>(null); // row index with editor open
+  let mcpOpen = $state<number | null>(null);
   let showMcpAdd = $state(false);
 
-  // Auto-save: every mutation schedules a debounced whole-list save.
-  // flushMcpSave serializes in-flight saves and merges only status
-  // fields back, so typing during a save is never clobbered.
   let mcpSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let mcpSaving = false;
   let mcpSavePending = false;
 
-  // Add-form drafts.
   let nfName = $state('');
   let nfKind = $state<'stdio' | 'http'>('stdio');
   let nfCommand = $state('');
@@ -266,13 +248,9 @@
   let nfUrl = $state('');
   let nfHeaders = $state('');
 
-  // Per-open-editor text drafts for env/headers (KEY=VALUE per line).
   let editEnv = $state('');
   let editHeaders = $state('');
 
-  /** Split an args string on whitespace, honoring "…" and '…' quotes —
-   *  `-c "echo hi"` stays one arg, quotes stripped. Comma separators
-   *  are NOT special: `a, b` yields the literal tokens `a,` `b`. */
   function splitArgs(text: string): string[] {
     const out: string[] = [];
     const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
@@ -364,8 +342,6 @@
 
   function mcpKindSwitch(row: McpServerInfo, kind: 'stdio' | 'http'): void {
     row.kind = kind;
-    // Drop the other transport's fields so stale values can't confuse
-    // the backend validator or the user.
     if (kind === 'stdio') {
       row.url = null;
       row.headers = {};
@@ -409,8 +385,6 @@
         headers: r.headers ?? {},
       }));
       const saved = await m.mcpSave(configs);
-      // Merge only live status fields — edits made while the save was
-      // in flight stay untouched; a queued resave persists them next.
       const byName = new Map(saved.map((s) => [s.name.toLowerCase(), s]));
       mcpRows = mcpRows.map((r) => {
         const s = byName.get(r.name.toLowerCase());
@@ -1014,7 +988,6 @@
     padding: 14px 16px;
   }
 
-  /* Pixel type for data-dense labels inside the cards. */
   .provider-name,
   .provider-meta,
   .provider-url,
@@ -1327,9 +1300,6 @@
     flex: 1;
   }
 
-  /* Chunky plates — same object language as the landing buttons,
-     sized down for dense rows. Always dark: they're physical
-     buttons, not themed surfaces. */
   .btn {
     font-family: var(--font-mono);
     font-size: 15px;
@@ -1415,7 +1385,6 @@
     white-space: nowrap;
   }
 
-  /* ── MCP servers ─────────────────────────────────────────────────── */
   .mcp-list {
     display: flex;
     flex-direction: column;

@@ -1,6 +1,4 @@
 <script lang="ts">
-  // Stroke icon set — 24x24, 1.8px stroke, currentColor. Decorative by
-  // default; pass `label` when the icon carries meaning on its own.
   const PATHS: Record<string, string[]> = {
     folder: ['M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'],
     file: ['M6 2.5h7l5 5V21H6z', 'M13 2.5V8h5'],

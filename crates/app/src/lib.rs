@@ -32,6 +32,7 @@ pub fn run() {
         commands::workspace_get,
         commands::workspace_set,
         commands::workspace_pick,
+        commands::workspace_index,
         commands::sessions_list,
         commands::session_new,
         commands::session_open,

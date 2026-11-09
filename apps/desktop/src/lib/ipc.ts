@@ -134,6 +134,16 @@ export async function workspacePick(): Promise<string | null> {
   return invoke<string | null>('workspace_pick');
 }
 
+export interface WorkspaceIndex {
+  tree: import('./types').FileNode[];
+  symbols: import('./types').SymbolHit[];
+  truncated: boolean;
+}
+
+export async function workspaceIndex(path: string): Promise<WorkspaceIndex> {
+  return invoke<WorkspaceIndex>('workspace_index', { path });
+}
+
 // ── session persistence ────────────────────────────────────────────────────
 
 export interface SessionMeta {

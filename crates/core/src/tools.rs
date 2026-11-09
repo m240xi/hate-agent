@@ -37,7 +37,7 @@ const MAX_GLOB_MATCHES: usize = 200;
 const MAX_GREP_MATCHES: usize = 100;
 const MAX_GREP_FILE_BYTES: u64 = 512 * 1024;
 /// Directories never descended into during walks.
-const SKIP_DIRS: &[&str] = &[
+pub(crate) const SKIP_DIRS: &[&str] = &[
     ".git",
     "node_modules",
     "target",

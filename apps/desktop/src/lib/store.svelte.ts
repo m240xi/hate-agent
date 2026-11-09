@@ -92,6 +92,7 @@ class SessionStore {
   // ── left pane ───────────────────────────────────────────────────────────
   tree = $state<FileNode[]>([]);
   symbols = $state<SymbolHit[]>([]);
+  indexTruncated = $state(false);
   selectedPath = $state<string | null>(null);
 
   // ── right pane ──────────────────────────────────────────────────────────
@@ -197,6 +198,7 @@ class SessionStore {
     if (inTauri()) {
       const m = await import('./ipc');
       this.workspacePath = await m.workspaceGet().catch(() => null);
+      void this.refreshIndex();
       // Push the persisted thinking level into the session slot so the
       // first spawned session inherits it (live swaps go through
       // `session_set_options` too).
@@ -329,6 +331,7 @@ class SessionStore {
         text: `⏪ workspace rewound to checkpoint ${id.slice(0, 8)}`,
         streaming: false,
       });
+      void this.refreshIndex();
     } catch (e) {
       this.blocks.push({
         id: nextBlockId++,
@@ -434,6 +437,7 @@ class SessionStore {
       ) {
         this.workspacePath = res.meta.workspace;
         void m.workspaceSet(res.meta.workspace).catch(() => {});
+        void this.refreshIndex();
       }
       // Hand the session's model/thinking to the backend slot so the
       // next spawn uses them (live swaps also go through set_options).
@@ -629,6 +633,32 @@ class SessionStore {
     if (p) {
       this.workspacePath = p;
       await m.workspaceSet(p).catch(() => {});
+      void this.refreshIndex();
+    }
+  }
+
+  /** Rebuild the file tree + symbol index for the current workspace.
+   *  Called on workspace change, session open, and after each turn
+   *  (file tools may have mutated the tree). Keeps the stale tree on
+   *  failure rather than blanking the pane. */
+  async refreshIndex(): Promise<void> {
+    const root = this.workspacePath;
+    if (!inTauri() || !root) {
+      this.tree = [];
+      this.symbols = [];
+      this.indexTruncated = false;
+      return;
+    }
+    const m = await import('./ipc');
+    try {
+      const idx = await m.workspaceIndex(root);
+      // A workspace switch mid-walk must not clobber the new tree.
+      if (this.workspacePath !== root) return;
+      this.tree = idx.tree;
+      this.symbols = idx.symbols;
+      this.indexTruncated = idx.truncated;
+    } catch {
+      // stale tree beats an empty pane
     }
   }
 
@@ -695,6 +725,7 @@ class SessionStore {
         this.recomputeDerived();
         this.sessionState = 'done';
         this.finishStreamingBlocks();
+        void this.refreshIndex();
         break;
       case 'awaiting_user':
         this.awaitingPrompt = e.prompt;

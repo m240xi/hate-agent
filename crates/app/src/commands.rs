@@ -11,7 +11,7 @@ use hate_core::{
 };
 use hate_ledger::Ledger;
 use hate_providers::{ProviderKind, ProviderSpec, build, warn_if_unknown};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Emitter, State};
 
@@ -823,4 +823,59 @@ pub fn session_save_ui(id: String, ui_state: String) -> Result<(), String> {
         return Err("ui_state too large".to_string());
     }
     db()?.save_ui(&id, &ui_state)
+}
+
+// ── workspace index ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexNodeKind {
+    Dir,
+    File,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct IndexNode {
+    pub name: String,
+    pub path: String,
+    pub kind: IndexNodeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<IndexNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexSymKind {
+    Def,
+    Ref,
+    Call,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct IndexSymbol {
+    pub name: String,
+    pub path: String,
+    pub line: u32,
+    pub kind: IndexSymKind,
+}
+
+#[derive(Debug, Serialize, Deserialize, Type)]
+pub struct WorkspaceIndexOut {
+    pub tree: Vec<IndexNode>,
+    pub symbols: Vec<IndexSymbol>,
+    pub truncated: bool,
+}
+
+/// Build the workspace index (file tree + heuristic symbols) for the
+/// Code view's left pane. Read-only; caps keep huge repos responsive.
+#[tauri::command]
+#[specta::specta]
+pub fn workspace_index(path: String) -> Result<WorkspaceIndexOut, String> {
+    let idx = hate_core::index::build_index(std::path::Path::new(&path))
+        .map_err(|e| format!("index failed: {e}"))?;
+    // Core types are serde-only; the app DTOs mirror them for specta.
+    serde_json::from_value(serde_json::to_value(&idx).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("index shape mismatch: {e}"))
 }

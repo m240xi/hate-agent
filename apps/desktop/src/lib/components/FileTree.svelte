@@ -60,6 +60,11 @@
     {#each session.tree as node (node.path)}
       <FileNode node={node} />
     {/each}
+    {#if session.indexTruncated}
+      <p class="truncated" title="Index caps reached — large repos show a partial tree">
+        index truncated
+      </p>
+    {/if}
   </nav>
 </div>
 
@@ -155,5 +160,11 @@
     flex: 1;
     overflow: auto;
     padding: 2px 4px 12px;
+  }
+  .truncated {
+    margin: 8px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-3);
   }
 </style>

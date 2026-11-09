@@ -8,6 +8,7 @@
 
 mod checkpoint;
 mod event;
+pub mod index;
 pub mod persist;
 pub mod provider;
 mod session;

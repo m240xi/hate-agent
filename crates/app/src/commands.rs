@@ -360,7 +360,9 @@ pub fn session_set_options(
     state: State<'_, Sessions>,
     model: Option<String>,
     thinking: Option<String>,
-    context_window: Option<u64>,
+    // u32 at the IPC boundary — specta forbids u64 exports; context
+    // windows fit comfortably.
+    context_window: Option<u32>,
 ) -> Result<(), String> {
     let thinking = thinking.map(|t| ThinkingLevel::parse(&t)).transpose()?;
     let mut slot = state
@@ -374,13 +376,13 @@ pub fn session_set_options(
         slot.thinking = Some(t);
     }
     if let Some(w) = context_window {
-        slot.context_window = w;
+        slot.context_window = u64::from(w);
     }
     if let Some(h) = slot.handle.as_ref() {
         h.command(Command::SetOptions {
             model,
             thinking,
-            context_window,
+            context_window: context_window.map(u64::from),
         })
         .map_err(|e| e.to_string())?;
     }
@@ -985,7 +987,8 @@ pub struct McpServerInfo {
     /// `connected` | `connecting` | `error` | `disabled`.
     pub state: String,
     /// Tools the server advertised (0 until connected).
-    pub tools: usize,
+    /// u32 at the IPC boundary — specta forbids usize/u64 exports.
+    pub tools: u32,
     /// Server name/version from the handshake.
     pub info: String,
 }
@@ -1010,7 +1013,7 @@ fn mcp_rows(state: &McpState) -> Vec<McpServerInfo> {
                 url: c.url,
                 headers: c.headers,
                 state: st.map_or_else(|| "error".to_string(), |s| s.state.clone()),
-                tools: st.map_or(0, |s| s.tools),
+                tools: st.map_or(0, |s| u32::try_from(s.tools).unwrap_or(u32::MAX)),
                 info: st.map_or_else(String::new, |s| s.info.clone()),
             }
         })

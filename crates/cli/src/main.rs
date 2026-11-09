@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use hate_auth::{AuthContext, PortalAuth};
-use hate_core::{Command, Event, Limits, SessionConfig, WorkspaceTools, spawn_session};
+use hate_core::{
+    Command, Event, Limits, PermissionHub, SessionConfig, WorkspaceTools, spawn_session,
+};
 use hate_ledger::Ledger;
 use hate_providers::{ProviderKind, ProviderSpec, build, warn_if_unknown};
 use tokio_util::sync::CancellationToken;
@@ -315,6 +317,7 @@ async fn run(
             .ok()
             .and_then(|p| WorkspaceTools::new(p).ok())
             .map(std::sync::Arc::new),
+        permissions: std::sync::Arc::new(PermissionHub::default()),
     });
 
     // Ctrl-C cancels the in-flight turn (Esc is the desktop equivalent).
@@ -366,6 +369,34 @@ async fn run(
                         String::new()
                     }
                 );
+            }
+            Ok(Event::PermissionRequested { request }) => {
+                let detail = request.detail.clone().unwrap_or_default();
+                eprint!(
+                    "\n[permission] {} needs approval — {}\n  ",
+                    request.call.name, request.reason
+                );
+                if !detail.is_empty() {
+                    eprintln!("{detail}");
+                    eprint!("  ");
+                }
+                eprint!("[y]es / [s]ession / [n]o? ");
+                let _ = std::io::stderr().flush();
+                let handle = session.clone();
+                let id = request.id.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut line = String::new();
+                    let _ = std::io::stdin().read_line(&mut line);
+                    let d = match line.trim() {
+                        "y" | "yes" => "allow",
+                        "s" | "session" => "allow_session",
+                        _ => "deny",
+                    };
+                    let _ = handle.command(Command::RespondPermission {
+                        request_id: id,
+                        decision: d.to_string(),
+                    });
+                });
             }
             Ok(Event::TurnComplete { outcome }) => {
                 saw_done = true;

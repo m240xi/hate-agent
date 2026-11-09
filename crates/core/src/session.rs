@@ -7,16 +7,17 @@
 //! dies within the 250ms budget — the actor never awaits the stream
 //! inline.
 //!
-//! M1 scope: text-only turns, no tool execution (tools land in M2). The
-//! loop is already shaped for tool calls — [`Delta::ToolCall`]s are
-//! collected into the turn report and surfaced as an error until the
-//! tool registry exists.
+//! M2+: the turn task owns the tool-call loop — read tools run freely,
+//! mutations and shell are policy-gated through [`PermissionHub`], which
+//! routes user decisions from the actor's command channel back into the
+//! waiting tool loop.
 
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
@@ -26,7 +27,10 @@ use crate::persist::{PersistCtx, PersistedSession};
 use crate::provider::{ChatRequest, Delta, Message, Provider, ProviderError, ThinkingLevel};
 use crate::state::SessionState;
 use crate::tools::WorkspaceTools;
-use crate::types::{FailureReason, Outcome, SessionId, TokenUsage, ToolCall, TurnId, TurnOutcome};
+use crate::types::{
+    FailureReason, Outcome, PermissionDecision, PermissionRequest, SessionId, TokenUsage, ToolCall,
+    TurnId, TurnOutcome,
+};
 use hate_ledger::{Ledger, RecordRequest};
 
 /// Event channel capacity. Deltas can arrive at ~50/s; 2048 gives the
@@ -71,9 +75,12 @@ pub struct SessionConfig {
     pub ledger: Option<Arc<Ledger>>,
     /// Session persistence; `None` = ephemeral (CLI one-shots, tests).
     pub persist: Option<PersistCtx>,
-    /// Workspace tool surface (M2 read tools). `None` = text-only turns —
-    /// chat sessions and sessions without a workspace stay tool-free.
+    /// Workspace tool surface (M2 read tools, M3 mutations + bash).
+    /// `None` = text-only turns — chat sessions and sessions without a
+    /// workspace stay tool-free.
     pub tools: Option<Arc<WorkspaceTools>>,
+    /// Permission decision router shared with the in-flight turn task.
+    pub permissions: Arc<PermissionHub>,
 }
 
 /// Commands the outside world can send a session.
@@ -331,10 +338,20 @@ impl Actor {
                     self.cancel.cancel();
                 }
             }
-            // M2/M3 fill these in; accepting-and-ignoring beats erroring
-            // so older frontends don't break.
-            Command::AnswerPrompt(_) | Command::RespondPermission { .. } => {
-                warn!("prompt/permission response with nothing pending");
+            // M2 ask_user prompt; still accepted-and-ignored.
+            Command::AnswerPrompt(_) => {
+                warn!("prompt response with nothing pending");
+            }
+            Command::RespondPermission {
+                request_id,
+                decision,
+            } => {
+                let d = match decision.as_str() {
+                    "allow" => PermissionDecision::Allow,
+                    "allow_session" => PermissionDecision::AllowSession,
+                    _ => PermissionDecision::Deny,
+                };
+                self.cfg.permissions.resolve(&request_id, d);
             }
             Command::SetOptions { model, thinking } => {
                 if let Some(m) = model {
@@ -387,6 +404,7 @@ impl Actor {
         let provider_name = self.cfg.provider_name.clone();
         let thinking = self.cfg.thinking;
         let tools = self.cfg.tools.clone();
+        let permissions = self.cfg.permissions.clone();
         let ledger = self.cfg.ledger.clone();
         let session_id = self.session_id;
         let turn_id = self.turn;
@@ -401,6 +419,7 @@ impl Actor {
                 provider_name,
                 thinking,
                 tools,
+                permissions,
                 cancel,
                 events,
                 done_tx,
@@ -550,6 +569,131 @@ impl Actor {
     }
 }
 
+/// Routes permission decisions from the actor's command channel to the
+/// in-flight tool loop waiting on them, and holds the session-scoped
+/// allowlist behind "Run & remember".
+#[derive(Default)]
+pub struct PermissionHub {
+    /// `request_id` → (decision sender, allowlist key).
+    pending: Mutex<HashMap<String, (oneshot::Sender<PermissionDecision>, String)>>,
+    /// Allowlist keys approved with `AllowSession` this session.
+    allowed: Mutex<HashSet<String>>,
+}
+
+/// What the policy gate resolved to for one call.
+enum Gate {
+    /// Approved (or auto-allowed) — execute.
+    Run,
+    /// User denied — feed the denial back as a tool error.
+    Denied(String),
+    /// Turn cancelled while waiting — abort the whole turn.
+    Cancelled,
+}
+
+impl PermissionHub {
+    /// The allowlist key for a call: bash remembers the exact command,
+    /// file tools remember the tool name.
+    fn key_for(call: &ToolCall) -> String {
+        if call.name.as_str() == "bash" {
+            let cmd = call
+                .args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("bash:{cmd}")
+        } else {
+            call.name.as_str().to_string()
+        }
+    }
+
+    /// Whether this call's key was session-allowed already.
+    fn is_allowed(&self, call: &ToolCall) -> bool {
+        self.allowed
+            .lock()
+            .expect("permission hub poisoned")
+            .contains(&Self::key_for(call))
+    }
+
+    /// Register a waiter for `id`; the returned receiver resolves when
+    /// the actor answers (or drops on cancel/teardown → deny).
+    fn insert(&self, id: String, tx: oneshot::Sender<PermissionDecision>, key: String) {
+        self.pending
+            .lock()
+            .expect("permission hub poisoned")
+            .insert(id, (tx, key));
+    }
+
+    /// Remove a pending request without answering (cancel path).
+    fn remove(&self, id: &str) {
+        self.pending
+            .lock()
+            .expect("permission hub poisoned")
+            .remove(id);
+    }
+
+    /// Actor side: deliver the user's decision. `AllowSession` also
+    /// records the call's key so matching future calls skip the prompt.
+    pub fn resolve(&self, id: &str, decision: PermissionDecision) {
+        let entry = self
+            .pending
+            .lock()
+            .expect("permission hub poisoned")
+            .remove(id);
+        let Some((tx, key)) = entry else {
+            return;
+        };
+        if decision == PermissionDecision::AllowSession {
+            self.allowed
+                .lock()
+                .expect("permission hub poisoned")
+                .insert(key);
+        }
+        let _ = tx.send(decision);
+    }
+}
+
+/// Ask the user (via the actor) whether `call` may run. Auto-allows
+/// session-approved keys; otherwise emits `PermissionRequested` and
+/// waits — racing the turn's cancel token.
+async fn gate_tool(
+    hub: &Arc<PermissionHub>,
+    cancel: &CancellationToken,
+    events: &broadcast::Sender<Event>,
+    call: &ToolCall,
+    reason: String,
+    detail: Option<String>,
+) -> Gate {
+    if hub.is_allowed(call) {
+        return Gate::Run;
+    }
+    let id = Uuid::new_v4().to_string();
+    let (tx, rx) = oneshot::channel();
+    hub.insert(id.clone(), tx, PermissionHub::key_for(call));
+    let _ = events.send(Event::PermissionRequested {
+        request: PermissionRequest {
+            id: id.clone(),
+            call: call.clone(),
+            reason,
+            detail,
+        },
+    });
+    let decision = tokio::select! {
+        () = cancel.cancelled() => None,
+        d = rx => Some(d.unwrap_or(PermissionDecision::Deny)),
+    };
+    match decision {
+        None => {
+            hub.remove(&id);
+            Gate::Cancelled
+        }
+        Some(d) if d.is_allowed() => Gate::Run,
+        Some(_) => Gate::Denied(format!(
+            "permission denied by user for `{}`",
+            call.name.as_str()
+        )),
+    }
+}
+
 /// The per-turn driver. Owns the whole tool-call loop: stream one
 /// provider round, execute any requested tools, feed the results back,
 /// and keep going until the model answers with no calls. Sends exactly
@@ -564,6 +708,7 @@ async fn run_turn(
     provider_name: String,
     thinking: ThinkingLevel,
     tools: Option<Arc<WorkspaceTools>>,
+    permissions: Arc<PermissionHub>,
     cancel: CancellationToken,
     events: broadcast::Sender<Event>,
     done_tx: mpsc::Sender<TurnReport>,
@@ -778,7 +923,23 @@ async fn run_turn(
         });
         for call in calls {
             emit(Event::ToolStarted { call: call.clone() });
-            let out = tools.execute(&call).await;
+            let out = match tools.gate_reason(&call) {
+                Some((reason, detail)) => {
+                    match gate_tool(&permissions, &cancel, &events, &call, reason, detail).await {
+                        Gate::Run => tools.execute(&call).await,
+                        Gate::Denied(msg) => tools.tool_error(msg),
+                        Gate::Cancelled => {
+                            let _ = done_tx
+                                .send(TurnReport::Cancelled {
+                                    tail: convo[base..].to_vec(),
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                }
+                None => tools.execute(&call).await,
+            };
             emit(Event::ToolOutput {
                 call_id: call.id.clone(),
                 preview: out.preview,

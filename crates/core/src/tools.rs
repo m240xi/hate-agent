@@ -144,38 +144,93 @@ impl WorkspaceTools {
                     "additionalProperties": false
                 }),
             ),
+            spec(
+                "write_file",
+                "Create or overwrite a file with content. Args: path (required), content (required). Creates parent dirs. Prefer edit_file for changes to existing files.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"}
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": false
+                }),
+            ),
+            spec(
+                "edit_file",
+                "Replace exact text in a file. Args: path, old_string, new_string (all required), replace_all (optional bool). old_string must match uniquely unless replace_all.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old_string": {"type": "string"},
+                        "new_string": {"type": "string"},
+                        "replace_all": {"type": "boolean"}
+                    },
+                    "required": ["path", "old_string", "new_string"],
+                    "additionalProperties": false
+                }),
+            ),
+            spec(
+                "bash",
+                "Run a shell command in the workspace root. Args: command (required), timeout_ms (optional, default 120000). Returns exit code + stdout/stderr. Requires user approval.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "timeout_ms": {"type": "integer"}
+                    },
+                    "required": ["command"],
+                    "additionalProperties": false
+                }),
+            ),
         ]
     }
 
-    /// Execute one call off the async executor. Tool failures return
-    /// `ok: false` content, never panic and never fail the turn.
+    /// Execute one call. `bash` runs on the async path (tokio process +
+    /// timeout); everything else is filesystem work on the blocking
+    /// pool. Tool failures return `ok: false` content, never panic and
+    /// never fail the turn.
     pub async fn execute(self: &Arc<Self>, call: &ToolCall) -> ToolOutput {
+        if call.name.as_str() == "bash" {
+            return self.bash(call).await;
+        }
         let this = Arc::clone(self);
         let call = call.clone();
         match tokio::task::spawn_blocking(move || this.exec(&call)).await {
             Ok(out) => out,
-            Err(e) => {
-                let content = format!("error: tool task failed: {e}");
-                let tokens = self.counter.count_sync(&content) as u32;
-                ToolOutput {
-                    full_tokens: tokens,
-                    sent_tokens: tokens,
-                    preview: content.chars().take(400).collect(),
-                    content,
-                    ok: false,
-                }
-            }
+            Err(e) => self.output_for(Err(format!("tool task failed: {e}"))),
         }
     }
 
-    fn exec(&self, call: &ToolCall) -> ToolOutput {
-        let result = match call.name.as_str() {
-            "read_file" => self.read_file(call),
-            "list_dir" => self.list_dir(call),
-            "glob" => self.glob(call),
-            "grep" => self.grep(call),
-            other => Err(format!("unknown tool {other:?}")),
-        };
+    /// Policy gate: `Some((reason, detail))` means the call needs user
+    /// approval before it runs. Reads are auto; mutations and shell are
+    /// gated — "Run & remember" allowlists them for the session.
+    pub fn gate_reason(&self, call: &ToolCall) -> Option<(String, Option<String>)> {
+        match call.name.as_str() {
+            "bash" => {
+                let cmd: String = arg_str(call, "command")
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect();
+                Some(("runs a shell command".to_string(), Some(cmd)))
+            }
+            "write_file" | "edit_file" => Some(("modifies files".to_string(), None)),
+            _ => None,
+        }
+    }
+
+    /// Error-shaped output for calls denied by policy — same accounting
+    /// path as real results so the model sees an honest tool message.
+    pub fn tool_error(&self, msg: String) -> ToolOutput {
+        self.output_for(Err(msg))
+    }
+
+    /// Shared result → [`ToolOutput`] conversion: shape, count both
+    /// sides, preview. Used by every tool including `bash`.
+    fn output_for(&self, result: Result<String, String>) -> ToolOutput {
         match result {
             Ok(full) => {
                 let sent = shape(&full, SENT_CAP);
@@ -201,6 +256,20 @@ impl WorkspaceTools {
                 }
             }
         }
+    }
+
+    fn exec(&self, call: &ToolCall) -> ToolOutput {
+        let result = match call.name.as_str() {
+            "read_file" => self.read_file(call),
+            "list_dir" => self.list_dir(call),
+            "glob" => self.glob(call),
+            "grep" => self.grep(call),
+            "write_file" => self.write_file(call),
+            "edit_file" => self.edit_file(call),
+            "bash" => Err("bash runs on the async path".to_string()),
+            other => Err(format!("unknown tool {other:?}")),
+        };
+        self.output_for(result)
     }
 
     fn count_capped(&self, text: &str) -> u32 {
@@ -325,10 +394,7 @@ impl WorkspaceTools {
             let _ = writeln!(out, "{indent}{name}{slash}");
         });
         if count >= MAX_LIST_ENTRIES {
-            let _ = write!(
-                out,
-                "\n[… listing truncated at {MAX_LIST_ENTRIES} entries]"
-            );
+            let _ = write!(out, "\n[… listing truncated at {MAX_LIST_ENTRIES} entries]");
         }
         Ok(out)
     }
@@ -410,6 +476,116 @@ impl WorkspaceTools {
             let _ = write!(out, "\n[… truncated at {MAX_GREP_MATCHES} matches]");
         }
         Ok(out)
+    }
+
+    fn write_file(&self, call: &ToolCall) -> Result<String, String> {
+        let path = arg_str(call, "path").ok_or("write_file: missing `path`")?;
+        let content = arg_str(call, "content").ok_or("write_file: missing `content`")?;
+        if content.len() > 1024 * 1024 {
+            return Err("write_file: content exceeds 1MB".to_string());
+        }
+        let fs_path = self.resolve(path)?;
+        if fs_path.is_dir() {
+            return Err(format!("{path:?} is a directory"));
+        }
+        if let Some(parent) = fs_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let existed = fs_path.exists();
+        std::fs::write(&fs_path, content).map_err(|e| e.to_string())?;
+        Ok(format!(
+            "{} {path}: {} bytes",
+            if existed { "overwrote" } else { "wrote" },
+            content.len()
+        ))
+    }
+
+    fn edit_file(&self, call: &ToolCall) -> Result<String, String> {
+        let path = arg_str(call, "path").ok_or("edit_file: missing `path`")?;
+        let old = arg_str(call, "old_string").ok_or("edit_file: missing `old_string`")?;
+        let new = arg_str(call, "new_string").ok_or("edit_file: missing `new_string`")?;
+        if old.is_empty() {
+            return Err("edit_file: `old_string` must not be empty".to_string());
+        }
+        let replace_all = call
+            .args
+            .get("replace_all")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let fs_path = self.resolve(path)?;
+        if !fs_path.is_file() {
+            return Err(format!("{path:?} is not a file"));
+        }
+        let meta = std::fs::metadata(&fs_path).map_err(|e| e.to_string())?;
+        if meta.len() > 16 * 1024 * 1024 {
+            return Err(format!("{path:?} too large to edit ({})", meta.len()));
+        }
+        let content = std::fs::read_to_string(&fs_path).map_err(|e| e.to_string())?;
+        let matches = content.matches(old).count();
+        if matches == 0 {
+            return Err(format!("edit_file: `old_string` not found in {path}"));
+        }
+        if matches > 1 && !replace_all {
+            return Err(format!(
+                "edit_file: `old_string` matches {matches} times in {path} — add context or set replace_all"
+            ));
+        }
+        let updated = if replace_all {
+            content.replace(old, new)
+        } else {
+            content.replacen(old, new, 1)
+        };
+        std::fs::write(&fs_path, &updated).map_err(|e| e.to_string())?;
+        let delta = (new.lines().count() as i128 - old.lines().count() as i128) * matches as i128;
+        Ok(format!(
+            "edited {path}: {} replacement(s), {delta:+} lines",
+            if replace_all { matches } else { 1 }
+        ))
+    }
+
+    /// `bash` — the only gated-by-default tool. Runs through the
+    /// workspace root with a hard timeout; output is capped before it
+    /// can flood context.
+    async fn bash(&self, call: &ToolCall) -> ToolOutput {
+        let command = match arg_str(call, "command") {
+            Some(c) if !c.trim().is_empty() => c.to_string(),
+            _ => return self.output_for(Err("bash: missing `command`".to_string())),
+        };
+        let timeout_ms = arg_u64(call, "timeout_ms")
+            .unwrap_or(120_000)
+            .clamp(1_000, 600_000);
+
+        let mut cmd = if cfg!(windows) {
+            let mut c = tokio::process::Command::new("cmd");
+            c.args(["/C", &command]);
+            c
+        } else {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", &command]);
+            c
+        };
+        cmd.current_dir(&self.root).kill_on_drop(true);
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), cmd.output()).await;
+
+        let full = match result {
+            Ok(Ok(out)) => {
+                let code = out.status.code().unwrap_or(-1);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let mut s = format!("exit code: {code}\n--- stdout ---\n");
+                s.push_str(&cap_str(&stdout, 128 * 1024));
+                s.push_str("\n--- stderr ---\n");
+                s.push_str(&cap_str(&stderr, 128 * 1024));
+                if out.status.success() { Ok(s) } else { Err(s) }
+            }
+            Ok(Err(e)) => Err(format!("bash failed to start: {e}")),
+            Err(_) => Err(format!("bash timed out after {timeout_ms}ms (killed)")),
+        };
+        self.output_for(full)
     }
 }
 
@@ -541,6 +717,17 @@ fn shape(text: &str, cap: usize) -> String {
     out
 }
 
+/// Head-only truncation for command output — stream tails are usually
+/// noise, unlike file contents where the tail matters.
+fn cap_str(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    let mut out = s[..floor_char_boundary(s, cap)].to_string();
+    let _ = write!(out, "\n[… {} bytes truncated …]", s.len() - cap);
+    out
+}
+
 fn floor_char_boundary(s: &str, mut i: usize) -> usize {
     i = i.min(s.len());
     while i > 0 && !s.is_char_boundary(i) {
@@ -617,5 +804,84 @@ mod tests {
         let out = t.exec(&call("rm_rf", json!({})));
         assert!(!out.ok);
         assert!(out.content.contains("unknown tool"));
+    }
+
+    #[test]
+    fn write_then_edit_file() {
+        let (dir, t) = tools();
+        let w = t.exec(&call(
+            "write_file",
+            json!({"path": "new.txt", "content": "one\ntwo\n"}),
+        ));
+        assert!(w.ok, "{}", w.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+
+        let e = t.exec(&call(
+            "edit_file",
+            json!({"path": "a.txt", "old_string": "beta", "new_string": "BETA"}),
+        ));
+        assert!(e.ok, "{}", e.content);
+        assert!(
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .contains("BETA")
+        );
+
+        // Ambiguous match without replace_all is an honest error.
+        let amb = t.exec(&call(
+            "edit_file",
+            json!({"path": "a.txt", "old_string": "a", "new_string": "x"}),
+        ));
+        assert!(!amb.ok);
+        assert!(amb.content.contains("matches"));
+
+        // Missing old_string is an honest error too.
+        let miss = t.exec(&call(
+            "edit_file",
+            json!({"path": "a.txt", "old_string": "zzz", "new_string": "x"}),
+        ));
+        assert!(!miss.ok);
+    }
+
+    #[tokio::test]
+    async fn bash_runs_and_reports_exit() {
+        let (_d, t) = tools();
+        let out = t
+            .execute(&call("bash", json!({"command": "echo hi"})))
+            .await;
+        assert!(out.ok, "{}", out.content);
+        assert!(out.content.contains("exit code: 0"));
+        assert!(out.content.contains("hi"));
+    }
+
+    #[test]
+    fn gate_reason_covers_mutations_only() {
+        let (_d, t) = tools();
+        assert!(
+            t.gate_reason(&call("read_file", json!({"path": "a.txt"})))
+                .is_none()
+        );
+        assert!(
+            t.gate_reason(&call("grep", json!({"pattern": "x"})))
+                .is_none()
+        );
+        assert!(
+            t.gate_reason(&call("bash", json!({"command": "ls"})))
+                .is_some()
+        );
+        assert!(
+            t.gate_reason(&call("write_file", json!({"path": "x", "content": "y"})))
+                .is_some()
+        );
+        assert!(
+            t.gate_reason(&call(
+                "edit_file",
+                json!({"path": "x", "old_string": "a", "new_string": "b"})
+            ))
+            .is_some()
+        );
     }
 }

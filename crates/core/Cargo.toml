@@ -17,7 +17,7 @@ hate-prompt = { path = "../prompt" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "macros", "process"] }
 tokio-util = "0.7"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }

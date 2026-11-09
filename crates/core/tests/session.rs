@@ -80,6 +80,7 @@ fn session_with(provider: Arc<dyn Provider>) -> hate_core::SessionHandle {
         ledger: None,
         persist: None,
         tools: None,
+        permissions: Arc::new(hate_core::PermissionHub::default()),
     })
 }
 
@@ -356,6 +357,7 @@ async fn tool_calls_execute_and_feed_results_back() {
         ledger: None,
         persist: None,
         tools: Some(tools),
+        permissions: Arc::new(hate_core::PermissionHub::default()),
     });
     let mut rx = session.subscribe();
     session
@@ -430,4 +432,139 @@ async fn tool_call_without_tools_fails_honestly() {
             _ => {}
         }
     }
+}
+
+#[tokio::test]
+async fn gated_tool_waits_for_permission_then_denies() {
+    use hate_core::{PermissionHub, ToolCall, ToolName, WorkspaceTools};
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let tools = Arc::new(WorkspaceTools::new(dir.path()).unwrap());
+    let permissions = Arc::new(PermissionHub::default());
+
+    let provider = Arc::new(Rounds {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+            vec![
+                Delta::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: ToolName::new("bash"),
+                    args: json!({"command": "echo hi"}),
+                }),
+                Delta::Done,
+            ],
+            vec![Delta::Text("denied, ok".into()), Delta::Done],
+        ])),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider: provider.clone(),
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: Some(tools),
+        permissions,
+    });
+    let mut rx = session.subscribe();
+    session
+        .command(Command::UserMessage("run echo".to_string()))
+        .expect("command");
+
+    let mut denied = false;
+    let mut saw_request = false;
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::PermissionRequested { request } => {
+                saw_request = true;
+                assert_eq!(request.call.name.as_str(), "bash");
+                session
+                    .command(Command::RespondPermission {
+                        request_id: request.id,
+                        decision: "deny".to_string(),
+                    })
+                    .expect("respond");
+            }
+            Event::ToolFinished { ok, .. } => {
+                assert!(!ok, "denied call must report failure");
+                denied = true;
+            }
+            Event::TurnComplete { .. } => break,
+            Event::Failed { reason } => panic!("turn failed: {reason:?}"),
+            _ => {}
+        }
+    }
+    assert!(saw_request, "permission request emitted");
+    assert!(denied, "denial surfaced as failed tool result");
+
+    // Round 2 must carry the denial text back to the model.
+    let seen = provider.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].contains("denied"), "denial fed back: {seen:?}");
+}
+
+#[tokio::test]
+async fn allow_session_skips_repeat_prompts() {
+    use hate_core::{PermissionHub, ToolCall, ToolName, WorkspaceTools};
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let tools = Arc::new(WorkspaceTools::new(dir.path()).unwrap());
+
+    // Two identical gated calls across two rounds — after allow_session
+    // on the first, the second must run without another prompt.
+    let call = || {
+        Delta::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: ToolName::new("write_file"),
+            args: json!({"path": "x.txt", "content": "hi"}),
+        })
+    };
+    let provider = Arc::new(Rounds {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+            vec![call(), Delta::Done],
+            vec![call(), Delta::Done],
+            vec![Delta::Text("done".into()), Delta::Done],
+        ])),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider,
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: Some(tools),
+        permissions: Arc::new(PermissionHub::default()),
+    });
+    let mut rx = session.subscribe();
+    session
+        .command(Command::UserMessage("write twice".to_string()))
+        .expect("command");
+
+    let mut prompts = 0u32;
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::PermissionRequested { request } => {
+                prompts += 1;
+                session
+                    .command(Command::RespondPermission {
+                        request_id: request.id,
+                        decision: "allow_session".to_string(),
+                    })
+                    .expect("respond");
+            }
+            Event::TurnComplete { .. } => break,
+            Event::Failed { reason } => panic!("turn failed: {reason:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(prompts, 1, "second identical call auto-allowed");
+    assert!(dir.path().join("x.txt").exists());
 }

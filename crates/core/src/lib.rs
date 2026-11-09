@@ -21,7 +21,8 @@ pub use provider::{
     ModelMeta, Provider, ProviderError, ThinkingLevel, ToolSpec,
 };
 pub use session::{
-    Command, Limits, SessionConfig, SessionError, SessionHandle, SessionSnapshot, spawn_session,
+    Command, Limits, PermissionHub, SessionConfig, SessionError, SessionHandle, SessionSnapshot,
+    spawn_session,
 };
 pub use state::SessionState;
 pub use tools::{ToolOutput, WorkspaceTools};

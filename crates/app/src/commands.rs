@@ -6,8 +6,8 @@ use std::sync::Mutex;
 
 use hate_auth::AuthContext;
 use hate_core::{
-    Command, Limits, PersistCtx, PersistedSession, SessionConfig, SessionHandle, SessionMeta,
-    ThinkingLevel, WorkspaceTools, spawn_session,
+    Command, Limits, PermissionHub, PersistCtx, PersistedSession, SessionConfig, SessionHandle,
+    SessionMeta, ThinkingLevel, WorkspaceTools, spawn_session,
 };
 use hate_ledger::Ledger;
 use hate_providers::{ProviderKind, ProviderSpec, build, warn_if_unknown};
@@ -172,6 +172,7 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         ledger,
         persist,
         tools,
+        permissions: std::sync::Arc::new(PermissionHub::default()),
     });
 
     let mut rx = handle.subscribe();

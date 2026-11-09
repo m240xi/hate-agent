@@ -12,9 +12,44 @@
   let panelOpen = $state(false);
   let now = $state(Date.now());
 
-  interface Section {
+  interface VendorGroup {
     title: string;
     items: ProviderModel[];
+  }
+
+  interface Section {
+    /** Provider config key (`nous`, `claude`, …) — stable `#each` key. */
+    key: string;
+    /** Human label for the provider header. */
+    label: string;
+    count: number;
+    vendors: VendorGroup[];
+  }
+
+  /** Friendly provider names — the picker's top-level sections. */
+  const PROVIDER_LABELS: Record<string, string> = {
+    nous: 'Hermes',
+    claude: 'Claude',
+    anthropic: 'Claude',
+    openai: 'OpenAI',
+    openrouter: 'OpenRouter',
+    deepseek: 'DeepSeek',
+    xai: 'xAI',
+    grok: 'xAI',
+    gemini: 'Gemini',
+    google: 'Gemini',
+    groq: 'Groq',
+    mistral: 'Mistral',
+    ollama: 'Ollama',
+    lmstudio: 'LM Studio',
+  };
+
+  function providerLabel(name: string): string {
+    const key = name.toLowerCase();
+    return (
+      PROVIDER_LABELS[key] ??
+      key.charAt(0).toUpperCase() + key.slice(1)
+    );
   }
 
   /** Aggregator catalogs prefix the vendor: "Anthropic: Claude Fable
@@ -28,35 +63,57 @@
     return n.replace(VENDOR_PREFIX, '') || n;
   }
 
-  // With more than one provider contributing models, group headers are
-  // provider names; single-provider catalogs keep the vendor-prefix
-  // grouping (anthropic/, openai/, …) which reads better there.
-  const multiProvider = $derived(
-    new Set(session.models.map((m) => m.provider).filter(Boolean)).size > 1,
-  );
+  /** Vendor family from an aggregator id (`anthropic/x` → `anthropic`).
+   *  A leading `~` marks "latest" aliases and folds into its family. */
+  function vendorOf(m: ProviderModel): string {
+    const id = m.id.replace(/^~/, '');
+    const slash = id.indexOf('/');
+    return slash > 0 ? id.slice(0, slash) : '';
+  }
 
+  // Sections are providers first, vendor families second — so Hermes's
+  // anthropic/openai/deepseek models live under one "Hermes" header
+  // instead of masquerading as providers. Single-vendor catalogs (a
+  // plain Anthropic key) skip the sub-header and render flat.
   const sections = $derived.by<Section[]>(() => {
     const q = query.trim().toLowerCase();
-    const groups = new Map<string, ProviderModel[]>();
+    const byProvider = new Map<string, Map<string, ProviderModel[]>>();
     for (const m of session.models) {
       const hay = `${m.id} ${m.name ?? ''} ${m.provider ?? ''}`.toLowerCase();
       if (q && !hay.includes(q)) continue;
-      const slash = m.id.indexOf('/');
-      const vendor = slash > 0 ? m.id.slice(0, slash) : 'other';
-      const key = multiProvider ? (m.provider ?? vendor) : vendor;
-      const list = groups.get(key) ?? [];
+      const vendor = vendorOf(m);
+      const provider = m.provider || vendor || 'other';
+      const vendors = byProvider.get(provider) ?? new Map<string, ProviderModel[]>();
+      const list = vendors.get(vendor) ?? [];
       list.push(m);
-      groups.set(key, list);
+      vendors.set(vendor, list);
+      byProvider.set(provider, vendors);
     }
-    return [...groups.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([title, items]) => ({
-        title,
-        items: items.sort((a, b) => a.id.localeCompare(b.id)),
-      }));
+    const current = session.providerName;
+    return [...byProvider.entries()]
+      .map(([key, vendors]) => {
+        const groups = [...vendors.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([title, items]) => ({
+            title,
+            items: items.sort((a, b) => a.id.localeCompare(b.id)),
+          }));
+        return {
+          key,
+          label: providerLabel(key),
+          count: groups.reduce((n, g) => n + g.items.length, 0),
+          vendors: groups,
+        };
+      })
+      .sort((a, b) => {
+        // The session's provider first, then alphabetical by label.
+        const da = a.key === current ? 0 : 1;
+        const db = b.key === current ? 0 : 1;
+        return da - db || a.label.localeCompare(b.label);
+      });
   });
 
-  const flat = $derived(sections.flatMap((s) => s.items));
+  const flat = $derived(sections.flatMap((s) => s.vendors.flatMap((v) => v.items)));
 
   // Keep the keyboard highlight on the first match whenever the
   // filtered list changes.
@@ -169,45 +226,53 @@
         />
       </div>
       <div class="mp-list" role="listbox" aria-label="Models">
-        {#each sections as sec (sec.title)}
+        {#each sections as sec (sec.key)}
           <div class="mp-group">
-            <span class="mp-group-name">{sec.title}</span>
-            <span class="mp-group-count mono">{sec.items.length}</span>
+            <span class="mp-group-name">{sec.label}</span>
+            <span class="mp-group-count mono">{sec.count}</span>
           </div>
-          {#each sec.items as m (m.id)}
-            <button
-              id="mp-row-{m.id}"
-              type="button"
-              class="mp-row"
-              class:selected={m.id === session.model}
-              class:highlighted={m.id === highlightId}
-              role="option"
-              aria-selected={m.id === session.model}
-              onclick={() => {
-                void session.setModel(m.id, m.provider);
-                close();
-              }}
-              onmouseenter={() => (highlightId = m.id)}
-            >
-              <span class="mp-main">
-                <span class="mp-name">{displayName(m)}</span>
-                <span class="mp-id mono">{m.id}</span>
-              </span>
-              <span class="mp-meta">
-                {#if m.supports_tools === true || m.supports_vision === true}
-                  <span class="mp-badges">
-                    {#if m.supports_tools === true}<span class="mp-badge" title="tool calls">⚒</span>{/if}
-                    {#if m.supports_vision === true}<span class="mp-badge" title="vision">◉</span>{/if}
-                  </span>
-                {/if}
-                {#if priceLabel(m)}
-                  <span class="mp-price mono" title="$/1M in · out">{priceLabel(m)}</span>
-                {/if}
-                <span class="mp-ctx mono" title="context window">
-                  {fmtCtx(m.context_tokens)}
+          {#each sec.vendors as vg (vg.title)}
+            {#if sec.vendors.length > 1}
+              <div class="mp-subgroup">
+                <span class="mp-subgroup-name">{vg.title || 'other'}</span>
+                <span class="mp-group-count mono">{vg.items.length}</span>
+              </div>
+            {/if}
+            {#each vg.items as m (m.id)}
+              <button
+                id="mp-row-{m.id}"
+                type="button"
+                class="mp-row"
+                class:selected={m.id === session.model}
+                class:highlighted={m.id === highlightId}
+                role="option"
+                aria-selected={m.id === session.model}
+                onclick={() => {
+                  void session.setModel(m.id, m.provider);
+                  close();
+                }}
+                onmouseenter={() => (highlightId = m.id)}
+              >
+                <span class="mp-main">
+                  <span class="mp-name">{displayName(m)}</span>
+                  <span class="mp-id mono">{m.id}</span>
                 </span>
-              </span>
-            </button>
+                <span class="mp-meta">
+                  {#if m.supports_tools === true || m.supports_vision === true}
+                    <span class="mp-badges">
+                      {#if m.supports_tools === true}<span class="mp-badge" title="tool calls">⚒</span>{/if}
+                      {#if m.supports_vision === true}<span class="mp-badge" title="vision">◉</span>{/if}
+                    </span>
+                  {/if}
+                  {#if priceLabel(m)}
+                    <span class="mp-price mono" title="$/1M in · out">{priceLabel(m)}</span>
+                  {/if}
+                  <span class="mp-ctx mono" title="context window">
+                    {fmtCtx(m.context_tokens)}
+                  </span>
+                </span>
+              </button>
+            {/each}
           {/each}
         {/each}
         {#if flat.length === 0}
@@ -286,6 +351,28 @@
     font-weight: 400;
     color: var(--fg-3);
     opacity: 0.7;
+  }
+  /* Vendor family inside a provider — sits under the sticky provider
+     header, smaller and indented so the hierarchy reads at a glance. */
+  .mp-subgroup {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 6px 12px 2px 20px;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+    position: sticky;
+    top: 25px;
+    background: var(--bg-1);
+    opacity: 0.85;
+  }
+  .mp-subgroup-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .mp-row {
     display: flex;

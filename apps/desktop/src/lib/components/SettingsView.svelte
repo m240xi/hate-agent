@@ -55,6 +55,9 @@
     skillAuto = await m.skillsAutoGet().catch(() => true);
     appInfo = await m.appInfo().catch(() => null);
     await loadMcp();
+    // Provider connect/disconnect/add/remove changes the model catalog —
+    // reload it so the composer picker isn't stale.
+    void session.refreshModels();
   }
 
   onMount(async () => {

@@ -224,31 +224,7 @@ class SessionStore {
         this.provider = def.name;
         this.model = def.model;
       }
-      this.modelsState = 'loading';
-      // Fan out across every configured provider so the picker can
-      // group by provider; unauthed/unreachable ones just yield [].
-      const catalog =
-        this.providers.length > 0
-          ? Promise.all(
-              this.providers.map((p) =>
-                m
-                  .modelsList(p.name)
-                  .then((list) =>
-                    list.map((x) => ({ ...x, provider: p.name })),
-                  )
-                  .catch(() => [] as ProviderModel[]),
-              ),
-            ).then((lists) => lists.flat())
-          : m.modelsList();
-      catalog
-        .then((list) => {
-          this.models = filterChatModels(list);
-          this.modelsState = 'ready';
-        })
-        .catch((err: unknown) => {
-          this.modelsState = 'error';
-          this.modelsError = String(err);
-        });
+      void this.refreshModels();
       const { listen } = await import('@tauri-apps/api/event');
       this.unlisten = await listen<SessionEvent>('core-event', (e) => {
         this.handleEvent(e.payload);
@@ -367,6 +343,34 @@ class SessionStore {
         kind: 'error',
         text: `rewind failed: ${e instanceof Error ? e.message : String(e)}`,
       });
+    }
+  }
+
+  /** Reload the cross-provider model catalog. Called at startup and
+   *  after a provider is connected/disconnected/added so the picker
+   *  never goes stale mid-session. */
+  async refreshModels(): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    this.providers = await m.providersList().catch(() => []);
+    this.modelsState = 'loading';
+    // Fan out across every configured provider so the picker can
+    // group by provider; unauthed/unreachable ones just yield [].
+    const lists = await Promise.all(
+      this.providers.map((p) =>
+        m
+          .modelsList(p.name)
+          .then((list) => list.map((x) => ({ ...x, provider: p.name })))
+          .catch(() => [] as ProviderModel[]),
+      ),
+    );
+    try {
+      const list = lists.length > 0 ? lists.flat() : await m.modelsList();
+      this.models = filterChatModels(list);
+      this.modelsState = 'ready';
+    } catch (err) {
+      this.modelsState = 'error';
+      this.modelsError = String(err);
     }
   }
 

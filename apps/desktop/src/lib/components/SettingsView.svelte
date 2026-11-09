@@ -726,7 +726,7 @@
     padding: 30px 24px 72px;
   }
   .page-title {
-    font-family: 'Alagard', var(--font-ui);
+    font-family: var(--font-ui);
     font-size: 38px;
     font-weight: 400;
     color: var(--fg-0);
@@ -736,13 +736,13 @@
     margin-bottom: 34px;
   }
   .group-title {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 16px;
     color: var(--fg-0);
     margin: 0 0 4px;
   }
   .group-hint {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 14px;
     color: var(--fg-2);
     margin: 0 0 12px;
@@ -770,7 +770,7 @@
   .login-line,
   .login-line code,
   .key-input {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
   }
   .seg {
     display: inline-flex;
@@ -781,7 +781,7 @@
     border-radius: var(--radius);
   }
   .seg-item {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 14px;
     padding: 7px 18px;
     border-radius: 5px;
@@ -821,7 +821,7 @@
     color: var(--fg-0);
   }
   .badge {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 12px;
     padding: 2px 8px;
     border-radius: var(--radius-pill);
@@ -910,7 +910,7 @@
      sized down for dense rows. Always dark: they're physical
      buttons, not themed surfaces. */
   .btn {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 15px;
     padding: 8px 16px;
     border-radius: 5px;
@@ -962,13 +962,13 @@
     color: #b9b6ae;
   }
   .error-text {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 13px;
     color: var(--err);
     margin: 8px 0 0;
   }
   .muted {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 13px;
     color: var(--fg-3);
   }
@@ -980,7 +980,7 @@
     font-size: 13px;
   }
   .about-grid dt {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     color: var(--fg-3);
   }
   .about-grid dd {
@@ -1043,7 +1043,7 @@
     color: var(--fg-1);
   }
   .mcp-kind {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 11px;
     color: var(--fg-3);
     border: 1px solid #26282c;
@@ -1051,7 +1051,7 @@
     padding: 1px 5px;
   }
   .mcp-state {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 11px;
     color: var(--fg-3);
   }
@@ -1068,7 +1068,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 11px;
     color: var(--fg-3);
     cursor: pointer;
@@ -1118,7 +1118,7 @@
     margin-top: 10px;
   }
   .mcp-error {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 12px;
     color: var(--err, #d95f4e);
   }
@@ -1136,7 +1136,7 @@
     grid-column: 1 / -1;
   }
   .fld-label {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 11px;
     color: var(--fg-3);
   }
@@ -1154,7 +1154,7 @@
     border-color: #3d4148;
   }
   .input.mono {
-    font-family: 'm5x7', var(--font-mono);
+    font-family: var(--font-mono);
     font-size: 12px;
   }
   textarea.input {

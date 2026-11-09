@@ -84,7 +84,7 @@
       <span class="dim">{fmt(session.usage.thinking)} think</span>
     </div>
     <div class="cost-row mono">
-      <span>cache hit {Math.round(session.cacheRatio * 100)}%</span>
+      <span title="session cache hit ratio — cached input / total input">cache hit {Math.round(session.cacheRatio * 100)}%</span>
       <span>${session.costUsd.toFixed(4)}</span>
     </div>
     <div class="model-row mono">

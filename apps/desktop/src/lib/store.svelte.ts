@@ -722,9 +722,11 @@ class SessionStore {
   }
 
   private recomputeDerived(): void {
-    const uncached = this.usage.input - this.usage.cached_input;
-    this.cacheRatio = this.usage.input > 0 ? this.usage.cached_input / this.usage.input : 0;
-    void uncached;
+    // Session-cumulative cache hit ratio: cached input over ALL input
+    // across completed turns. Per-round ratios fluctuate wildly during
+    // tool loops; the honest first-class metric is hits/session input.
+    const t = this.sessionTotals;
+    this.cacheRatio = t.input > 0 ? t.cached_input / t.input : 0;
   }
 
   private findTool(callId: string): TranscriptBlock | undefined {

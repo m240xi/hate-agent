@@ -66,7 +66,7 @@ struct WireRequest {
     model: String,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Value>,
     messages: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<Value>,
@@ -87,7 +87,7 @@ struct ThinkingParam {
 struct CountRequest {
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Value>,
     messages: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<Value>,
@@ -150,11 +150,48 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
         }
     }
     flush_results(&mut out, &mut pending_results);
+
+    // Explicit prompt caching (CacheMode::Explicit): mark the LAST
+    // content block of the LAST message — caches the whole prefix, and
+    // the breakpoint moving forward each round is what makes
+    // multi-round tool loops incremental instead of re-billed.
+    if let Some(last) = out.last_mut()
+        && let Some(content) = last.get_mut("content")
+    {
+        match content {
+            Value::String(s) => {
+                let text = std::mem::take(s);
+                *content = json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": {"type": "ephemeral"},
+                }]);
+            }
+            Value::Array(blocks) if !blocks.is_empty() => {
+                if let Some(b) = blocks.last_mut() {
+                    b["cache_control"] = json!({"type": "ephemeral"});
+                }
+            }
+            _ => {}
+        }
+    }
     out
 }
 
+/// System prompt as a content-block array carrying the first cache
+/// breakpoint — Anthropic only caches block form, not bare strings.
+fn cached_system(system: Option<&String>) -> Option<Value> {
+    system.map(|s| {
+        json!([{
+            "type": "text",
+            "text": s,
+            "cache_control": {"type": "ephemeral"},
+        }])
+    })
+}
+
 fn wire_tools(specs: &[ToolSpec]) -> Vec<Value> {
-    specs
+    let mut tools: Vec<Value> = specs
         .iter()
         .map(|t| {
             json!({
@@ -163,7 +200,13 @@ fn wire_tools(specs: &[ToolSpec]) -> Vec<Value> {
                 "input_schema": t.input_schema,
             })
         })
-        .collect()
+        .collect();
+    // Second breakpoint: everything through the tool schemas is static
+    // per session — prime it once, hit it every request.
+    if let Some(last) = tools.last_mut() {
+        last["cache_control"] = json!({"type": "ephemeral"});
+    }
+    tools
 }
 
 // ── SSE event payloads ────────────────────────────────────────────────────
@@ -306,7 +349,7 @@ impl Provider for AnthropicProvider {
         let url = self.count_url();
         let body = CountRequest {
             model: req.model.clone(),
-            system: req.system.clone(),
+            system: cached_system(req.system.as_ref()),
             messages: wire_messages(req),
             tools: wire_tools(&req.tools),
         };
@@ -419,7 +462,7 @@ async fn pump(
     let body = WireRequest {
         model: req.model.clone(),
         max_tokens: req.max_output_tokens.saturating_add(thinking.unwrap_or(0)),
-        system: req.system.clone(),
+        system: cached_system(req.system.as_ref()),
         messages: wire_messages(&req),
         tools: wire_tools(&req.tools),
         stream: true,
@@ -625,5 +668,92 @@ fn map_api_error(e: &ApiError) -> ProviderError {
         }
     } else {
         ProviderError::Stream(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hate_core::provider::ThinkingLevel;
+
+    fn req(messages: Vec<Message>, tools: Vec<ToolSpec>) -> ChatRequest {
+        ChatRequest {
+            model: "claude-test".to_string(),
+            system: Some("you are helpful".to_string()),
+            messages,
+            tools,
+            max_output_tokens: 1024,
+            temperature: None,
+            thinking: ThinkingLevel::Off,
+        }
+    }
+
+    fn bash_spec() -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("bash"),
+            description: "run a command".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn breakpoints_cover_system_tools_and_last_message() {
+        let r = req(
+            vec![
+                Message::User {
+                    content: "hi".to_string(),
+                },
+                Message::Assistant {
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "c1".to_string(),
+                        name: ToolName::new("bash"),
+                        args: serde_json::json!({"command": "ls"}),
+                    }],
+                },
+                Message::Tool {
+                    call_id: "c1".to_string(),
+                    name: "bash".to_string(),
+                    content: "ok".to_string(),
+                },
+            ],
+            vec![bash_spec()],
+        );
+
+        // System → block array with cache_control.
+        let sys = cached_system(r.system.as_ref()).expect("system present");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+
+        // Last tool carries the second breakpoint.
+        let tools = wire_tools(&r.tools);
+        assert_eq!(tools[0]["cache_control"]["type"], "ephemeral");
+
+        // Last message (collapsed tool_result user msg) → last block.
+        let msgs = wire_messages(&r);
+        let last = msgs.last().expect("messages");
+        let blocks = last["content"].as_array().expect("block array");
+        assert_eq!(
+            blocks.last().expect("block")["cache_control"]["type"],
+            "ephemeral"
+        );
+        // Earlier messages stay breakpoint-free.
+        assert!(
+            msgs[0]["content"].is_string() || msgs[0]["content"][0].get("cache_control").is_none()
+        );
+    }
+
+    #[test]
+    fn bare_user_string_becomes_cached_block() {
+        let r = req(
+            vec![Message::User {
+                content: "hello".to_string(),
+            }],
+            vec![],
+        );
+        let msgs = wire_messages(&r);
+        assert!(msgs[0]["content"].is_array());
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        // No tools → no tool breakpoint.
+        assert_eq!(wire_tools(&r.tools).len(), 0);
     }
 }

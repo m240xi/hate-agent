@@ -17,6 +17,7 @@ pub fn run() {
         commands::app_info,
         commands::session_send,
         commands::session_cancel,
+        commands::session_compact,
         commands::session_answer,
         commands::session_respond_permission,
         commands::session_rewind,

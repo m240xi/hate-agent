@@ -283,6 +283,21 @@ pub fn session_cancel(state: State<'_, Sessions>) -> Result<(), String> {
     Ok(())
 }
 
+/// `/compact` — force a context compaction on the live session.
+/// No-op-ish error when a turn is running (the turn owns its convo).
+#[tauri::command]
+#[specta::specta]
+pub fn session_compact(state: State<'_, Sessions>) -> Result<(), String> {
+    let guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    if let Some(h) = guard.handle.as_ref() {
+        h.command(Command::Compact).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Answer a pending `ask_user` prompt (accepted now; M2 wires it).
 #[tauri::command]
 #[specta::specta]

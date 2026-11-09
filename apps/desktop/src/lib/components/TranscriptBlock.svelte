@@ -1,6 +1,7 @@
 <script lang="ts">
   import { session } from '../store.svelte';
   import ToolCard from './ToolCard.svelte';
+  import { renderMarkdown } from '../markdown';
   import type { TranscriptBlock } from '../types';
 
   // Renders one transcript block by kind: user message, assistant text
@@ -21,7 +22,8 @@
   </div>
 {:else if block.kind === 'text'}
   <div class="assistant-text" class:streaming={block.streaming}>
-    {block.text}
+    <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+    {@html renderMarkdown(block.text ?? '')}
     {#if block.streaming}<span class="caret" aria-hidden="true"></span>{/if}
   </div>
 {:else if block.kind === 'thinking'}
@@ -70,10 +72,82 @@
     color: var(--fg-0);
   }
   .assistant-text {
-    white-space: pre-wrap;
-    word-break: break-word;
     color: var(--fg-0);
     line-height: 1.55;
+  }
+  /* Markdown output — `{@html}` content doesn't carry Svelte's scope
+     attribute, so these must be :global. */
+  .assistant-text :global(p) {
+    margin: 0 0 6px;
+  }
+  .assistant-text :global(p:last-child) {
+    margin-bottom: 0;
+  }
+  .assistant-text :global(h1),
+  .assistant-text :global(h2),
+  .assistant-text :global(h3),
+  .assistant-text :global(h4) {
+    margin: 10px 0 4px;
+    font-size: 1.05em;
+    font-weight: 650;
+    color: var(--fg-0);
+  }
+  .assistant-text :global(h1:first-child),
+  .assistant-text :global(h2:first-child),
+  .assistant-text :global(h3:first-child),
+  .assistant-text :global(h4:first-child) {
+    margin-top: 0;
+  }
+  .assistant-text :global(ul),
+  .assistant-text :global(ol) {
+    margin: 4px 0 8px;
+    padding-left: 22px;
+  }
+  .assistant-text :global(li) {
+    margin: 2px 0;
+  }
+  .assistant-text :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  .assistant-text :global(pre) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre;
+    overflow-x: auto;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    margin: 6px 0 10px;
+  }
+  .assistant-text :global(pre code) {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+  }
+  .assistant-text :global(blockquote) {
+    margin: 6px 0;
+    padding: 2px 12px;
+    border-left: 2px solid var(--border-strong);
+    color: var(--fg-2);
+  }
+  .assistant-text :global(a) {
+    color: var(--accent);
+  }
+  .assistant-text :global(hr) {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 10px 0;
+  }
+  .assistant-text :global(del) {
+    color: var(--fg-2);
   }
   .caret {
     display: inline-block;

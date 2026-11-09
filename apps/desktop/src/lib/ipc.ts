@@ -61,6 +61,10 @@ export async function sessionCancel(): Promise<void> {
   return invoke<void>('session_cancel');
 }
 
+export async function sessionCompact(): Promise<void> {
+  return invoke<void>('session_compact');
+}
+
 export async function sessionRespondPermission(
   requestId: string,
   decision: 'allow' | 'allow_session' | 'deny',

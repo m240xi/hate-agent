@@ -10,12 +10,19 @@
   let showJump = $state(false);
 
   const VIRTUALIZE_AT = 200;
+  // "Show earlier" grows the window a page at a time — virtualization
+  // exists for render cost, not to hide history.
+  let revealExtra = $state(0);
   const visibleBlocks = $derived(
-    session.blocks.length > VIRTUALIZE_AT
-      ? session.blocks.slice(session.blocks.length - VIRTUALIZE_AT)
+    session.blocks.length > VIRTUALIZE_AT + revealExtra
+      ? session.blocks.slice(session.blocks.length - VIRTUALIZE_AT - revealExtra)
       : session.blocks,
   );
   const hiddenCount = $derived(session.blocks.length - visibleBlocks.length);
+
+  function revealEarlier(): void {
+    revealExtra += VIRTUALIZE_AT;
+  }
 
   function onScroll(): void {
     if (!scrollEl) return;
@@ -46,7 +53,7 @@
     {#if hiddenCount > 0}
       <div class="earlier">
         {hiddenCount} earlier blocks hidden
-        <button onclick={() => { /* expands window in a later pass */ }}>show</button>
+        <button onclick={revealEarlier}>show</button>
       </div>
     {/if}
     {#each visibleBlocks as block (block.id)}

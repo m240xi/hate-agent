@@ -121,6 +121,9 @@ pub enum Command {
         /// known — keeps compaction thresholds honest after a switch.
         context_window: Option<u64>,
     },
+    /// `/compact` — force a context compaction now. Only handled while
+    /// idle; a turn in flight owns its convo clone and can't be touched.
+    Compact,
 }
 
 /// Point-in-time session status for UI queries.
@@ -386,6 +389,58 @@ impl Actor {
                 // turn ever runs so a model pick survives a restart.
                 self.persist_now();
             }
+            Command::Compact => self.compact_now(),
+        }
+    }
+
+    /// `/compact` — shrink history now, outside any turn. Same safety
+    /// rules as the automatic path; reports honest before/after
+    /// estimates so the UI can show real numbers.
+    fn compact_now(&mut self) {
+        if self.turn_done.is_some() {
+            self.emit(Event::Error {
+                error: AgentError::Internal("can't compact while a turn is running".to_string()),
+            });
+            return;
+        }
+        let system = self.system_prompt();
+        let mut specs = self
+            .cfg
+            .tools
+            .as_ref()
+            .map(|t| t.specs())
+            .unwrap_or_default();
+        if let Some(hub) = self.cfg.mcp.as_ref() {
+            specs.extend(hub.specs());
+        }
+        match force_compact(&mut self.history, &system, &specs) {
+            Some((before, after)) => {
+                self.emit(Event::CompactionStarted {
+                    reason: CompactionReason::Manual,
+                    before,
+                    after,
+                });
+                self.persist_now();
+            }
+            None => self.emit(Event::Error {
+                error: AgentError::Internal("nothing to compact yet".to_string()),
+            }),
+        }
+    }
+
+    /// S0 + S3 — the system string `begin_turn` sends, so compaction
+    /// estimates measure what the provider actually receives.
+    fn system_prompt(&self) -> String {
+        // S0 system prompt + S3 project instructions when the workspace
+        // declares them (AGENTS.md etc.). Stable per session, so prefix
+        // caching still hits.
+        match self.cfg.tools.as_ref().and_then(|t| t.project_context()) {
+            Some(ctx) => format!(
+                "{}\n\nProject instructions (from the workspace):\n{}",
+                hate_prompt::SYSTEM_PROMPT,
+                ctx
+            ),
+            None => hate_prompt::SYSTEM_PROMPT.to_string(),
         }
     }
 
@@ -419,19 +474,7 @@ impl Actor {
         let provider = Arc::clone(&self.cfg.provider);
         let cancel = self.cancel.clone();
         let events = self.events.clone();
-        // S0 system prompt + S3 project instructions when the workspace
-        // declares them (AGENTS.md etc.). Stable per session, so prefix
-        // caching still hits.
-        let system = Some(
-            match self.cfg.tools.as_ref().and_then(|t| t.project_context()) {
-                Some(ctx) => format!(
-                    "{}\n\nProject instructions (from the workspace):\n{}",
-                    hate_prompt::SYSTEM_PROMPT,
-                    ctx
-                ),
-                None => hate_prompt::SYSTEM_PROMPT.to_string(),
-            },
-        );
+        let system = Some(self.system_prompt());
         let model = self.cfg.model.clone();
         let provider_name = self.cfg.provider_name.clone();
         let thinking = self.cfg.thinking;
@@ -1206,6 +1249,38 @@ fn maybe_compact(
         return None;
     };
 
+    if !compact_core(convo) {
+        return None;
+    }
+    let after = estimate_tokens(system, tools, &decayed_view(convo));
+    Some((before, after, reason))
+}
+
+/// User-invoked compaction (`/compact`): same anchor/tail/note safety
+/// rules as the automatic path, but no window threshold — the user
+/// asked, so we shrink whenever there's anything meaningful to drop.
+/// Returns `(before, after)` token estimates like [`maybe_compact`].
+fn force_compact(
+    convo: &mut Vec<Message>,
+    system: &str,
+    tools: &[crate::provider::ToolSpec],
+) -> Option<(u64, u64)> {
+    if convo.len() < COMPACT_TAIL + 4 {
+        return None;
+    }
+    let before = estimate_tokens(system, tools, &decayed_view(convo));
+    if before == 0 || !compact_core(convo) {
+        return None;
+    }
+    let after = estimate_tokens(system, tools, &decayed_view(convo));
+    Some((before, after))
+}
+
+/// The actual rewrite shared by auto and manual compaction: keep the
+/// task anchor + a tool-safe verbatim tail, replace the dropped middle
+/// with a structured note. Returns false when there's nothing safe to
+/// drop (convo too small or tail would swallow everything).
+fn compact_core(convo: &mut Vec<Message>) -> bool {
     let n = convo.len();
     // Task anchor: the first message when it's the user's opening ask.
     let anchor = usize::from(matches!(convo.first(), Some(Message::User { .. })));
@@ -1216,7 +1291,7 @@ fn maybe_compact(
         tail += 1;
     }
     if tail <= anchor + 2 {
-        return None; // nothing meaningful to drop
+        return false; // nothing meaningful to drop
     }
 
     let dropped: Vec<Message> = convo[anchor..tail].to_vec();
@@ -1226,9 +1301,7 @@ fn maybe_compact(
     next.push(Message::User { content: note });
     next.extend(convo[tail..].iter().cloned());
     *convo = next;
-
-    let after = estimate_tokens(system, tools, &decayed_view(convo));
-    Some((before, after, reason))
+    true
 }
 
 /// Structured note standing in for the dropped messages — preserves
@@ -1426,6 +1499,28 @@ mod tests {
         if let Message::User { content } = &convo[1] {
             assert!(content.contains("earlier messages compacted"));
         }
+    }
+
+    #[test]
+    fn force_compact_ignores_threshold() {
+        let mut convo = fat_convo();
+        let n = convo.len();
+        // Huge window → the automatic path would never fire; the
+        // user-invoked one still compacts whenever there's something
+        // meaningful to drop.
+        let (before, after) = force_compact(&mut convo, "sys", &[]).expect("manual compacts");
+        assert!(before > after, "before={before} after={after}");
+        assert!(convo.len() < n);
+        assert!(
+            matches!(&convo[1], Message::User { content } if content.contains("[Context compacted]"))
+        );
+    }
+
+    #[test]
+    fn force_compact_tiny_convo_is_noop() {
+        let mut convo = vec![user("hi"), assistant("hello")];
+        assert!(force_compact(&mut convo, "sys", &[]).is_none());
+        assert_eq!(convo.len(), 2);
     }
 
     #[test]

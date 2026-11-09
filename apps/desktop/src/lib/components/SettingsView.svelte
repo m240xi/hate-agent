@@ -151,6 +151,20 @@
   let editEnv = $state('');
   let editHeaders = $state('');
 
+  /** Split an args string on whitespace, honoring "…" and '…' quotes —
+   *  `-c "echo hi"` stays one arg, quotes stripped. Comma separators
+   *  are NOT special: `a, b` yields the literal tokens `a,` `b`. */
+  function splitArgs(text: string): string[] {
+    const out: string[] = [];
+    const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      if (m[1] !== undefined || m[2] !== undefined) out.push(m[1] ?? m[2] ?? '');
+      else if (m[3]) out.push(m[3]);
+    }
+    return out;
+  }
+
   function pairsToText(rec: Record<string, string>): string {
     return Object.entries(rec)
       .map(([k, v]) => `${k}=${v}`)
@@ -210,7 +224,7 @@
       tools: 0,
       info: '',
       command: nfKind === 'stdio' ? nfCommand.trim() : null,
-      args: nfKind === 'stdio' ? nfArgs.trim().split(/\s+/).filter(Boolean) : [],
+      args: nfKind === 'stdio' ? splitArgs(nfArgs) : [],
       env: nfKind === 'stdio' ? textToPairs(nfEnv) : {},
       url: nfKind === 'http' ? nfUrl.trim() : null,
       headers: nfKind === 'http' ? textToPairs(nfHeaders) : {},
@@ -535,16 +549,13 @@
                       />
                     </label>
                     <label class="fld">
-                      <span class="fld-label">Args (space-separated)</span>
+                      <span class="fld-label">Args (space-separated, "…" for spaces)</span>
                       <input
                         class="input mono"
                         placeholder="-y @modelcontextprotocol/server-filesystem ."
-                        value={(row.args ?? []).join(' ')}
+                        value={(row.args ?? []).map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ')}
                         oninput={(e) => {
-                          row.args = (e.currentTarget as HTMLInputElement).value
-                            .trim()
-                            .split(/\s+/)
-                            .filter(Boolean);
+                          row.args = splitArgs((e.currentTarget as HTMLInputElement).value);
                           queueMcpSave();
                         }}
                       />
@@ -632,7 +643,7 @@
                 <input class="input mono" placeholder="npx" bind:value={nfCommand} />
               </label>
               <label class="fld">
-                <span class="fld-label">Args</span>
+                <span class="fld-label">Args (space-separated, "…" for spaces)</span>
                 <input
                   class="input mono"
                   placeholder="-y @modelcontextprotocol/server-filesystem ."

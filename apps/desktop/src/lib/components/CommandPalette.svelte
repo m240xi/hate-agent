@@ -39,10 +39,35 @@
       hint: 'show shortcuts',
       run: () => session.blocks.push({ id: Date.now(), kind: 'text', text: HELP_TEXT }),
     },
-    { name: '/plan', hint: 'enter plan mode', disabled: 'needs session backend (M2+)' },
-    { name: '/model', hint: 'switch model', disabled: 'needs session backend (M1+)' },
-    { name: '/compact', hint: 'compact context', disabled: 'needs session backend (M7)' },
+    {
+      name: '/model',
+      hint: 'cycle model',
+      run: () => void session.cycleModel(),
+    },
+    {
+      name: '/compact',
+      hint: 'compact context now',
+      run: () => void session.compact(),
+    },
+    {
+      name: '/status',
+      hint: 'session token stats',
+      run: () => session.blocks.push({ id: Date.now(), kind: 'text', text: statusText() }),
+    },
+    { name: '/plan', hint: 'enter plan mode', disabled: 'plan mode not implemented' },
   ]);
+
+  function statusText(): string {
+    const t = session.sessionTotals;
+    const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+    const pct = session.cacheRatio > 0 ? `${Math.round(session.cacheRatio * 100)}%` : '—';
+    const cost = session.costUsd > 0 ? `$${session.costUsd.toFixed(4)}` : '—';
+    return [
+      `model ${session.model || '—'} · thinking ${session.thinkingLevel}`,
+      `ctx ${k(session.ctxUsed)} tok · in ${k(t.input)} (cached ${k(t.cached_input)}) · out ${k(t.output)} · think ${k(t.thinking)}`,
+      `cache hit ${pct} · cost ${cost}`,
+    ].join('\n');
+  }
 
   const HELP_TEXT = [
     'Shortcuts:',

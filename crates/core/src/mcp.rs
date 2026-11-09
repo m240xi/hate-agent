@@ -37,6 +37,18 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(180);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Cap on servers connected concurrently during configure.
 const MAX_SERVERS: usize = 16;
+/// Cap on tools taken from one server — a pathological server can't
+/// flood the provider's tool list.
+const MAX_TOOLS_PER_SERVER: usize = 48;
+/// Tool-description budget: one line, hard cap. MCP servers (Roblox's
+/// included) ship multi-paragraph docs with examples — the model only
+/// needs enough to pick the tool and fill args.
+const DESC_CHARS: usize = 220;
+/// Cap on `description`/`title` strings *inside* input schemas.
+const SCHEMA_TEXT_CHARS: usize = 140;
+/// Serialized input-schema budget per tool. Enums and structure are
+/// the call contract and survive; prose gets cut first.
+const SCHEMA_BYTES: usize = 4096;
 
 /// One configured MCP server. Flat shape keeps the settings form and
 /// the JSON file identical; `kind` selects which fields are meaningful.
@@ -476,9 +488,9 @@ async fn finish_connect(
         .map_err(|e| format!("tools/list: {e}"))?;
 
     let slug = slugify(name);
-    let mut tools = Vec::with_capacity(remote.len());
+    let mut tools = Vec::with_capacity(remote.len().min(MAX_TOOLS_PER_SERVER));
     let mut used: HashMap<String, usize> = HashMap::new();
-    for t in remote {
+    for t in remote.into_iter().take(MAX_TOOLS_PER_SERVER) {
         let orig = t.name.to_string();
         let base = format!("{MCP_PREFIX}{slug}__{}", slugify(&orig));
         // Same-slug collisions get a numeric suffix — wire names must
@@ -500,7 +512,7 @@ async fn finish_connect(
             .collect::<Vec<_>>()
             .join(" ")
             .chars()
-            .take(300)
+            .take(DESC_CHARS)
             .collect();
         tools.push(McpTool {
             wire: wire.clone(),
@@ -512,7 +524,7 @@ async fn finish_connect(
                 } else {
                     description
                 },
-                input_schema: serde_json::Value::Object((*t.input_schema).clone()),
+                input_schema: sanitize_schema(&t.input_schema),
             },
             read_only: t
                 .annotations
@@ -537,6 +549,59 @@ async fn finish_connect(
         tools,
         info,
     }))
+}
+
+/// Bound an MCP `inputSchema` for the wire: truncate prose fields
+/// (`description`/`title`) recursively, then — if the schema is still
+/// over budget — strip every prose field. Structure, `enum`s, `type`s,
+/// and `required` are the call contract and always survive.
+fn sanitize_schema(schema: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    let v = serde_json::Value::Object(schema.clone());
+    let trimmed = trim_schema_text(&v, SCHEMA_TEXT_CHARS, false);
+    if serde_json::to_string(&trimmed).map_or(0, |s| s.len()) <= SCHEMA_BYTES {
+        return trimmed;
+    }
+    trim_schema_text(&v, 0, true)
+}
+
+/// Recursive schema walk. `max` caps prose fields (`0` = remove them);
+/// `strip_all` removes prose entirely regardless of length.
+fn trim_schema_text(v: &serde_json::Value, max: usize, strip_all: bool) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .filter_map(|(k, val)| {
+                    if strip_all && matches!(k.as_str(), "description" | "title") {
+                        return None;
+                    }
+                    Some((
+                        k.clone(),
+                        if matches!(k.as_str(), "description" | "title")
+                            && let serde_json::Value::String(s) = val
+                        {
+                            let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+                            if strip_all || flat.chars().count() > max {
+                                serde_json::Value::String(
+                                    flat.chars().take(max).collect::<String>() + "…",
+                                )
+                            } else {
+                                serde_json::Value::String(flat)
+                            }
+                        } else {
+                            trim_schema_text(val, max, strip_all)
+                        },
+                    ))
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|i| trim_schema_text(i, max, strip_all))
+                .collect(),
+        ),
+        _ => v.clone(),
+    }
 }
 
 /// Lowercase `[a-z0-9_]` slug for wire names — keeps `mcp__…` names

@@ -394,6 +394,24 @@ class SessionStore {
     this.setThinking(order[(i + 1) % order.length] ?? 'off');
   }
 
+  /** `/model` — cycle the provider catalog; persists + hot-swaps the
+   *  live session exactly like picking from the model menu. */
+  async cycleModel(): Promise<void> {
+    const ids = this.models.map((m) => m.id);
+    if (ids.length === 0) return;
+    const i = ids.indexOf(this.model);
+    const next = ids[(i + 1) % ids.length] ?? ids[0];
+    if (next) await this.setModel(next);
+  }
+
+  /** `/compact` — ask the backend to shrink context now; the
+   *  compaction event lands in the transcript when it finishes. */
+  async compact(): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    await m.sessionCompact().catch(() => {});
+  }
+
   // ── session lifecycle ───────────────────────────────────────────────────
 
   /** Which persisted-session mode the current surface maps to. */

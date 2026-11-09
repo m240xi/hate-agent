@@ -664,3 +664,92 @@ async fn compaction_bounds_journaled_history() {
         msgs.len()
     );
 }
+
+/// Drive one user message to its terminal event (complete or failed).
+async fn drive_turn(
+    session: &hate_core::SessionHandle,
+    rx: &mut tokio::sync::broadcast::Receiver<Event>,
+    msg: &str,
+) {
+    session
+        .command(Command::UserMessage(msg.to_string()))
+        .expect("command");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("stream open");
+        if matches!(ev, Event::TurnComplete { .. } | Event::Failed { .. }) {
+            break;
+        }
+    }
+}
+
+/// Stale tool outputs decay: a big `read_file` result from turn 1 must
+/// arrive elided in turn 2's request — head+tail stub, honest marker —
+/// while the journal keeps the full text.
+#[tokio::test]
+async fn stale_tool_outputs_elide_next_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    // >8KB so the shaped tool output exceeds the decay cap.
+    std::fs::write(dir.path().join("big.txt"), "x".repeat(20 * 1024)).unwrap();
+    let tools = Arc::new(hate_core::WorkspaceTools::new(dir.path()).expect("workspace tools"));
+
+    let provider = Arc::new(Rounds {
+        rounds: std::sync::Mutex::new(
+            vec![
+                // Turn 1, round 1: ask for the file.
+                vec![
+                    Delta::ToolCall(hate_core::ToolCall {
+                        id: "c1".to_string(),
+                        name: hate_core::ToolName::new("read_file"),
+                        args: serde_json::json!({"path": "big.txt"}),
+                    }),
+                    Delta::Done,
+                ],
+                // Turn 1, round 2: done.
+                vec![Delta::Text("read it".to_string()), Delta::Done],
+                // Turn 2: done immediately.
+                vec![Delta::Text("ok".to_string()), Delta::Done],
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider: provider.clone(),
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: Some(tools),
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        context_window: 0,
+    });
+    let mut rx = session.subscribe();
+
+    drive_turn(&session, &mut rx, "read big.txt").await;
+    drive_turn(&session, &mut rx, "what did it say?").await;
+
+    let seen = provider.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3, "expected 3 provider rounds");
+    let turn2_req = &seen[2];
+    assert!(
+        turn2_req.contains("tool output elided"),
+        "turn 2 request must carry the elided stub"
+    );
+    assert!(
+        turn2_req.contains("re-run the tool"),
+        "stub must tell the model how to recover"
+    );
+    // The stub is small — full 20KB must NOT be in the request.
+    assert!(
+        !turn2_req.contains(&"x".repeat(9000)),
+        "full tool output leaked into turn 2 request"
+    );
+}

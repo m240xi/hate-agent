@@ -413,7 +413,19 @@ impl Actor {
         let provider = Arc::clone(&self.cfg.provider);
         let cancel = self.cancel.clone();
         let events = self.events.clone();
-        let system = Some(hate_prompt::SYSTEM_PROMPT.to_string());
+        // S0 system prompt + S3 project instructions when the workspace
+        // declares them (AGENTS.md etc.). Stable per session, so prefix
+        // caching still hits.
+        let system = Some(
+            match self.cfg.tools.as_ref().and_then(|t| t.project_context()) {
+                Some(ctx) => format!(
+                    "{}\n\nProject instructions (from the workspace):\n{}",
+                    hate_prompt::SYSTEM_PROMPT,
+                    ctx
+                ),
+                None => hate_prompt::SYSTEM_PROMPT.to_string(),
+            },
+        );
         let model = self.cfg.model.clone();
         let provider_name = self.cfg.provider_name.clone();
         let thinking = self.cfg.thinking;
@@ -819,10 +831,12 @@ async fn run_turn(
             });
         }
 
+        // Provider-bound copy: canonical `convo` keeps full tool output
+        // for the journal; only the wire view decays stale results.
         let req = ChatRequest {
             model: model.clone(),
             system: system.clone(),
-            messages: convo.clone(),
+            messages: decayed_view(&convo),
             tools: specs.clone(),
             max_output_tokens: 8192,
             temperature: None,
@@ -1103,7 +1117,10 @@ fn maybe_compact(
     if window == 0 || convo.len() < COMPACT_TAIL + 4 {
         return None;
     }
-    let before = estimate_tokens(system, tools, convo);
+    // Estimate what actually goes on the wire: stale tool outputs are
+    // decayed in the request view, so counting raw `convo` would
+    // overstate pressure and compact earlier than needed.
+    let before = estimate_tokens(system, tools, &decayed_view(convo));
     if before == 0 {
         return None;
     }
@@ -1137,7 +1154,7 @@ fn maybe_compact(
     next.extend(convo[tail..].iter().cloned());
     *convo = next;
 
-    let after = estimate_tokens(system, tools, convo);
+    let after = estimate_tokens(system, tools, &decayed_view(convo));
     Some((before, after, reason))
 }
 
@@ -1203,6 +1220,62 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let cut: String = s.chars().take(max).collect();
     format!("{cut}…")
+}
+
+// ── stale tool-output decay ───────────────────────────────────────────────
+
+/// Byte cap for tool outputs carried into a NEW turn as history.
+const STALE_TOOL_CAP: usize = 8 * 1024;
+const STALE_HEAD: usize = 6 * 1024;
+const STALE_TAIL: usize = 2 * 1024;
+/// Fallback keep-tail when no user message marks the turn boundary.
+const DECAY_KEEP_TAIL: usize = 16;
+const ELISION_MARKER: &str = "[tool output elided";
+
+/// Clone `convo` with oversized tool results from *prior* turns shrunk
+/// to head+tail stubs. The boundary is this turn's user message — the
+/// last `User` role (compaction notes are `User` too but sit at the
+/// front, never last). Within-turn results stay full: the model needs
+/// them now, and re-running the tool is the honest path back to full
+/// fidelity once they go stale. Applied to the provider-bound copy
+/// only — canonical history (and the journal) keeps the real bytes,
+/// and the marker can never nest because every view rebuilds from
+/// full text.
+fn decayed_view(convo: &[Message]) -> Vec<Message> {
+    let mut view = convo.to_vec();
+    let boundary = convo
+        .iter()
+        .rposition(|m| matches!(m, Message::User { .. }))
+        .unwrap_or_else(|| convo.len().saturating_sub(DECAY_KEEP_TAIL));
+    for m in &mut view[..boundary] {
+        if let Message::Tool { content, .. } = m {
+            elide_stale_tool_output(content);
+        }
+    }
+    view
+}
+
+/// Shrink an oversized historical tool result to head+tail with an
+/// honest marker — the model keeps the shape of what it saw and can
+/// re-run the tool (args stay in history) for the full text.
+fn elide_stale_tool_output(content: &mut String) {
+    if content.len() <= STALE_TOOL_CAP || content.starts_with(ELISION_MARKER) {
+        return;
+    }
+    let orig = content.len();
+    let mut head_end = STALE_HEAD.min(orig);
+    while head_end > 0 && !content.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = orig.saturating_sub(STALE_TAIL);
+    while tail_start < orig && !content.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    *content = format!(
+        "[tool output elided — was {orig} bytes; re-run the tool for full output]\n{}\n…\n{}",
+        &content[..head_end],
+        &content[tail_start..],
+    );
 }
 
 #[cfg(test)]
@@ -1318,5 +1391,41 @@ mod tests {
             !matches!(convo[note_idx + 1], Message::Tool { .. }),
             "tail must not begin on a tool result"
         );
+    }
+}
+
+#[cfg(test)]
+mod decay_tests {
+    use super::*;
+
+    #[test]
+    fn small_outputs_untouched() {
+        let mut s = "short".to_string();
+        elide_stale_tool_output(&mut s);
+        assert_eq!(s, "short");
+    }
+
+    #[test]
+    fn big_outputs_elided_with_marker() {
+        // >8KB with a multibyte char straddling the head boundary.
+        let mut s = "a".repeat(7000) + "é" + &"b".repeat(3000);
+        let orig = s.len();
+        elide_stale_tool_output(&mut s);
+        // Head + tail + marker ≈ 8.3KB regardless of original size.
+        assert!(s.len() < orig);
+        assert!(s.len() <= STALE_HEAD + STALE_TAIL + 512);
+        assert!(s.contains("tool output elided"));
+        assert!(s.contains(&format!("was {orig} bytes")));
+        assert!(s.starts_with("[tool output elided"));
+        assert!(s.ends_with('b'));
+    }
+
+    #[test]
+    fn multibyte_safe() {
+        // All-emoji content: every char is 4 bytes — boundaries must hold.
+        let mut s = "🦀".repeat(3000);
+        elide_stale_tool_output(&mut s);
+        assert!(s.is_char_boundary(s.len()));
+        assert!(s.contains("elided"));
     }
 }

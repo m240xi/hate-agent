@@ -76,7 +76,22 @@ pub struct WorkspaceTools {
     checkpoint_root: Mutex<Option<PathBuf>>,
     /// This turn's captured originals: rel path → pre-mutation bytes.
     pending: Mutex<BTreeMap<String, Option<Vec<u8>>>>,
+    /// Project instructions (AGENTS.md etc.) — S3 of prompt assembly.
+    instructions: Option<String>,
 }
+
+/// Project-instruction files checked in order; first readable match
+/// wins so conflicting conventions can't stack.
+const PROJECT_INSTRUCTIONS: &[&str] = &[
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".github/copilot-instructions.md",
+    "GEMINI.md",
+    ".cursorrules",
+];
+/// Instruction files bigger than this are almost certainly not meant
+/// for a prompt — skip rather than blow the context budget.
+const INSTRUCTIONS_CAP: u64 = 12 * 1024;
 
 impl WorkspaceTools {
     /// Bind tools to `root`. Fails only when the root can't be
@@ -91,11 +106,18 @@ impl WorkspaceTools {
             .canonicalize()
             .map_err(|e| format!("workspace root: {e}"))?;
         Ok(Self {
-            root: canon,
+            root: canon.clone(),
             counter: O200kCounter::new().map_err(|e| e.to_string())?,
             checkpoint_root: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
+            instructions: load_instructions(&canon),
         })
+    }
+
+    /// Workspace instruction-file contents for prompt assembly (S3) —
+    /// `None` when the repo declares none.
+    pub fn project_context(&self) -> Option<&str> {
+        self.instructions.as_deref()
     }
 
     /// Enable per-turn file checkpoints under `dir`. Called once at
@@ -807,9 +829,45 @@ fn floor_char_boundary_rev(s: &str, tail: usize) -> usize {
     i
 }
 
+/// Read the first usable project-instruction file under `root`.
+fn load_instructions(root: &Path) -> Option<String> {
+    for rel in PROJECT_INSTRUCTIONS {
+        let p = root.join(rel);
+        let Ok(meta) = p.metadata() else { continue };
+        if !meta.is_file() || meta.len() > INSTRUCTIONS_CAP {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_context_reads_instruction_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".github")).unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "  use tabs  ").unwrap();
+        std::fs::write(dir.path().join(".github/copilot-instructions.md"), "other").unwrap();
+        let t = WorkspaceTools::new(dir.path()).unwrap();
+        // AGENTS.md wins — first match in priority order.
+        assert_eq!(t.project_context(), Some("use tabs"));
+    }
+
+    #[test]
+    fn project_context_none_without_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = WorkspaceTools::new(dir.path()).unwrap();
+        assert_eq!(t.project_context(), None);
+    }
 
     fn tools() -> (tempfile::TempDir, Arc<WorkspaceTools>) {
         let dir = tempfile::tempdir().unwrap();

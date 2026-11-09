@@ -130,6 +130,51 @@ export async function providersList(): Promise<ProviderInfo[]> {
   return invoke<ProviderInfo[]>('providers_list');
 }
 
+// Provider catalog + management — presets are non-secret connection
+// facts; credentials still flow through keychain/OAuth/env.
+export interface ProviderPreset {
+  name: string;
+  label: string;
+  kind: string;
+  base_url: string;
+  model: string;
+  auth: 'api_key' | 'oauth' | 'none';
+  env_hint: string | null;
+  key_url: string | null;
+}
+
+export async function providerPresets(): Promise<ProviderPreset[]> {
+  return invoke<ProviderPreset[]>('provider_presets');
+}
+
+export async function providerUpsert(
+  name: string,
+  kind: string,
+  base_url: string,
+  model: string,
+): Promise<void> {
+  return invoke<void>('provider_upsert', { name, kind, baseUrl: base_url, model });
+}
+
+export async function providerRemove(name: string): Promise<void> {
+  return invoke<void>('provider_remove', { name });
+}
+
+// Claude subscription OAuth — begin opens the browser and returns the
+// authorize URL; complete exchanges the pasted callback code. Result
+// arrives on the `auth-event` channel as `claude_login`.
+export interface ClaudeLoginInfo {
+  authorize_url: string;
+}
+
+export async function authClaudeBegin(): Promise<ClaudeLoginInfo> {
+  return invoke<ClaudeLoginInfo>('auth_claude_begin');
+}
+
+export async function authClaudeComplete(code: string): Promise<void> {
+  return invoke<void>('auth_claude_complete', { code });
+}
+
 export async function workspaceGet(): Promise<string | null> {
   return invoke<string | null>('workspace_get');
 }

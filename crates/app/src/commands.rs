@@ -440,11 +440,13 @@ pub fn auth_status(provider: Option<String>) -> Result<AuthStatus, String> {
     })
 }
 
-/// In-flight device login, cancellable from the UI.
+/// In-flight logins, cancellable/finishable from the UI.
 #[derive(Default)]
 pub struct AuthState {
-    /// Cancel token for the running poll; `None` when idle.
+    /// Cancel token for the running Nous poll; `None` when idle.
     pub login_cancel: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    /// PKCE material for an in-progress Claude browser login.
+    pub claude_pending: Mutex<Option<hate_auth::ClaudePending>>,
 }
 
 /// Start Nous Portal device login. Returns the user code + URL as soon
@@ -658,6 +660,279 @@ pub fn provider_set_model(provider: String, model: String) -> Result<(), String>
         .ok_or_else(|| format!("unknown provider {provider:?}"))?;
     p.model = model;
     ctx.config.save().map_err(|e| e.to_string())
+}
+
+/// One row of the provider catalog — a known endpoint the UI can add
+/// with one click. Secrets still come from keychain/env/OAuth; presets
+/// only carry non-secret connection facts.
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct ProviderPreset {
+    /// Config key this provider is stored under.
+    pub name: String,
+    /// Human-facing label.
+    pub label: String,
+    /// Adapter family (`openai_compat`, `anthropic`).
+    pub kind: String,
+    /// API base URL.
+    pub base_url: String,
+    /// Suggested default model id.
+    pub model: String,
+    /// `api_key` | `oauth` | `none` — how credentials are obtained.
+    pub auth: String,
+    /// Conventional env var that also authenticates, when one exists.
+    pub env_hint: Option<String>,
+    /// Where to get a key, for the UI hint line.
+    pub key_url: Option<String>,
+}
+
+/// Well-known provider catalog. Adding a provider later is one row —
+/// the upsert path is generic.
+fn preset_catalog() -> Vec<ProviderPreset> {
+    let p = |name: &str,
+             label: &str,
+             kind: &str,
+             base_url: &str,
+             model: &str,
+             auth: &str,
+             env_hint: Option<&str>,
+             key_url: Option<&str>| ProviderPreset {
+        name: name.to_string(),
+        label: label.to_string(),
+        kind: kind.to_string(),
+        base_url: base_url.to_string(),
+        model: model.to_string(),
+        auth: auth.to_string(),
+        env_hint: env_hint.map(str::to_string),
+        key_url: key_url.map(str::to_string),
+    };
+    vec![
+        p(
+            "nous",
+            "Nous Portal",
+            "openai_compat",
+            hate_auth::DEFAULT_INFERENCE_URL,
+            "moonshotai/kimi-k3",
+            "oauth",
+            Some("NOUS_API_KEY"),
+            Some("https://portal.nousresearch.com"),
+        ),
+        p(
+            "claude",
+            "Claude",
+            "anthropic",
+            "https://api.anthropic.com",
+            "claude-sonnet-4-5",
+            "oauth",
+            Some("ANTHROPIC_API_KEY"),
+            Some("https://console.anthropic.com/settings/keys"),
+        ),
+        p(
+            "openai",
+            "OpenAI",
+            "openai_compat",
+            "https://api.openai.com/v1",
+            "gpt-5",
+            "api_key",
+            Some("OPENAI_API_KEY"),
+            Some("https://platform.openai.com/api-keys"),
+        ),
+        p(
+            "openrouter",
+            "OpenRouter",
+            "openai_compat",
+            "https://openrouter.ai/api/v1",
+            "anthropic/claude-sonnet-4.5",
+            "api_key",
+            Some("OPENROUTER_API_KEY"),
+            Some("https://openrouter.ai/keys"),
+        ),
+        p(
+            "deepseek",
+            "DeepSeek",
+            "openai_compat",
+            "https://api.deepseek.com/v1",
+            "deepseek-chat",
+            "api_key",
+            Some("DEEPSEEK_API_KEY"),
+            Some("https://platform.deepseek.com/api_keys"),
+        ),
+        p(
+            "xai",
+            "xAI",
+            "openai_compat",
+            "https://api.x.ai/v1",
+            "grok-4",
+            "api_key",
+            Some("XAI_API_KEY"),
+            Some("https://console.x.ai"),
+        ),
+        p(
+            "gemini",
+            "Gemini",
+            "openai_compat",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "gemini-2.5-pro",
+            "api_key",
+            Some("GEMINI_API_KEY"),
+            Some("https://aistudio.google.com/apikey"),
+        ),
+        p(
+            "groq",
+            "Groq",
+            "openai_compat",
+            "https://api.groq.com/openai/v1",
+            "llama-3.3-70b-versatile",
+            "api_key",
+            Some("GROQ_API_KEY"),
+            Some("https://console.groq.com/keys"),
+        ),
+        p(
+            "mistral",
+            "Mistral",
+            "openai_compat",
+            "https://api.mistral.ai/v1",
+            "mistral-large-latest",
+            "api_key",
+            Some("MISTRAL_API_KEY"),
+            Some("https://console.mistral.ai/api-keys"),
+        ),
+        p(
+            "ollama",
+            "Ollama",
+            "openai_compat",
+            "http://localhost:11434/v1",
+            "llama3.1",
+            "none",
+            None,
+            None,
+        ),
+    ]
+}
+
+/// The provider catalog for the Settings "add provider" grid.
+#[tauri::command]
+#[specta::specta]
+pub fn provider_presets() -> Vec<ProviderPreset> {
+    preset_catalog()
+}
+
+/// Create or update a provider entry in `config.toml`. Presets call
+/// this with their catalog values; custom providers can too.
+#[tauri::command]
+#[specta::specta]
+pub fn provider_upsert(
+    name: String,
+    kind: String,
+    base_url: String,
+    model: String,
+) -> Result<(), String> {
+    let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    // Normalize through the parser so typos can't create dead kinds.
+    let kind = ProviderKind::parse(&kind).name().to_string();
+    ctx.config.providers.insert(
+        name,
+        hate_auth::ProviderConfig {
+            kind,
+            base_url,
+            model,
+        },
+    );
+    ctx.config.save().map_err(|e| e.to_string())
+}
+
+/// Remove a provider entry. Refuses the last provider so the app never
+/// strands itself with zero configured backends.
+#[tauri::command]
+#[specta::specta]
+pub fn provider_remove(name: String) -> Result<(), String> {
+    let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    if !ctx.config.providers.contains_key(&name) {
+        return Err(format!("unknown provider {name:?}"));
+    }
+    if ctx.config.providers.len() <= 1 {
+        return Err("can't remove the last provider".to_string());
+    }
+    ctx.config.providers.remove(&name);
+    if ctx.config.default_provider.as_deref() == Some(name.as_str()) {
+        ctx.config.default_provider = ctx.config.providers.keys().next().cloned();
+    }
+    ctx.config.save().map_err(|e| e.to_string())
+}
+
+/// Claude authorize URL for the Settings "Sign in with Claude" button.
+/// PKCE material is stashed in [`AuthState`]; the browser opens here and
+/// the user pastes the callback code into [`auth_claude_complete`].
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct ClaudeLoginInfo {
+    /// Full `claude.ai/oauth/authorize` URL (also opened in browser).
+    pub authorize_url: String,
+}
+
+/// Begin Claude subscription login (Pro/Max OAuth). Stashes the PKCE
+/// material, opens the authorize URL in the system browser, and returns
+/// it for display; completion is [`auth_claude_complete`].
+#[tauri::command]
+#[specta::specta]
+pub fn auth_claude_begin(state: State<'_, AuthState>) -> Result<ClaudeLoginInfo, String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let auth = hate_auth::ClaudeAuth::new(std::sync::Arc::clone(&ctx.store));
+    let login = auth.begin_login();
+    if let Ok(mut slot) = state.claude_pending.lock() {
+        *slot = Some(login.pending);
+    }
+    // Hand the approval page to the browser; the UI still shows the
+    // link in case the open fails.
+    let _ = webbrowser::open(&login.authorize_url);
+    Ok(ClaudeLoginInfo {
+        authorize_url: login.authorize_url,
+    })
+}
+
+/// Finish Claude login with the code the callback page displayed
+/// (bare code or `code#state` form). Persists tokens, makes sure a
+/// `claude` provider entry exists, and reports on `auth-event`
+/// (`{"type":"claude_login","ok":bool,"error"?:string}`).
+#[tauri::command]
+#[specta::specta]
+pub async fn auth_claude_complete(
+    state: State<'_, AuthState>,
+    app: AppHandle,
+    code: String,
+) -> Result<(), String> {
+    let pending = state
+        .claude_pending
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+        .ok_or_else(|| "no Claude login in progress — start again".to_string())?;
+
+    let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let auth = hate_auth::ClaudeAuth::new(std::sync::Arc::clone(&ctx.store));
+    let result = auth.complete_login(&pending, &code).await;
+
+    let payload = match &result {
+        Ok(_) => {
+            // Self-heal: a login with no matching config entry would be
+            // unreachable — register the canonical provider.
+            if !ctx.config.providers.contains_key("claude") {
+                ctx.config.providers.insert(
+                    "claude".to_string(),
+                    hate_auth::ProviderConfig {
+                        kind: "anthropic".to_string(),
+                        base_url: "https://api.anthropic.com".to_string(),
+                        model: "claude-sonnet-4-5".to_string(),
+                    },
+                );
+                let _ = ctx.config.save();
+            }
+            serde_json::json!({"type": "claude_login", "ok": true})
+        }
+        Err(e) => {
+            serde_json::json!({"type": "claude_login", "ok": false, "error": e.to_string()})
+        }
+    };
+    let _ = app.emit("auth-event", payload);
+    result.map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Current workspace folder for code sessions (`None` = app data dir).

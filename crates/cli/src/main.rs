@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use hate_auth::{AuthContext, PortalAuth};
+use hate_auth::{AuthContext, ClaudeAuth, PortalAuth};
 use hate_core::{
     Command, Event, Limits, PermissionHub, SessionConfig, WorkspaceTools, spawn_session,
 };
@@ -52,8 +52,9 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AuthCommands {
-    /// Log in. `nous` (default) runs the Portal device-code flow;
-    /// other providers take `--api-key`.
+    /// Log in. `nous` runs the Portal device-code flow, `claude` (or
+    /// `anthropic`) runs the subscription OAuth flow; other providers
+    /// take `--api-key`.
     Login {
         /// Provider to log in to (default: `nous`).
         #[arg(short, long, default_value = "nous")]
@@ -115,6 +116,8 @@ async fn auth(cmd: AuthCommands) -> i32 {
         AuthCommands::Login { provider, api_key } => {
             if provider == "nous" && api_key.is_none() {
                 login_nous(&ctx).await
+            } else if matches!(provider.as_str(), "claude" | "anthropic") && api_key.is_none() {
+                login_claude(&ctx, &provider).await
             } else {
                 let Some(key) = api_key else {
                     eprintln!(
@@ -208,6 +211,50 @@ async fn login_nous(ctx: &AuthContext) -> i32 {
     {
         Ok(_) => {
             println!("logged in to Nous Portal");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            2
+        }
+    }
+}
+
+/// Claude subscription login: PKCE authorize URL → browser → paste the
+/// code the callback page shows. Also registers a provider entry in
+/// config.toml when missing so the credential is reachable.
+async fn login_claude(ctx: &AuthContext, provider: &str) -> i32 {
+    let auth = ClaudeAuth::for_provider(Arc::clone(&ctx.store), provider);
+    let login = auth.begin_login();
+    println!("Open: {}", login.authorize_url);
+    let _ = webbrowser::open(&login.authorize_url);
+    print!("After approving, paste the code shown: ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        eprintln!("error: couldn't read code from stdin");
+        return 2;
+    }
+    match auth.complete_login(&login.pending, &line).await {
+        Ok(_) => {
+            // Self-heal the provider entry so `hate run`/`hate models`
+            // can actually resolve the new credential.
+            match hate_auth::Config::load() {
+                Ok(mut config) => {
+                    config.providers.entry(provider.to_string()).or_insert(
+                        hate_auth::ProviderConfig {
+                            kind: "anthropic".to_string(),
+                            base_url: "https://api.anthropic.com".to_string(),
+                            model: "claude-sonnet-4-5".to_string(),
+                        },
+                    );
+                    if let Err(e) = config.save() {
+                        eprintln!("warning: logged in but config save failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("warning: logged in but config load failed: {e}"),
+            }
+            println!("logged in to Claude ({provider})");
             0
         }
         Err(e) => {

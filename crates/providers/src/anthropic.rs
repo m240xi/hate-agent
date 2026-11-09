@@ -24,6 +24,27 @@ use hate_core::{TokenUsage, ToolCall, ToolName};
 use crate::sse::{self, SharedCredential, SseFrame};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// Beta flag Anthropic requires on OAuth-subscription tokens
+/// (Pro/Max logins) instead of `x-api-key`.
+const OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Subscription inference is scoped to Claude Code: the endpoint
+/// rejects OAuth requests whose system prompt lacks its identity
+/// line, so it leads the prompt for OAuth credentials only. API-key
+/// traffic keeps the prompt byte-identical (prefix-cache friendly).
+const CLAUDE_CODE_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// Attach vendor auth headers: subscription OAuth tokens ride as
+/// `Authorization: Bearer` + the oauth beta flag; plain API keys keep
+/// the `x-api-key` header. `key` is whatever [`CredentialSource::bearer`]
+/// returned — the source decides which style applies via `is_oauth`.
+fn apply_auth(rb: reqwest::RequestBuilder, key: &str, oauth: bool) -> reqwest::RequestBuilder {
+    if oauth {
+        rb.header("authorization", format!("Bearer {key}"))
+            .header("anthropic-beta", OAUTH_BETA)
+    } else {
+        rb.header("x-api-key", key)
+    }
+}
 
 /// Anthropic messages adapter. `base_url` is the API root
 /// (`https://api.anthropic.com`); `/v1/messages` is appended.
@@ -180,11 +201,18 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
 
 /// System prompt as a content-block array carrying the first cache
 /// breakpoint — Anthropic only caches block form, not bare strings.
-fn cached_system(system: Option<&String>) -> Option<Value> {
+/// `oauth` prepends the Claude Code identity line the subscription
+/// endpoint requires (see [`CLAUDE_CODE_PREFIX`]).
+fn cached_system(system: Option<&String>, oauth: bool) -> Option<Value> {
     system.map(|s| {
+        let text = if oauth {
+            format!("{CLAUDE_CODE_PREFIX}\n\n{s}")
+        } else {
+            s.clone()
+        };
         json!([{
             "type": "text",
-            "text": s,
+            "text": text,
             "cache_control": {"type": "ephemeral"},
         }])
     })
@@ -347,9 +375,10 @@ impl Provider for AnthropicProvider {
         let client = self.client.clone();
         let credential = Arc::clone(&self.credential);
         let url = self.count_url();
+        let oauth = self.credential.is_oauth();
         let body = CountRequest {
             model: req.model.clone(),
-            system: cached_system(req.system.as_ref()),
+            system: cached_system(req.system.as_ref(), oauth),
             messages: wire_messages(req),
             tools: wire_tools(&req.tools),
         };
@@ -358,9 +387,7 @@ impl Provider for AnthropicProvider {
                 .bearer()
                 .await
                 .map_err(|e| ProviderError::Auth(e.to_string()))?;
-            let resp = client
-                .post(&url)
-                .header("x-api-key", &key)
+            let resp = apply_auth(client.post(&url), &key, oauth)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
                 .json(&body)
@@ -387,13 +414,12 @@ impl Provider for AnthropicProvider {
                 .bearer()
                 .await
                 .map_err(|e| ProviderError::Auth(e.to_string()))?;
+            let oauth = credential.is_oauth();
             let mut out = Vec::new();
             let mut page = String::new();
             // Paginate defensively; 10 pages × 1000 is far beyond reality.
             for _ in 0..10 {
-                let mut rb = client
-                    .get(&url)
-                    .header("x-api-key", &key)
+                let mut rb = apply_auth(client.get(&url), &key, oauth)
                     .header("anthropic-version", ANTHROPIC_VERSION)
                     .query(&[("limit", "1000")]);
                 if !page.is_empty() {
@@ -459,10 +485,11 @@ async fn pump(
         hate_core::provider::ThinkingLevel::Medium => Some(12_288),
         hate_core::provider::ThinkingLevel::High => Some(32_768),
     };
+    let oauth = credential.is_oauth();
     let body = WireRequest {
         model: req.model.clone(),
         max_tokens: req.max_output_tokens.saturating_add(thinking.unwrap_or(0)),
-        system: cached_system(req.system.as_ref()),
+        system: cached_system(req.system.as_ref(), oauth),
         messages: wire_messages(&req),
         tools: wire_tools(&req.tools),
         stream: true,
@@ -478,9 +505,7 @@ async fn pump(
     };
 
     let response = tokio::select! {
-        r = client
-            .post(url)
-            .header("x-api-key", &key)
+        r = apply_auth(client.post(url), &key, oauth)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .json(&body)
@@ -721,8 +746,18 @@ mod tests {
         );
 
         // System → block array with cache_control.
-        let sys = cached_system(r.system.as_ref()).expect("system present");
+        let sys = cached_system(r.system.as_ref(), false).expect("system present");
         assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+        // API-key path keeps the prompt verbatim — no Claude Code prefix.
+        assert_eq!(sys[0]["text"], "you are helpful");
+        // OAuth path prepends the subscription identity line.
+        let oauth_sys = cached_system(r.system.as_ref(), true).expect("system present");
+        assert!(
+            oauth_sys[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with(CLAUDE_CODE_PREFIX)
+        );
 
         // Last tool carries the second breakpoint.
         let tools = wire_tools(&r.tools);

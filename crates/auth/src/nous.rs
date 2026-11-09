@@ -450,6 +450,10 @@ impl CredentialSource for NousCredentialSource {
             Ok(tokens.access_token)
         })
     }
+
+    fn is_oauth(&self) -> bool {
+        true
+    }
 }
 
 fn tokens_from_response(body: &TokenResponse, prior: Option<&OAuthTokens>) -> OAuthTokens {

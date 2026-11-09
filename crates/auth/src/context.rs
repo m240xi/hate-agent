@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use hate_core::provider::CredentialSource;
 
+use crate::claude::{ClaudeAuth, ClaudeCredentialSource};
 use crate::nous::{NousCredentialSource, PortalAuth};
 use crate::source::{ApiKeySource, EnvKeySource};
 use crate::store::{AuthError, AuthStore, Config, CredentialBlob, ProviderConfig};
@@ -64,15 +65,23 @@ impl AuthContext {
             Some(CredentialBlob::ApiKey { key }) => {
                 return Ok(Arc::new(ApiKeySource::new(key)));
             }
-            Some(CredentialBlob::OAuth { .. }) => {
-                if name == "nous" {
+            Some(CredentialBlob::OAuth { .. }) => match name {
+                "nous" => {
                     let auth = Arc::new(PortalAuth::new(Arc::clone(&self.store)));
                     return Ok(Arc::new(NousCredentialSource::new(auth)));
                 }
-                return Err(AuthError::Config(format!(
-                    "provider {name} has OAuth credentials but no OAuth flow is implemented for it"
-                )));
-            }
+                // `claude` is the canonical name; `anthropic` is accepted
+                // so hand-written configs keep working.
+                "claude" | "anthropic" => {
+                    let auth = Arc::new(ClaudeAuth::for_provider(Arc::clone(&self.store), name));
+                    return Ok(Arc::new(ClaudeCredentialSource::new(auth)));
+                }
+                _ => {
+                    return Err(AuthError::Config(format!(
+                        "provider {name} has OAuth credentials but no OAuth flow is implemented for it"
+                    )));
+                }
+            },
             None => {}
         }
 
@@ -159,11 +168,13 @@ impl AuthContext {
 fn env_vars_for(name: &str) -> &'static [&'static str] {
     match name {
         "openai" => &["OPENAI_API_KEY"],
-        "anthropic" => &["ANTHROPIC_API_KEY"],
+        "anthropic" | "claude" => &["ANTHROPIC_API_KEY"],
         "openrouter" => &["OPENROUTER_API_KEY"],
         "deepseek" => &["DEEPSEEK_API_KEY"],
         "gemini" | "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "xai" | "grok" => &["XAI_API_KEY"],
+        "groq" => &["GROQ_API_KEY"],
+        "mistral" => &["MISTRAL_API_KEY"],
         "nous" => &["NOUS_API_KEY"],
         _ => &[],
     }

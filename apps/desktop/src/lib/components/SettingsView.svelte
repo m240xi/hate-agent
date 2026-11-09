@@ -5,9 +5,18 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
-  import type { AppInfo, McpServerConfig, McpServerInfo, NousLoginInfo, ProviderInfo } from '../ipc';
+  import type {
+    AppInfo,
+    ClaudeLoginInfo,
+    McpServerConfig,
+    McpServerInfo,
+    NousLoginInfo,
+    ProviderInfo,
+    ProviderPreset,
+  } from '../ipc';
 
   let providers = $state<ProviderInfo[]>([]);
+  let presets = $state<ProviderPreset[]>([]);
   let appInfo = $state<AppInfo | null>(null);
   let inTauri = $state(false);
   let error = $state<string | null>(null);
@@ -17,6 +26,13 @@
   let loginBusy = $state(false);
   let loginError = $state<string | null>(null);
   let unlisten: UnlistenFn | null = null;
+
+  // Claude subscription login — browser OAuth + pasted callback code.
+  let claudeLogin = $state<ClaudeLoginInfo | null>(null);
+  let claudeCode = $state('');
+  let claudeBusy = $state(false);
+  let claudeError = $state<string | null>(null);
+  let presetBusy = $state<string | null>(null);
 
   // Per-provider key-entry drafts (never persisted to disk by us —
   // they go straight to the OS keychain via auth_set_key).
@@ -29,6 +45,7 @@
     if (!inTauri) return;
     const m = await import('../ipc');
     providers = await m.providersList().catch(() => []);
+    presets = await m.providerPresets().catch(() => []);
     appInfo = await m.appInfo().catch(() => null);
     await loadMcp();
   }
@@ -50,6 +67,15 @@
               void refresh();
             } else {
               loginError = e.payload.error ?? 'login failed';
+            }
+          } else if (e.payload.type === 'claude_login') {
+            claudeBusy = false;
+            if (e.payload.ok) {
+              claudeLogin = null;
+              claudeCode = '';
+              void refresh();
+            } else {
+              claudeError = e.payload.error ?? 'login failed';
             }
           }
         },
@@ -95,6 +121,59 @@
       error = String(e);
     });
     await refresh();
+  }
+
+  const addablePresets = $derived(
+    presets.filter((p) => !providers.some((q) => q.name === p.name)),
+  );
+
+  async function addPreset(preset: ProviderPreset): Promise<void> {
+    presetBusy = preset.name;
+    error = null;
+    try {
+      const m = await import('../ipc');
+      await m.providerUpsert(preset.name, preset.kind, preset.base_url, preset.model);
+      await refresh();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      presetBusy = null;
+    }
+  }
+
+  async function removeProvider(name: string): Promise<void> {
+    const m = await import('../ipc');
+    await m.providerRemove(name).catch((e: unknown) => {
+      error = String(e);
+    });
+    await refresh();
+  }
+
+  async function connectClaude(): Promise<void> {
+    claudeBusy = true;
+    claudeError = null;
+    try {
+      const m = await import('../ipc');
+      claudeLogin = await m.authClaudeBegin();
+    } catch (e) {
+      claudeBusy = false;
+      claudeError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function finishClaudeLogin(): Promise<void> {
+    const code = claudeCode.trim();
+    if (!code) return;
+    claudeBusy = true;
+    claudeError = null;
+    try {
+      const m = await import('../ipc');
+      await m.authClaudeComplete(code);
+      claudeCode = '';
+    } catch (e) {
+      claudeBusy = false;
+      claudeError = e instanceof Error ? e.message : String(e);
+    }
   }
 
   async function saveKey(name: string): Promise<void> {
@@ -405,6 +484,64 @@
                   <p class="error-text">{loginError}</p>
                 {/if}
               {:else}
+                {#if p.name === 'claude'}
+                  {#if claudeLogin}
+                    <div class="login-box">
+                      <p class="login-line">
+                        Approve at
+                        <a
+                          href={claudeLogin.authorize_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {claudeLogin.authorize_url}
+                        </a>
+                      </p>
+                      <div class="provider-actions">
+                        <input
+                          class="key-input"
+                          type="text"
+                          placeholder="paste the code shown…"
+                          bind:value={claudeCode}
+                          onkeydown={(e) => e.key === 'Enter' && finishClaudeLogin()}
+                        />
+                        <button
+                          class="btn primary"
+                          onclick={finishClaudeLogin}
+                          disabled={!claudeCode.trim() || claudeBusy}
+                        >
+                          {claudeBusy ? 'Signing in…' : 'Finish sign-in'}
+                        </button>
+                        <button
+                          class="btn ghost"
+                          onclick={() => {
+                            claudeLogin = null;
+                            claudeCode = '';
+                            claudeError = null;
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  {:else}
+                    <div class="provider-actions">
+                      <button
+                        class="btn primary"
+                        onclick={connectClaude}
+                        disabled={claudeBusy}
+                      >
+                        {p.auth_kind === 'oauth'
+                          ? 'Reconnect Claude'
+                          : 'Sign in with Claude'}
+                      </button>
+                      <span class="provider-hint">Pro / Max subscription</span>
+                    </div>
+                  {/if}
+                  {#if claudeError}
+                    <p class="error-text">{claudeError}</p>
+                  {/if}
+                {/if}
                 <div class="provider-actions">
                   <input
                     class="key-input"
@@ -422,10 +559,36 @@
                   {#if p.auth_kind !== 'none'}
                     <button class="btn ghost" onclick={() => disconnect(p.name)}>Disconnect</button>
                   {/if}
+                  {#if !p.is_default}
+                    <button class="btn ghost" onclick={() => removeProvider(p.name)}>Remove</button>
+                  {/if}
                 </div>
               {/if}
             </div>
           {/each}
+
+          {#if addablePresets.length > 0}
+            <p class="preset-title">Add a provider</p>
+            <div class="preset-grid">
+              {#each addablePresets as preset}
+                <button
+                  class="preset-card"
+                  onclick={() => addPreset(preset)}
+                  disabled={presetBusy === preset.name}
+                  title={preset.key_url ?? preset.base_url}
+                >
+                  <span class="preset-name">{preset.label}</span>
+                  <span class="preset-meta">
+                    {preset.auth === 'none'
+                      ? 'local · no key'
+                      : preset.auth === 'oauth'
+                        ? 'subscription or key'
+                        : 'api key'}
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
         </div>
       {/if}
       {#if error}
@@ -949,6 +1112,55 @@
     background: var(--bg-2);
     padding: 1px 6px;
     border-radius: var(--radius-sm);
+  }
+  .provider-hint {
+    font-size: 10px;
+    color: var(--fg-3);
+    align-self: center;
+  }
+  .preset-title {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+    margin: 14px 0 8px;
+  }
+  .preset-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 8px;
+  }
+  .preset-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    transition:
+      border-color var(--motion),
+      transform var(--motion);
+  }
+  .preset-card:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    transform: translateY(-1px);
+  }
+  .preset-card:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .preset-name {
+    font-size: 12px;
+    color: var(--fg-0);
+  }
+  .preset-meta {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--fg-3);
   }
   .workspace-row {
     display: flex;

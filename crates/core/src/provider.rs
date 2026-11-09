@@ -264,6 +264,15 @@ pub struct ModelMeta {
 pub trait CredentialSource: Send + Sync {
     /// A currently-valid bearer token (access token or API key).
     fn bearer(&self) -> BoxFuture<'_, Result<String, ProviderError>>;
+
+    /// Whether the credential is an OAuth access token rather than a
+    /// static API key. Adapters with vendor-specific auth styles
+    /// (Anthropic: `x-api-key` vs `Authorization: Bearer` + beta flag)
+    /// branch on this; Bearer-only adapters ignore it. Default `false`
+    /// keeps API-key sources unchanged.
+    fn is_oauth(&self) -> bool {
+        false
+    }
 }
 
 /// The one trait every adapter implements. Object-safe: the session holds

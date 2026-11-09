@@ -177,6 +177,16 @@ class SessionStore {
   /** Configured providers — drives the empty-state connect hint. */
   providers = $state<ProviderInfo[]>([]);
 
+  // ── updater ──────────────────────────────────────────────────────────────
+  /** Newer release found by `updateCheck`; shows the update bar. */
+  updateAvailable = $state<{ version: string; notes: string | null } | null>(null);
+  /** `downloading` (bytes so far) | `installing` | `error`. */
+  updateState = $state<'downloading' | 'installing' | 'error' | null>(null);
+  /** Bytes downloaded so far (0 before the first chunk). */
+  updateDownloaded = $state(0);
+  /** Total download size in bytes, when the server reports one. */
+  updateTotal = $state<number | null>(null);
+
   // ── app shell ───────────────────────────────────────────────────────────
   /** Landing picks the surface; persisted across launches. */
   mode = $state<AppMode>('home');
@@ -188,6 +198,7 @@ class SessionStore {
 
   // ── internals ───────────────────────────────────────────────────────────
   private unlisten: UnlistenFn | null = null;
+  private unlistenUpdate: UnlistenFn | null = null;
   private fixtureTimers: ReturnType<typeof setTimeout>[] = [];
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   /** Block index where the current provider request's output begins —
@@ -262,6 +273,18 @@ class SessionStore {
       this.unlisten = await listen<SessionEvent>('core-event', (e) => {
         this.handleEvent(e.payload);
       });
+      this.unlistenUpdate = await listen<{
+        kind: string;
+        downloaded?: number;
+        total?: number | null;
+      }>('update-event', (e) => {
+        if (e.payload.kind === 'downloading') {
+          this.updateState = 'downloading';
+          this.updateDownloaded = e.payload.downloaded ?? 0;
+          this.updateTotal = e.payload.total ?? null;
+        }
+      });
+      void this.checkForUpdate();
     } else {
       // Browser dev mode: replay the fixture script so the shell demos
       // itself without a backend.
@@ -285,8 +308,35 @@ class SessionStore {
 
   destroy(): void {
     this.unlisten?.();
+    this.unlistenUpdate?.();
     this.fixtureTimers.forEach(clearTimeout);
     this.fixtureTimers = [];
+  }
+
+  /** Ask GitHub for a newer release. Failures are silent — an offline
+   *  check must never surface as a session error. */
+  async checkForUpdate(): Promise<void> {
+    try {
+      const m = await import('./ipc');
+      const info = await m.updateCheck();
+      if (info) this.updateAvailable = { version: info.version, notes: info.notes };
+    } catch {
+      // no release endpoint reachable yet (first release, offline, dev)
+    }
+  }
+
+  /** Download + install the pending update; the backend restarts the
+   *  app when it finishes. Progress lands in updateState/updateDownloaded. */
+  async installUpdate(): Promise<void> {
+    this.updateState = 'installing';
+    try {
+      const m = await import('./ipc');
+      await m.updateInstall();
+      // app.restart() fires backend-side when the installer finishes
+    } catch (e) {
+      this.updateState = 'error';
+      this.note(`update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   // ── commands ────────────────────────────────────────────────────────────

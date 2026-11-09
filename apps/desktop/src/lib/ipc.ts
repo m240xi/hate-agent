@@ -301,3 +301,20 @@ export async function mcpList(): Promise<McpServerInfo[]> {
 export async function mcpSave(servers: McpServerConfig[]): Promise<McpServerInfo[]> {
   return invoke<McpServerInfo[]>('mcp_save', { servers });
 }
+
+export interface UpdateInfo {
+  version: string;
+  notes: string | null;
+  date: string | null;
+}
+
+/** None = app is current. Errors when the endpoint is unreachable. */
+export async function updateCheck(): Promise<UpdateInfo | null> {
+  return invoke<UpdateInfo | null>('update_check');
+}
+
+/** Downloads + installs the checked update, then restarts the app.
+ *  Progress arrives on the `update-event` channel. */
+export async function updateInstall(): Promise<void> {
+  return invoke('update_install');
+}

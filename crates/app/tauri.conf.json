@@ -33,9 +33,21 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCQTRDMjVDQjQwM0U0QjUKUldTMTVBTzBYTUtrTzlRMmdzVTZDV0Jnclp3ZVEzd0h6b3ovV28vRnJobFRpRXVDS09BODlBL0gK",
+      "endpoints": [
+        "https://github.com/m240xi/hate-agent/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

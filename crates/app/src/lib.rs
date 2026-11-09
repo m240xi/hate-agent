@@ -52,6 +52,8 @@ pub fn run() {
         commands::session_open,
         commands::session_delete,
         commands::session_save_ui,
+        commands::update_check,
+        commands::update_install,
     ]);
 
     // Emit TypeScript bindings for the frontend's typed invoke wrapper.
@@ -69,10 +71,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             app.manage(commands::Sessions::default());
             app.manage(commands::AuthState::default());
+            app.manage(commands::UpdateState::default());
             // MCP servers connect once at startup; sessions share the
             // hub so a settings save reaches every session next turn.
             let mcp = commands::McpState::load();

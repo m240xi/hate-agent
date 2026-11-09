@@ -1513,3 +1513,76 @@ pub async fn mcp_save(
     state.hub.configure(configs).await;
     Ok(mcp_rows(&state))
 }
+
+// ── self-updater ───────────────────────────────────────────────────────────
+
+/// The pending update found by the last `update_check`, kept so
+/// `update_install` doesn't hit the update server twice.
+#[derive(Default)]
+pub struct UpdateState {
+    /// `None` when no check ran or no update was available.
+    pub pending: Mutex<Option<tauri_plugin_updater::Update>>,
+}
+
+/// A newer release the updater found.
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct UpdateInfo {
+    /// New version (semver).
+    pub version: String,
+    /// Release notes from `latest.json`.
+    pub notes: Option<String>,
+    /// Publish date (RFC 3339).
+    pub date: Option<String>,
+}
+
+/// Ask the update endpoint for a newer release. `None` means the app is
+/// current (or the endpoint answered with no newer version).
+#[tauri::command]
+#[specta::specta]
+pub async fn update_check(
+    app: AppHandle,
+    state: State<'_, UpdateState>,
+) -> Result<Option<UpdateInfo>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+    let info = update.as_ref().map(|u| UpdateInfo {
+        version: u.version.clone(),
+        notes: u.body.clone(),
+        date: u.date.map(|d| d.to_string()),
+    });
+    *state.pending.lock().map_err(|_| "update lock poisoned")? = update;
+    Ok(info)
+}
+
+/// Download + install the update from the last `update_check`, then
+/// restart. Progress goes out on the `update-event` channel as
+/// `{downloaded, total}` payloads (`total` may be absent).
+#[tauri::command]
+#[specta::specta]
+pub async fn update_install(app: AppHandle, state: State<'_, UpdateState>) -> Result<(), String> {
+    let update = state
+        .pending
+        .lock()
+        .map_err(|_| "update lock poisoned")?
+        .take()
+        .ok_or_else(|| "no pending update — run update_check first".to_string())?;
+    let app2 = app.clone();
+    update
+        .download_and_install(
+            move |downloaded, total| {
+                let _ = app2.emit(
+                    "update-event",
+                    serde_json::json!({"kind": "downloading", "downloaded": downloaded, "total": total}),
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    app.restart();
+}

@@ -137,6 +137,38 @@
     {/if}
   </header>
 
+  {#if session.updateAvailable}
+    <div class="updatebar" role="status">
+      <span class="mono">
+        update available — hate-agent v{session.updateAvailable.version}
+        {#if session.updateAvailable.notes}
+          <span class="update-notes" title={session.updateAvailable.notes}>?</span>
+        {/if}
+      </span>
+      <span class="spacer"></span>
+      {#if session.updateState === 'downloading'}
+        <span class="mono dim">
+          downloading…
+          {#if session.updateTotal}
+            {Math.round((session.updateDownloaded / session.updateTotal) * 100)}%
+          {:else}
+            {(session.updateDownloaded / 1048576).toFixed(1)} MB
+          {/if}
+        </span>
+      {:else if session.updateState === 'installing'}
+        <span class="mono dim">installing — the app will restart…</span>
+      {:else}
+        <button class="update-btn mono" onclick={() => session.installUpdate()}>
+          Update &amp; restart
+        </button>
+        <button
+          class="update-x"
+          onclick={() => (session.updateAvailable = null)}
+          aria-label="Dismiss">✕</button>
+      {/if}
+    </div>
+  {/if}
+
   <div class="body">
     {#key session.mode}
       <div class="mode-view" in:fade={{ duration: 140 }}>
@@ -239,6 +271,51 @@
   }
   .win-btn:hover {
     background: var(--bg-3);
+    color: var(--fg-0);
+  }
+  .updatebar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 28px;
+    padding: 0 12px;
+    flex: none;
+    font-size: 12px;
+    color: var(--fg-1);
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
+  }
+  .updatebar .dim {
+    color: var(--fg-2);
+  }
+  .update-notes {
+    color: var(--fg-2);
+    cursor: help;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    padding: 0 4px;
+    margin-left: 4px;
+    font-size: 10px;
+  }
+  .update-btn {
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 2px 10px;
+    font-size: 12px;
+    transition: background var(--motion), color var(--motion);
+  }
+  .update-btn:hover {
+    background: var(--accent);
+    color: var(--bg-0);
+  }
+  .update-x {
+    color: var(--fg-2);
+    font-size: 11px;
+    padding: 2px 6px;
+  }
+  .update-x:hover {
     color: var(--fg-0);
   }
   .win-btn.close:hover {

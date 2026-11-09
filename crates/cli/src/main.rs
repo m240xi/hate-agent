@@ -304,6 +304,17 @@ async fn run(
         }
     };
 
+    // Best-effort context window for compaction thresholds — one
+    // catalog call; failure just disables compaction.
+    let context_window = provider
+        .list_models()
+        .await
+        .ok()
+        .and_then(|ms| ms.into_iter().find(|m| m.id == model))
+        .and_then(|m| m.meta)
+        .and_then(|meta| meta.context_tokens)
+        .map_or(0, u64::from);
+
     let session = spawn_session(SessionConfig {
         provider,
         model: model.clone(),
@@ -318,6 +329,7 @@ async fn run(
             .and_then(|p| WorkspaceTools::new(p).ok())
             .map(std::sync::Arc::new),
         permissions: std::sync::Arc::new(PermissionHub::default()),
+        context_window,
     });
 
     // Ctrl-C cancels the in-flight turn (Esc is the desktop equivalent).

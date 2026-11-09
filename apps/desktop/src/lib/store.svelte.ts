@@ -63,6 +63,12 @@ const MODES: readonly AppMode[] = ['home', 'code', 'chat', 'settings'];
 
 let nextBlockId = 2;
 
+function fmtK(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 /** The frontend-owned half of a persisted session — serialized to the
  *  `ui_state` column. The backend owns message history separately. */
 interface UiState {
@@ -202,7 +208,13 @@ class SessionStore {
       // Push the persisted thinking level into the session slot so the
       // first spawned session inherits it (live swaps go through
       // `session_set_options` too).
-      void m.sessionSetOptions(null, this.thinkingLevel).catch(() => {});
+      void m
+        .sessionSetOptions(
+          null,
+          this.thinkingLevel,
+          this.selectedModel?.context_tokens ?? null,
+        )
+        .catch(() => {});
       this.providers = await m.providersList().catch(() => []);
       const def = this.providers.find((p) => p.is_default) ?? this.providers[0];
       if (def) {
@@ -351,7 +363,9 @@ class SessionStore {
     if (this.providerName) {
       await m.providerSetModel(this.providerName, id).catch(() => {});
     }
-    await m.sessionSetOptions(id, null).catch(() => {});
+    await m
+      .sessionSetOptions(id, null, this.selectedModel?.context_tokens ?? null)
+      .catch(() => {});
     this.scheduleUiSave();
   }
 
@@ -362,7 +376,13 @@ class SessionStore {
     localStorage.setItem('hate:thinking', level);
     if (inTauri()) {
       void import('./ipc')
-        .then((m) => m.sessionSetOptions(null, level))
+        .then((m) =>
+          m.sessionSetOptions(
+            null,
+            level,
+            this.selectedModel?.context_tokens ?? null,
+          ),
+        )
         .catch(() => {});
     }
     this.scheduleUiSave();
@@ -442,7 +462,11 @@ class SessionStore {
       // Hand the session's model/thinking to the backend slot so the
       // next spawn uses them (live swaps also go through set_options).
       void m
-        .sessionSetOptions(this.model || null, this.thinkingLevel)
+        .sessionSetOptions(
+          this.model || null,
+          this.thinkingLevel,
+          this.selectedModel?.context_tokens ?? null,
+        )
         .catch(() => {});
       localStorage.setItem(`hate:session:${res.meta.mode}`, id);
       this.pickerMode = null;
@@ -467,7 +491,11 @@ class SessionStore {
       this.sessionMeta = meta;
       this.resetConversation();
       void m
-        .sessionSetOptions(this.model || null, this.thinkingLevel)
+        .sessionSetOptions(
+          this.model || null,
+          this.thinkingLevel,
+          this.selectedModel?.context_tokens ?? null,
+        )
         .catch(() => {});
       localStorage.setItem(`hate:session:${meta.mode}`, meta.id);
       this.pickerMode = null;
@@ -706,7 +734,15 @@ class SessionStore {
         this.recomputeDerived();
         break;
       case 'compaction_started':
-        // surfaced via inspector toast later; state marker for now
+        // Context was compacted — say so in the record; the model's
+        // memory shrank even though the transcript didn't.
+        this.blocks.push({
+          id: nextBlockId++,
+          kind: 'text',
+          text: `🗜 context compacted — ${fmtK(e.before)} → ${fmtK(e.after)} tok (${e.reason})`,
+          streaming: false,
+        });
+        this.ctxUsed = e.after;
         break;
       case 'checkpoint_created':
         this.checkpoints = [

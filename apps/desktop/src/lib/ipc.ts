@@ -29,8 +29,9 @@ export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
 export async function sessionSetOptions(
   model: string | null,
   thinking: ThinkingLevel | null,
+  contextWindow?: number | null,
 ): Promise<void> {
-  return invoke<void>('session_set_options', { model, thinking });
+  return invoke<void>('session_set_options', { model, thinking, contextWindow });
 }
 
 export interface ProviderModel {

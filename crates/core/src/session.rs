@@ -28,9 +28,10 @@ use crate::provider::{ChatRequest, Delta, Message, Provider, ProviderError, Thin
 use crate::state::SessionState;
 use crate::tools::WorkspaceTools;
 use crate::types::{
-    CheckpointId, FailureReason, Outcome, PermissionDecision, PermissionRequest, SessionId,
-    TokenUsage, ToolCall, TurnId, TurnOutcome,
+    CheckpointId, CompactionReason, FailureReason, Outcome, PermissionDecision, PermissionRequest,
+    SessionId, TokenUsage, ToolCall, TurnId, TurnOutcome,
 };
+use hate_context::O200kCounter;
 use hate_ledger::{Ledger, RecordRequest};
 
 /// Event channel capacity. Deltas can arrive at ~50/s; 2048 gives the
@@ -81,6 +82,9 @@ pub struct SessionConfig {
     pub tools: Option<Arc<WorkspaceTools>>,
     /// Permission decision router shared with the in-flight turn task.
     pub permissions: Arc<PermissionHub>,
+    /// Model context window in tokens; `0` = unknown → compaction
+    /// disabled (the provider errors honestly on overflow instead).
+    pub context_window: u64,
 }
 
 /// Commands the outside world can send a session.
@@ -107,6 +111,9 @@ pub enum Command {
         model: Option<String>,
         /// New thinking level, when changing effort.
         thinking: Option<ThinkingLevel>,
+        /// New context window when the model's catalog metadata is
+        /// known — keeps compaction thresholds honest after a switch.
+        context_window: Option<u64>,
     },
 }
 
@@ -176,15 +183,15 @@ impl SessionHandle {
     }
 }
 
-/// What a finished turn reports back to the actor. `tail` holds every
-/// message the turn produced *after* the user message — assistant rounds
-/// plus tool results — so history stays faithful even when a turn ran
-/// several provider requests or ended early.
+/// What a finished turn reports back to the actor. `convo` is the
+/// complete post-turn conversation — user message, assistant rounds,
+/// tool results, and any compaction already applied — so the actor can
+/// adopt it verbatim as the new history.
 enum TurnReport {
     /// Turn finished (model stopped calling tools, or hit a cap).
     Completed {
-        /// Messages appended after the user message.
-        tail: Vec<Message>,
+        /// Full post-turn conversation (empty only for dead-task fallback).
+        convo: Vec<Message>,
         /// Summed usage across all provider rounds.
         usage: TokenUsage,
         /// Tool calls executed during the turn.
@@ -194,17 +201,17 @@ enum TurnReport {
         /// USD cost summed across priced rounds, when priced.
         cost_usd: Option<f64>,
     },
-    /// Provider/stream failure; `tail` preserves completed tool rounds.
+    /// Provider/stream failure; `convo` preserves completed tool rounds.
     Failed {
         /// The provider error.
         error: ProviderError,
-        /// Completed-round messages worth keeping in history.
-        tail: Vec<Message>,
+        /// Full post-turn conversation.
+        convo: Vec<Message>,
     },
-    /// Cancellation token fired; `tail` preserves completed rounds.
+    /// Cancellation token fired; `convo` preserves completed rounds.
     Cancelled {
-        /// Completed-round messages worth keeping in history.
-        tail: Vec<Message>,
+        /// Full post-turn conversation.
+        convo: Vec<Message>,
     },
 }
 
@@ -308,7 +315,7 @@ impl Actor {
                                 error: ProviderError::Stream(
                                     "turn task terminated without report".to_string(),
                                 ),
-                                tail: Vec::new(),
+                                convo: Vec::new(),
                             }))
                         }
                     }
@@ -353,7 +360,11 @@ impl Actor {
                 };
                 self.cfg.permissions.resolve(&request_id, d);
             }
-            Command::SetOptions { model, thinking } => {
+            Command::SetOptions {
+                model,
+                thinking,
+                context_window,
+            } => {
                 if let Some(m) = model {
                     debug!(model = %m, "session model switched");
                     self.cfg.model = m;
@@ -361,6 +372,9 @@ impl Actor {
                 if let Some(t) = thinking {
                     debug!(thinking = ?t, "session thinking level switched");
                     self.cfg.thinking = t;
+                }
+                if let Some(w) = context_window {
+                    self.cfg.context_window = w;
                 }
                 // Option changes are session state — persist even when no
                 // turn ever runs so a model pick survives a restart.
@@ -406,6 +420,7 @@ impl Actor {
         let tools = self.cfg.tools.clone();
         let permissions = self.cfg.permissions.clone();
         let ledger = self.cfg.ledger.clone();
+        let context_window = self.cfg.context_window;
         let session_id = self.session_id;
         let turn_id = self.turn;
         let started = self.turn_started;
@@ -427,6 +442,7 @@ impl Actor {
                 session_id,
                 turn_id,
                 started,
+                context_window,
             )
             .await;
         });
@@ -456,23 +472,40 @@ impl Actor {
         Ok(())
     }
 
+    /// Adopt the turn's reported conversation as history. Reports from
+    /// `run_turn` carry the complete post-turn convo — user message
+    /// included, compaction already applied. An empty `convo` means the
+    /// turn task died without reporting; keep prior history and record
+    /// just the user message.
+    fn adopt_convo(&mut self, convo: Vec<Message>, user_msg: Option<Message>) {
+        if convo.is_empty() {
+            if let Some(u) = user_msg {
+                self.history.push(u);
+            }
+        } else {
+            self.history = convo;
+        }
+    }
+
     fn finish_turn(&mut self, rep: TurnReport) {
         // Whatever the outcome, the user message becomes part of history —
         // the model should see what the user actually said even if the
-        // reply was cancelled or failed.
-        if let Some(user_text) = self.pending_user.take() {
-            self.history.push(Message::User { content: user_text });
-        }
+        // reply was cancelled or failed. `adopt_convo` dedupes: run_turn
+        // reports already contain it.
+        let user_msg = self
+            .pending_user
+            .take()
+            .map(|t| Message::User { content: t });
 
         match rep {
             TurnReport::Completed {
-                tail,
+                convo,
                 usage,
                 tool_calls,
                 latency_ms,
                 cost_usd,
             } => {
-                self.history.extend(tail);
+                self.adopt_convo(convo, user_msg);
                 if let Some(cost) = cost_usd {
                     self.cost_usd += cost;
                 }
@@ -486,16 +519,16 @@ impl Actor {
                 };
                 self.emit(Event::TurnComplete { outcome });
             }
-            TurnReport::Failed { error, tail } => {
+            TurnReport::Failed { error, convo } => {
                 // Completed tool rounds stay in history — the model did
                 // real work before the failure and should see it.
-                self.history.extend(tail);
+                self.adopt_convo(convo, user_msg);
                 self.emit(Event::Failed {
                     reason: error.into(),
                 });
             }
-            TurnReport::Cancelled { tail } => {
-                self.history.extend(tail);
+            TurnReport::Cancelled { convo } => {
+                self.adopt_convo(convo, user_msg);
                 let outcome = TurnOutcome {
                     outcome: Outcome::Cancelled,
                     usage: TokenUsage::default(),
@@ -737,13 +770,12 @@ async fn run_turn(
     session_id: SessionId,
     turn_id: TurnId,
     started: Instant,
+    context_window: u64,
 ) {
     // A model that never stops calling tools must not loop forever.
     const MAX_TOOL_ROUNDS: u32 = 12;
     const MAX_TOOL_CALLS: u32 = 48;
 
-    // Messages this turn appends start after the user message.
-    let base = convo.len();
     let specs = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
     let mut total_usage = TokenUsage::default();
     let mut total_cost: Option<f64> = None;
@@ -754,7 +786,7 @@ async fn run_turn(
         if cancel.is_cancelled() {
             let _ = done_tx
                 .send(TurnReport::Cancelled {
-                    tail: convo[base..].to_vec(),
+                    convo: convo.clone(),
                 })
                 .await;
             return;
@@ -765,12 +797,27 @@ async fn run_turn(
                     error: ProviderError::Stream(format!(
                         "tool loop exceeded {MAX_TOOL_ROUNDS} provider rounds"
                     )),
-                    tail: convo[base..].to_vec(),
+                    convo: convo.clone(),
                 })
                 .await;
             return;
         }
         round += 1;
+
+        // Context-pressure check before every billed round: the tool
+        // loop can grow `convo` far past one turn's worth of messages.
+        if let Some((before, after, reason)) = maybe_compact(
+            &mut convo,
+            system.as_deref().unwrap_or(""),
+            &specs,
+            context_window,
+        ) {
+            let _ = events.send(Event::CompactionStarted {
+                reason,
+                before,
+                after,
+            });
+        }
 
         let req = ChatRequest {
             model: model.clone(),
@@ -801,7 +848,7 @@ async fn run_turn(
             if cancel.is_cancelled() {
                 let _ = done_tx
                     .send(TurnReport::Cancelled {
-                        tail: convo[base..].to_vec(),
+                        convo: convo.clone(),
                     })
                     .await;
                 return;
@@ -810,7 +857,7 @@ async fn run_turn(
                 () = cancel.cancelled() => {
                     let _ = done_tx
                         .send(TurnReport::Cancelled {
-                            tail: convo[base..].to_vec(),
+                            convo: convo.clone(),
                         })
                         .await;
                     return;
@@ -838,7 +885,7 @@ async fn run_turn(
                             if cancel.is_cancelled() {
                                 let _ = done_tx
                                     .send(TurnReport::Cancelled {
-                                        tail: convo[base..].to_vec(),
+                                        convo: convo.clone(),
                                     })
                                     .await;
                             } else {
@@ -847,7 +894,7 @@ async fn run_turn(
                                         error: ProviderError::Stream(
                                             "provider stream ended without Delta::Done".to_string(),
                                         ),
-                                        tail: convo[base..].to_vec(),
+                                        convo: convo.clone(),
                                     })
                                     .await;
                             }
@@ -857,7 +904,7 @@ async fn run_turn(
                             let _ = done_tx
                                 .send(TurnReport::Failed {
                                     error: e,
-                                    tail: convo[base..].to_vec(),
+                                    convo: convo.clone(),
                                 })
                                 .await;
                             return;
@@ -897,10 +944,17 @@ async fn run_turn(
         total_usage.thinking += usage.thinking;
         tool_calls_done += calls.len() as u32;
 
+        // Record the assistant round BEFORE the no-calls exit — the
+        // final reply must land in history too, not just tool rounds.
+        convo.push(Message::Assistant {
+            content: text,
+            tool_calls: calls.clone(),
+        });
+
         if calls.is_empty() {
             let _ = done_tx
                 .send(TurnReport::Completed {
-                    tail: convo[base..].to_vec(),
+                    convo: convo.clone(),
                     usage: total_usage,
                     tool_calls: tool_calls_done,
                     latency_ms: started.elapsed().as_millis() as u64,
@@ -917,7 +971,7 @@ async fn run_turn(
                         "model requested {} tool call(s) but this session has no tools",
                         calls.len()
                     )),
-                    tail: convo[base..].to_vec(),
+                    convo: convo.clone(),
                 })
                 .await;
             return;
@@ -929,19 +983,15 @@ async fn run_turn(
                     error: ProviderError::Stream(format!(
                         "tool call limit exceeded ({MAX_TOOL_CALLS})"
                     )),
-                    tail: convo[base..].to_vec(),
+                    convo: convo.clone(),
                 })
                 .await;
             return;
         }
 
-        // Record the assistant round, then run every call so the batch
-        // stays atomic: history never holds a call without its result,
-        // even if the user cancels immediately after.
-        convo.push(Message::Assistant {
-            content: text,
-            tool_calls: calls.clone(),
-        });
+        // The assistant round is already recorded above; run every call
+        // so the batch stays atomic: history never holds a call without
+        // its result, even if the user cancels immediately after.
         for call in calls {
             emit(Event::ToolStarted { call: call.clone() });
             let out = match tools.gate_reason(&call) {
@@ -952,7 +1002,7 @@ async fn run_turn(
                         Gate::Cancelled => {
                             let _ = done_tx
                                 .send(TurnReport::Cancelled {
-                                    tail: convo[base..].to_vec(),
+                                    convo: convo.clone(),
                                 })
                                 .await;
                             return;
@@ -979,5 +1029,294 @@ async fn run_turn(
             });
         }
         // Next iteration streams the follow-up request with results in.
+    }
+}
+
+// ── context compaction ────────────────────────────────────────────────────
+
+/// Compact proactively at 72% of the window; hard-stop at 92%.
+const COMPACT_SOFT: f64 = 0.72;
+const COMPACT_HARD: f64 = 0.92;
+/// Messages kept verbatim at the tail.
+const COMPACT_TAIL: usize = 12;
+/// Caps for the generated compaction note.
+const NOTE_FILES_MAX: usize = 15;
+const NOTE_SNIPPET: usize = 600;
+
+/// Rough input-token estimate for trigger checks — o200k over the
+/// serialized prompt. Provider `count_tokens` would cost an HTTP call
+/// per round on Anthropic; the 0.72/0.92 thresholds leave enough
+/// margin for BPE drift. `0` = tokenizer unavailable → never compact
+/// (the provider then errors honestly on real overflow).
+fn estimate_tokens(system: &str, tools: &[crate::provider::ToolSpec], messages: &[Message]) -> u64 {
+    let Ok(counter) = O200kCounter::new() else {
+        return 0;
+    };
+    let mut text = String::with_capacity(64 * 1024);
+    text.push_str(system);
+    if let Ok(specs) = serde_json::to_string(tools) {
+        text.push_str(&specs);
+    }
+    for m in messages {
+        push_message_text(m, &mut text);
+    }
+    counter.count_sync(&text)
+}
+
+fn push_message_text(m: &Message, out: &mut String) {
+    match m {
+        Message::User { content } => {
+            out.push_str("\nuser\n");
+            out.push_str(content);
+        }
+        Message::Assistant {
+            content,
+            tool_calls,
+        } => {
+            out.push_str("\nassistant\n");
+            out.push_str(content);
+            for c in tool_calls {
+                out.push('\n');
+                out.push_str(c.name.as_str());
+                out.push_str(&serde_json::to_string(&c.args).unwrap_or_default());
+            }
+        }
+        Message::Tool { name, content, .. } => {
+            out.push_str("\ntool\n");
+            out.push_str(name);
+            out.push('\n');
+            out.push_str(content);
+        }
+    }
+}
+
+/// Compact `convo` in place when it approaches `window`. Keeps the
+/// opening user message (the task anchor) and a verbatim tail; the
+/// dropped middle becomes a structured note preserving the files the
+/// agent touched. Returns `(before, after, reason)` when it ran.
+fn maybe_compact(
+    convo: &mut Vec<Message>,
+    system: &str,
+    tools: &[crate::provider::ToolSpec],
+    window: u64,
+) -> Option<(u64, u64, CompactionReason)> {
+    if window == 0 || convo.len() < COMPACT_TAIL + 4 {
+        return None;
+    }
+    let before = estimate_tokens(system, tools, convo);
+    if before == 0 {
+        return None;
+    }
+    let ratio = before as f64 / window as f64;
+    let reason = if ratio >= COMPACT_HARD {
+        CompactionReason::HardStop
+    } else if ratio >= COMPACT_SOFT {
+        CompactionReason::Threshold
+    } else {
+        return None;
+    };
+
+    let n = convo.len();
+    // Task anchor: the first message when it's the user's opening ask.
+    let anchor = usize::from(matches!(convo.first(), Some(Message::User { .. })));
+    // Tail must never begin on a `Tool` result — its parent assistant
+    // call would be dropped, orphaning the result for the provider.
+    let mut tail = n.saturating_sub(COMPACT_TAIL).max(anchor);
+    while tail < n && matches!(convo[tail], Message::Tool { .. }) {
+        tail += 1;
+    }
+    if tail <= anchor + 2 {
+        return None; // nothing meaningful to drop
+    }
+
+    let dropped: Vec<Message> = convo[anchor..tail].to_vec();
+    let note = compaction_note(&dropped, anchor > 0);
+    let mut next = Vec::with_capacity(anchor + 1 + (n - tail));
+    next.extend(convo[..anchor].iter().cloned());
+    next.push(Message::User { content: note });
+    next.extend(convo[tail..].iter().cloned());
+    *convo = next;
+
+    let after = estimate_tokens(system, tools, convo);
+    Some((before, after, reason))
+}
+
+/// Structured note standing in for the dropped messages — preserves
+/// the task text (when no anchor survives) and every file path the
+/// agent touched, the highest-value memory for continuing work.
+fn compaction_note(dropped: &[Message], has_anchor: bool) -> String {
+    use std::fmt::Write as _;
+    let mut note = String::from(
+        "[Context compacted]\nEarlier turns were compacted to fit the model's context window. \
+         The visible transcript still shows the full history.\n",
+    );
+    if !has_anchor
+        && let Some(first) = dropped.iter().find_map(|m| match m {
+            Message::User { content } if !content.starts_with('[') => Some(content.as_str()),
+            _ => None,
+        })
+    {
+        note.push_str("\nOriginal request:\n");
+        note.push_str(&truncate(first, NOTE_SNIPPET));
+        note.push('\n');
+    }
+
+    let mut files: Vec<&str> = Vec::new();
+    for m in dropped {
+        let Message::Assistant { tool_calls, .. } = m else {
+            continue;
+        };
+        for c in tool_calls {
+            for key in ["path", "file_path", "notebook_path"] {
+                if let Some(p) = c.args.get(key).and_then(|v| v.as_str())
+                    && !files.contains(&p)
+                {
+                    files.push(p);
+                    if files.len() >= NOTE_FILES_MAX {
+                        break;
+                    }
+                }
+            }
+            if files.len() >= NOTE_FILES_MAX {
+                break;
+            }
+        }
+        if files.len() >= NOTE_FILES_MAX {
+            break;
+        }
+    }
+    if !files.is_empty() {
+        note.push_str("\nFiles touched:\n");
+        for f in &files {
+            note.push_str("- ");
+            note.push_str(f);
+            note.push('\n');
+        }
+    }
+    let _ = write!(note, "\n({} earlier messages compacted)\n", dropped.len());
+    note
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max).collect();
+    format!("{cut}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolName;
+
+    fn user(text: &str) -> Message {
+        Message::User {
+            content: text.to_string(),
+        }
+    }
+
+    fn assistant(text: &str) -> Message {
+        Message::Assistant {
+            content: text.to_string(),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    /// 20 alternating messages with enough text to blow a tiny window.
+    fn fat_convo() -> Vec<Message> {
+        let filler = "lorem ipsum dolor sit amet ".repeat(80);
+        let mut v = vec![user("THE TASK: refactor the parser")];
+        for i in 0..10 {
+            v.push(assistant(&format!("{filler} step {i} a")));
+            v.push(user(&format!("{filler} step {i} u")));
+        }
+        v.push(assistant("final answer pending"));
+        v
+    }
+
+    #[test]
+    fn under_threshold_is_noop() {
+        let mut convo = fat_convo();
+        let n = convo.len();
+        // Huge window → ratio far below soft threshold.
+        assert!(maybe_compact(&mut convo, "sys", &[], u64::MAX).is_none());
+        assert_eq!(convo.len(), n);
+    }
+
+    #[test]
+    fn zero_window_disables_compaction() {
+        let mut convo = fat_convo();
+        assert!(maybe_compact(&mut convo, "sys", &[], 0).is_none());
+    }
+
+    #[test]
+    fn compacts_middle_and_preserves_anchor_and_tail() {
+        let mut convo = fat_convo();
+        // Window small enough that ~21 fat messages exceed 72%.
+        let r = maybe_compact(&mut convo, "sys", &[], 2_000).expect("should compact");
+        assert!(matches!(
+            r.2,
+            CompactionReason::Threshold | CompactionReason::HardStop
+        ));
+        assert!(r.0 > r.1, "before={} after={}", r.0, r.1);
+
+        // Anchor + note + tail.
+        assert_eq!(convo.len(), 1 + 1 + COMPACT_TAIL);
+        assert!(matches!(&convo[0], Message::User { content } if content.contains("THE TASK")));
+        assert!(
+            matches!(&convo[1], Message::User { content } if content.contains("[Context compacted]"))
+        );
+        assert!(
+            matches!(&convo[2], Message::User { .. })
+                || matches!(&convo[2], Message::Assistant { .. })
+        );
+        // Tail is verbatim — last message is the original final answer.
+        assert!(matches!(
+            convo.last(),
+            Some(Message::Assistant { content, .. }) if content == "final answer pending"
+        ));
+        // Note records the dropped count.
+        if let Message::User { content } = &convo[1] {
+            assert!(content.contains("earlier messages compacted"));
+        }
+    }
+
+    #[test]
+    fn tail_never_starts_on_tool_result() {
+        // Craft a convo where n - COMPACT_TAIL lands inside a run of
+        // Tool messages: the boundary must advance past them.
+        let mut convo = vec![user("task")];
+        for i in 0..8 {
+            convo.push(Message::Assistant {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: format!("c{i}"),
+                    name: ToolName::new("read_file"),
+                    args: serde_json::json!({"path": format!("f{i}.rs")}),
+                }],
+            });
+            convo.push(Message::Tool {
+                call_id: format!("c{i}"),
+                name: "read_file".to_string(),
+                content: "x".repeat(400),
+            });
+        }
+        // Pad to just over the minimum so the naive boundary sits inside
+        // the tool-result run.
+        while convo.len() < COMPACT_TAIL + 5 {
+            convo.push(assistant("pad"));
+        }
+        let r = maybe_compact(&mut convo, "sys", &[], 500);
+        assert!(r.is_some());
+        // Whatever follows the note must not be an orphaned Tool result.
+        let note_idx = convo
+            .iter()
+            .position(|m| matches!(m, Message::User { content } if content.contains("[Context compacted]")))
+            .expect("note present");
+        assert!(
+            !matches!(convo[note_idx + 1], Message::Tool { .. }),
+            "tail must not begin on a tool result"
+        );
     }
 }

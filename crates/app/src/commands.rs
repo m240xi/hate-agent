@@ -70,6 +70,8 @@ struct SessionSlot {
     /// send — applied at spawn, then superseded by live `SetOptions`.
     model: Option<String>,
     thinking: Option<ThinkingLevel>,
+    /// Selected model's catalog context window; `0` = unknown.
+    context_window: u64,
 }
 
 /// Resolve provider name + config + built adapter — shared by session
@@ -180,6 +182,7 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         persist,
         tools,
         permissions: std::sync::Arc::new(PermissionHub::default()),
+        context_window: guard.context_window,
     });
 
     let mut rx = handle.subscribe();
@@ -319,6 +322,7 @@ pub fn session_set_options(
     state: State<'_, Sessions>,
     model: Option<String>,
     thinking: Option<String>,
+    context_window: Option<u64>,
 ) -> Result<(), String> {
     let thinking = thinking.map(|t| ThinkingLevel::parse(&t)).transpose()?;
     let mut slot = state
@@ -331,9 +335,16 @@ pub fn session_set_options(
     if let Some(t) = thinking {
         slot.thinking = Some(t);
     }
+    if let Some(w) = context_window {
+        slot.context_window = w;
+    }
     if let Some(h) = slot.handle.as_ref() {
-        h.command(Command::SetOptions { model, thinking })
-            .map_err(|e| e.to_string())?;
+        h.command(Command::SetOptions {
+            model,
+            thinking,
+            context_window,
+        })
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

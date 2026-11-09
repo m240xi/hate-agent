@@ -81,6 +81,7 @@ fn session_with(provider: Arc<dyn Provider>) -> hate_core::SessionHandle {
         persist: None,
         tools: None,
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        context_window: 0,
     })
 }
 
@@ -358,6 +359,7 @@ async fn tool_calls_execute_and_feed_results_back() {
         persist: None,
         tools: Some(tools),
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        context_window: 0,
     });
     let mut rx = session.subscribe();
     session
@@ -468,6 +470,7 @@ async fn gated_tool_waits_for_permission_then_denies() {
         persist: None,
         tools: Some(tools),
         permissions,
+        context_window: 0,
     });
     let mut rx = session.subscribe();
     session
@@ -542,6 +545,7 @@ async fn allow_session_skips_repeat_prompts() {
         persist: None,
         tools: Some(tools),
         permissions: Arc::new(PermissionHub::default()),
+        context_window: 0,
     });
     let mut rx = session.subscribe();
     session
@@ -567,4 +571,96 @@ async fn allow_session_skips_repeat_prompts() {
     }
     assert_eq!(prompts, 1, "second identical call auto-allowed");
     assert!(dir.path().join("x.txt").exists());
+}
+
+// ── context compaction ────────────────────────────────────────────────────
+
+/// Journal that retains the last snapshot for assertions.
+#[derive(Default)]
+struct CaptureJournal(std::sync::Mutex<Option<hate_core::PersistedSession>>);
+
+impl hate_core::SessionJournal for CaptureJournal {
+    fn load(&self, _key: &str) -> Option<hate_core::PersistedSession> {
+        None
+    }
+    fn save(&self, snap: &hate_core::PersistedSession) {
+        *self.0.lock().expect("journal poisoned") = Some(snap.clone());
+    }
+    fn delete(&self, _key: &str) {}
+    fn list(&self, _mode: Option<&str>) -> Vec<hate_core::SessionMeta> {
+        Vec::new()
+    }
+}
+
+/// The risky path: compaction mutates `convo` inside `run_turn`, and the
+/// actor must adopt the *compacted* history — not rebuild it from the
+/// turn's appended tail. This drives enough turns to force compaction
+/// and asserts the journaled history stays bounded with a note present.
+#[tokio::test]
+async fn compaction_bounds_journaled_history() {
+    use hate_core::provider::Message;
+
+    let journal = Arc::new(CaptureJournal::default());
+    let session = spawn_session(SessionConfig {
+        provider: Arc::new(Scripted {
+            script: vec![Delta::Text("ok".to_string()), Delta::Done],
+            usage: TokenUsage::default(),
+            delta_delay: Duration::ZERO,
+        }),
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: Some(hate_core::PersistCtx {
+            key: "compact-test".to_string(),
+            mode: "chat".to_string(),
+            workspace: None,
+            journal: journal.clone(),
+            restore: None,
+        }),
+        tools: None,
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        // Tiny window → compacts as soon as history reaches the tail+4
+        // minimum; the system prompt alone already exceeds 72% of it.
+        context_window: 400,
+    });
+    let mut rx = session.subscribe();
+
+    for i in 0..14 {
+        session
+            .command(Command::UserMessage(format!("turn number {i}")))
+            .expect("command");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let ev = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("event timeout")
+                .expect("stream open");
+            if matches!(ev, Event::TurnComplete { .. } | Event::Failed { .. }) {
+                break;
+            }
+        }
+    }
+
+    let snap = journal
+        .0
+        .lock()
+        .expect("journal poisoned")
+        .clone()
+        .expect("journal saved at turn end");
+    let msgs = &snap.messages;
+    assert!(
+        msgs.iter().any(|m| matches!(
+            m,
+            Message::User { content } if content.contains("[Context compacted]")
+        )),
+        "expected a compaction note in journaled history ({} msgs)",
+        msgs.len()
+    );
+    assert!(
+        msgs.len() < 40,
+        "adopted history must stay bounded across turns, got {}",
+        msgs.len()
+    );
 }

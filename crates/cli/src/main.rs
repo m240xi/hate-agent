@@ -309,6 +309,7 @@ async fn run(
         thinking,
         limits: Limits::default(),
         ledger: ledger(),
+        persist: None, // one-shot CLI runs stay ephemeral
     });
 
     // Ctrl-C cancels the in-flight turn (Esc is the desktop equivalent).

@@ -5,12 +5,17 @@
 use std::sync::Mutex;
 
 use hate_auth::AuthContext;
-use hate_core::{Command, Limits, SessionConfig, SessionHandle, ThinkingLevel, spawn_session};
+use hate_core::{
+    Command, Limits, PersistCtx, PersistedSession, SessionConfig, SessionHandle, SessionMeta,
+    ThinkingLevel, spawn_session,
+};
 use hate_ledger::Ledger;
 use hate_providers::{ProviderKind, ProviderSpec, build, warn_if_unknown};
 use serde::Serialize;
 use specta::Type;
 use tauri::{AppHandle, Emitter, State};
+
+use crate::sessions_db::{SessionDb, SqliteJournal, StoredSession};
 
 /// Static facts about the running app — used by the settings pane and as a
 /// smoke test that the IPC bridge works end to end.
@@ -39,9 +44,9 @@ pub fn app_info() -> AppInfo {
     }
 }
 
-/// The live session plus options picked before it spawned. M1 keeps a
-/// single session per window; multi-session lands with the workspace
-/// model.
+/// The live session plus options picked before it spawned. One active
+/// session at a time; switching sessions persists the old one (the actor
+/// journals at every turn end) and restores the new one's history.
 #[derive(Default)]
 pub struct Sessions {
     inner: Mutex<SessionSlot>,
@@ -50,6 +55,17 @@ pub struct Sessions {
 #[derive(Default)]
 struct SessionSlot {
     handle: Option<SessionHandle>,
+    /// Persisted session row key; `None` = ephemeral (pre-open sends).
+    key: Option<String>,
+    /// `chat` | `code` — captured at open/new, journaled with the row.
+    mode: String,
+    /// Workspace captured for code sessions.
+    workspace: Option<String>,
+    /// Provider override restored from the session; `None` = default.
+    provider: Option<String>,
+    /// State to seed the next spawn (set by `session_open`, consumed
+    /// by `ensure_session`).
+    restore: Option<PersistedSession>,
     /// Model/thinking chosen via `session_set_options` before the first
     /// send — applied at spawn, then superseded by live `SetOptions`.
     model: Option<String>,
@@ -94,16 +110,48 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
     }
 
     let ctx = AuthContext::load().map_err(|e| e.to_string())?;
-    let (name, configured_model, provider) = resolve_target(&ctx, None)?;
+    // A restored session keeps the provider it was created under;
+    // everything else resolves the configured default.
+    let provider_override = guard
+        .provider
+        .clone()
+        .or_else(|| guard.restore.as_ref().map(|r| r.provider.clone()))
+        .filter(|p| !p.is_empty());
+    let (name, configured_model, provider) = resolve_target(&ctx, provider_override.as_deref())?;
+
+    // Restored sessions run their own model/thinking; pending
+    // `session_set_options` values still win (user's latest pick).
+    let (model, thinking) = match guard.restore.as_ref() {
+        Some(r) => (
+            guard.model.clone().unwrap_or_else(|| r.model.clone()),
+            guard.thinking.unwrap_or(r.thinking),
+        ),
+        None => (
+            guard.model.clone().unwrap_or(configured_model),
+            guard.thinking.unwrap_or_default(),
+        ),
+    };
+
+    let persist = match guard.key.clone() {
+        Some(key) => Some(PersistCtx {
+            key,
+            mode: guard.mode.clone(),
+            workspace: guard.workspace.clone(),
+            journal: std::sync::Arc::new(SqliteJournal::new()?),
+            restore: guard.restore.take(),
+        }),
+        None => None,
+    };
 
     let ledger = ledger_handle();
     let handle = spawn_session(SessionConfig {
         provider,
-        model: guard.model.clone().unwrap_or(configured_model),
+        model,
         provider_name: name,
-        thinking: guard.thinking.unwrap_or_default(),
+        thinking,
         limits: Limits::default(),
         ledger,
+        persist,
     });
 
     let mut rx = handle.subscribe();
@@ -485,13 +533,20 @@ pub fn workspace_get() -> Result<Option<String>, String> {
     Ok(ctx.config.workspace_path.clone())
 }
 
-/// Persist the workspace folder (`None` clears it).
+/// Persist the workspace folder (`None` clears it). An active code
+/// session adopts the new folder so its journal entry stays truthful.
 #[tauri::command]
 #[specta::specta]
-pub fn workspace_set(path: Option<String>) -> Result<(), String> {
+pub fn workspace_set(state: State<'_, Sessions>, path: Option<String>) -> Result<(), String> {
     let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
-    ctx.config.workspace_path = path;
-    ctx.config.save().map_err(|e| e.to_string())
+    ctx.config.workspace_path.clone_from(&path);
+    ctx.config.save().map_err(|e| e.to_string())?;
+    if let Ok(mut guard) = state.inner.lock()
+        && guard.mode == "code"
+    {
+        guard.workspace = path;
+    }
+    Ok(())
 }
 
 /// Open the native folder picker; returns the chosen path or `None`.
@@ -509,4 +564,194 @@ pub async fn workspace_pick(app: AppHandle) -> Result<Option<String>, String> {
         // for display/storage.
         dunce::simplified(&p).display().to_string()
     }))
+}
+
+// ── session persistence ────────────────────────────────────────────────────
+
+/// Wire shape for one session row — mirrors `hate_core::SessionMeta`
+/// (core types don't carry specta derives).
+#[derive(Debug, Clone, serde::Serialize, Type)]
+pub struct SessionMetaInfo {
+    /// App-level session id.
+    pub id: String,
+    /// `chat` | `code`.
+    pub mode: String,
+    /// Derived title (first user message).
+    pub title: String,
+    /// Provider config name.
+    pub provider: String,
+    /// Model id.
+    pub model: String,
+    /// Workspace folder for code sessions.
+    pub workspace: Option<String>,
+    /// Last save, unix seconds.
+    pub updated_at: u32,
+}
+
+fn meta_info(m: SessionMeta) -> SessionMetaInfo {
+    SessionMetaInfo {
+        id: m.id,
+        mode: m.mode,
+        title: m.title,
+        provider: m.provider,
+        model: m.model,
+        workspace: m.workspace,
+        updated_at: m.updated_at,
+    }
+}
+
+/// `session_open` payload: metadata plus the frontend's UI blob as raw
+/// JSON text (kept as a string so specta doesn't have to model arbitrary
+/// JSON — the store parses it).
+#[derive(Debug, Clone, serde::Serialize, Type)]
+pub struct SessionOpen {
+    /// Row metadata.
+    pub meta: SessionMetaInfo,
+    /// Serialized UI state; `None` for sessions that never saved one.
+    pub ui_state: Option<String>,
+}
+
+fn db() -> Result<SessionDb, String> {
+    SessionDb::open()
+}
+
+/// Fail when a turn is in flight — switching sessions mid-stream would
+/// silently orphan the turn, so the UI disables it instead.
+fn ensure_idle(state: &Sessions) -> Result<(), String> {
+    let guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    if let Some(h) = guard.handle.as_ref()
+        && h.snapshot().running
+    {
+        return Err("session is running — cancel the turn first".to_string());
+    }
+    Ok(())
+}
+
+/// Reset the slot to a fresh/other session: drop the live actor (its
+/// state is already journaled) and prime the next spawn.
+fn prime_slot(guard: &mut SessionSlot, stored: Option<StoredSession>) {
+    guard.handle = None;
+    guard.restore = None;
+    guard.model = None;
+    guard.thinking = None;
+    if let Some(s) = stored {
+        guard.key = Some(s.meta.id.clone());
+        guard.mode.clone_from(&s.meta.mode);
+        guard.workspace = s
+            .persisted
+            .as_ref()
+            .and_then(|p| p.workspace.clone())
+            .or_else(|| s.meta.workspace.clone());
+        guard.provider = (!s.meta.provider.is_empty()).then(|| s.meta.provider.clone());
+        guard.restore = s.persisted;
+    } else {
+        guard.key = None;
+        guard.provider = None;
+    }
+}
+
+/// List persisted sessions for the browser; `mode` filters chat/code.
+#[tauri::command]
+#[specta::specta]
+pub fn sessions_list(mode: Option<String>) -> Result<Vec<SessionMetaInfo>, String> {
+    let mode = mode.filter(|m| m == "chat" || m == "code");
+    Ok(db()?
+        .list(mode.as_deref())?
+        .into_iter()
+        .map(meta_info)
+        .collect())
+}
+
+/// Create a new persisted session and make it active. Returns its row.
+#[tauri::command]
+#[specta::specta]
+pub fn session_new(state: State<'_, Sessions>, mode: String) -> Result<SessionMetaInfo, String> {
+    if mode != "chat" && mode != "code" {
+        return Err(format!("unknown session mode {mode:?}"));
+    }
+    ensure_idle(&state)?;
+
+    let key = uuid::Uuid::new_v4().to_string();
+    db()?.create(&key, &mode)?;
+
+    // Code sessions capture the current workspace; chat sessions don't
+    // need one (the transcript is workspace-agnostic).
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let workspace = (mode == "code")
+        .then(|| ctx.config.workspace_path.clone())
+        .flatten();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX));
+
+    let mut guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    prime_slot(&mut guard, None);
+    guard.key = Some(key.clone());
+    guard.mode.clone_from(&mode);
+    guard.workspace.clone_from(&workspace);
+
+    Ok(SessionMetaInfo {
+        id: key,
+        mode,
+        title: "New session".to_string(),
+        provider: String::new(),
+        model: String::new(),
+        workspace,
+        updated_at: now,
+    })
+}
+
+/// Open a persisted session: primes the slot for the next spawn and
+/// returns its metadata + UI blob for the frontend to restore.
+#[tauri::command]
+#[specta::specta]
+pub fn session_open(state: State<'_, Sessions>, id: String) -> Result<SessionOpen, String> {
+    ensure_idle(&state)?;
+    let stored = db()?
+        .load(&id)?
+        .ok_or_else(|| format!("unknown session {id:?}"))?;
+    let meta = meta_info(stored.meta.clone());
+    let ui_state = stored.ui_state.clone();
+
+    let mut guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    prime_slot(&mut guard, Some(stored));
+
+    Ok(SessionOpen { meta, ui_state })
+}
+
+/// Delete a session permanently. If it's the active one, the slot resets
+/// to ephemeral — the frontend then shows the session browser.
+#[tauri::command]
+#[specta::specta]
+pub fn session_delete(state: State<'_, Sessions>, id: String) -> Result<(), String> {
+    ensure_idle(&state)?;
+    db()?.delete(&id)?;
+    let mut guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    if guard.key.as_deref() == Some(id.as_str()) {
+        prime_slot(&mut guard, None);
+    }
+    Ok(())
+}
+
+/// Persist the frontend's UI blob for a session (transcript blocks,
+/// draft, stats). Raw JSON text — stored verbatim, never parsed here.
+#[tauri::command]
+#[specta::specta]
+pub fn session_save_ui(id: String, ui_state: String) -> Result<(), String> {
+    if ui_state.len() > 8 * 1024 * 1024 {
+        return Err("ui_state too large".to_string());
+    }
+    db()?.save_ui(&id, &ui_state)
 }

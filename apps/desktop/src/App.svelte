@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
   import { session } from './lib/store.svelte';
   import Pane from './lib/components/Pane.svelte';
@@ -13,6 +13,7 @@
   import ChatView from './lib/components/ChatView.svelte';
   import SettingsView from './lib/components/SettingsView.svelte';
   import ModeSwitch from './lib/components/ModeSwitch.svelte';
+  import SessionBrowser from './lib/components/SessionBrowser.svelte';
   import Icon from './lib/components/Icon.svelte';
 
   let inTauri = $state(false);
@@ -73,6 +74,16 @@
   const workspaceName = $derived(
     session.workspacePath?.split(/[\\/]/).filter(Boolean).pop() ?? null,
   );
+
+  // Entering Chat/Code resumes that mode's last session or opens the
+  // session browser — never a silent blank slate. `untrack` keeps the
+  // effect keyed on mode only (enterMode reads lots of session state).
+  $effect(() => {
+    const m = session.mode;
+    untrack(() => {
+      if (m === 'chat' || m === 'code') void session.enterMode(m);
+    });
+  });
 </script>
 
 <div class="shell">
@@ -94,17 +105,18 @@
     {/if}
     <span class="spacer"></span>
     {#if session.mode === 'code' || session.mode === 'chat'}
+      <button
+        class="sess-btn mono"
+        onclick={() =>
+          (session.pickerMode = session.mode === 'code' ? 'code' : 'chat')}
+        title="Sessions — browse history or start a new one"
+      >
+        <Icon name="clock" size={12} />
+        <span class="sess-title">{session.sessionMeta?.title || 'Sessions'}</span>
+      </button>
       <span class="state mono" class:running={session.running}>
         {session.sessionState}
       </span>
-      <button
-        class="icon-btn"
-        onclick={() => session.clearTranscript()}
-        aria-label="Clear transcript"
-        title="Clear transcript"
-      >
-        <Icon name="x" size={13} />
-      </button>
     {/if}
     {#if inTauri}
       <div class="win-controls">
@@ -148,14 +160,22 @@
           </Pane>
 
           <main class="center">
-            {#if session.blocks.length === 0}
+            {#if session.pickerMode === 'code' || session.sessionBusy}
+              {#if session.sessionBusy}
+                <div class="center-busy"><p>opening session…</p></div>
+              {:else}
+                <SessionBrowser mode="code" />
+              {/if}
+            {:else if session.blocks.length === 0}
               <EmptyState />
             {:else}
               <Transcript />
             {/if}
 
-            <PermissionBar />
-            <Composer />
+            {#if session.pickerMode !== 'code' && !session.sessionBusy}
+              <PermissionBar />
+              <Composer />
+            {/if}
           </main>
 
           <Pane
@@ -275,23 +295,42 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
+  .sess-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 260px;
+    padding: 4px 10px;
+    font-size: 11px;
+    color: var(--fg-2);
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .sess-btn:hover {
+    color: var(--fg-0);
+    border-color: var(--border-strong);
+  }
+  .sess-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .center-busy {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .center-busy p {
+    font-size: 12px;
+    color: var(--fg-3);
+  }
   .state.running {
     color: var(--accent);
   }
   .spacer {
     flex: 1;
-  }
-  .icon-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    border-radius: var(--radius-sm);
-    color: var(--fg-2);
-  }
-  .icon-btn:hover {
-    background: var(--bg-3);
-    color: var(--fg-0);
   }
 </style>

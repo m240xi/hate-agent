@@ -7,12 +7,14 @@
 #![deny(unsafe_code)]
 
 mod event;
+pub mod persist;
 pub mod provider;
 mod session;
 mod state;
 mod types;
 
 pub use event::{AgentError, Event};
+pub use persist::{PersistCtx, PersistedSession, SessionJournal, SessionMeta};
 pub use provider::{
     BoxFuture, CacheMode, Capabilities, ChatRequest, CredentialSource, Delta, Message, ModelInfo,
     ModelMeta, Provider, ProviderError, ThinkingLevel, ToolSpec,

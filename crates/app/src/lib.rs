@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod sessions_db;
 
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
@@ -30,6 +31,11 @@ pub fn run() {
         commands::workspace_get,
         commands::workspace_set,
         commands::workspace_pick,
+        commands::sessions_list,
+        commands::session_new,
+        commands::session_open,
+        commands::session_delete,
+        commands::session_save_ui,
     ]);
 
     // Emit TypeScript bindings for the frontend's typed invoke wrapper.

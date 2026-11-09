@@ -8,19 +8,28 @@
   import Composer from './Composer.svelte';
   import PermissionBar from './PermissionBar.svelte';
   import EmptyState from './EmptyState.svelte';
+  import SessionBrowser from './SessionBrowser.svelte';
 </script>
 
 <div class="chat">
   <div class="chat-inner">
-    {#if session.blocks.length === 0}
+    {#if session.pickerMode === 'chat' || session.sessionBusy}
+      {#if session.sessionBusy}
+        <div class="chat-empty"><p class="busy-line">opening session…</p></div>
+      {:else}
+        <SessionBrowser mode="chat" />
+      {/if}
+    {:else if session.blocks.length === 0}
       <div class="chat-empty">
         <EmptyState />
       </div>
     {:else}
       <Transcript />
     {/if}
-    <PermissionBar />
-    <Composer />
+    {#if session.pickerMode !== 'chat' && !session.sessionBusy}
+      <PermissionBar />
+      <Composer />
+    {/if}
   </div>
 </div>
 
@@ -50,5 +59,10 @@
   .chat-empty :global(.empty) {
     margin: auto;
     padding-bottom: 8vh;
+  }
+  .busy-line {
+    margin: auto;
+    font-size: 12px;
+    color: var(--fg-3);
   }
 </style>

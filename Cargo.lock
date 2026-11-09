@@ -1425,6 +1425,7 @@ dependencies = [
  "hate-core",
  "hate-ledger",
  "hate-providers",
+ "rusqlite",
  "serde",
  "serde_json",
  "specta",
@@ -1436,6 +1437,8 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "tracing",
+ "uuid",
  "webbrowser",
 ]
 

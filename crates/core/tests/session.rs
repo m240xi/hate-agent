@@ -78,6 +78,7 @@ fn session_with(provider: Arc<dyn Provider>) -> hate_core::SessionHandle {
         thinking: hate_core::ThinkingLevel::Off,
         limits: Limits::default(),
         ledger: None,
+        persist: None,
     })
 }
 

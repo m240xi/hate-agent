@@ -129,3 +129,42 @@ export async function workspaceSet(path: string | null): Promise<void> {
 export async function workspacePick(): Promise<string | null> {
   return invoke<string | null>('workspace_pick');
 }
+
+// ── session persistence ────────────────────────────────────────────────────
+
+export interface SessionMeta {
+  id: string;
+  mode: 'chat' | 'code';
+  title: string;
+  provider: string;
+  model: string;
+  workspace: string | null;
+  /** Last save, unix seconds. */
+  updated_at: number;
+}
+
+export interface SessionOpenResult {
+  meta: SessionMeta;
+  /** Raw JSON UI blob; the store parses it. `null` if never saved. */
+  ui_state: string | null;
+}
+
+export async function sessionsList(mode?: 'chat' | 'code'): Promise<SessionMeta[]> {
+  return invoke<SessionMeta[]>('sessions_list', { mode: mode ?? null });
+}
+
+export async function sessionNew(mode: 'chat' | 'code'): Promise<SessionMeta> {
+  return invoke<SessionMeta>('session_new', { mode });
+}
+
+export async function sessionOpen(id: string): Promise<SessionOpenResult> {
+  return invoke<SessionOpenResult>('session_open', { id });
+}
+
+export async function sessionDelete(id: string): Promise<void> {
+  return invoke<void>('session_delete', { id });
+}
+
+export async function sessionSaveUi(id: string, uiState: string): Promise<void> {
+  return invoke<void>('session_save_ui', { id, uiState });
+}

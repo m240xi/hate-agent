@@ -2,6 +2,7 @@
 // (or the fixture script when running outside Tauri). Components read
 // state; they never decide agent behavior.
 
+import { untrack } from 'svelte';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import {
   fixtureChangedFiles,
@@ -25,7 +26,7 @@ import type {
   TokenUsage,
   TranscriptBlock,
 } from './types';
-import type { ProviderModel, ThinkingLevel } from './ipc';
+import type { ProviderInfo, ProviderModel, SessionMeta, ThinkingLevel } from './ipc';
 
 const inTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -56,10 +57,32 @@ function failureText(r: FailureReason): string {
 }
 
 export type AppMode = 'home' | 'code' | 'chat' | 'settings';
+export type SessionMode = 'chat' | 'code';
 
 const MODES: readonly AppMode[] = ['home', 'code', 'chat', 'settings'];
 
 let nextBlockId = 2;
+
+/** The frontend-owned half of a persisted session — serialized to the
+ *  `ui_state` column. The backend owns message history separately. */
+interface UiState {
+  blocks: TranscriptBlock[];
+  draft: string;
+  plan: PlanStep[];
+  usage: TokenUsage;
+  sessionTurns: number;
+  sessionBeganAt: number | null;
+  sessionTotals: TokenUsage;
+  ctxUsed: number;
+  costUsd: number;
+  cacheRatio: number;
+  model: string;
+  provider: string;
+  providerName: string;
+  thinkingLevel: ThinkingLevel;
+  checkpoints: CheckpointEntry[];
+  changedFiles: ChangedFile[];
+}
 
 class SessionStore {
   // ── transcript ──────────────────────────────────────────────────────────
@@ -114,6 +137,21 @@ class SessionStore {
   leftWidth = $state(260);
   rightWidth = $state(300);
 
+  // ── sessions ────────────────────────────────────────────────────────────
+  /** Active persisted session id; `null` = none opened yet (ephemeral). */
+  sessionId = $state<string | null>(null);
+  /** Metadata for the active session (title/model/mode for the topbar). */
+  sessionMeta = $state<SessionMeta | null>(null);
+  /** Rows for the session browser, filtered to `pickerMode`. */
+  sessions = $state<SessionMeta[]>([]);
+  sessionsState = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  /** Non-null → the view shows the session browser instead of a chat. */
+  pickerMode = $state<SessionMode | null>(null);
+  /** An open/new/delete IPC is in flight. */
+  sessionBusy = $state(false);
+  /** Configured providers — drives the empty-state connect hint. */
+  providers = $state<ProviderInfo[]>([]);
+
   // ── app shell ───────────────────────────────────────────────────────────
   /** Landing picks the surface; persisted across launches. */
   mode = $state<AppMode>('home');
@@ -125,6 +163,7 @@ class SessionStore {
   // ── internals ───────────────────────────────────────────────────────────
   private unlisten: UnlistenFn | null = null;
   private fixtureTimers: ReturnType<typeof setTimeout>[] = [];
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   get running(): boolean {
     return this.sessionState === 'running';
@@ -162,8 +201,8 @@ class SessionStore {
       // first spawned session inherits it (live swaps go through
       // `session_set_options` too).
       void m.sessionSetOptions(null, this.thinkingLevel).catch(() => {});
-      const providers = await m.providersList().catch(() => []);
-      const def = providers.find((p) => p.is_default) ?? providers[0];
+      this.providers = await m.providersList().catch(() => []);
+      const def = this.providers.find((p) => p.is_default) ?? this.providers[0];
       if (def) {
         this.providerName = def.name;
         this.provider = def.name;
@@ -209,28 +248,43 @@ class SessionStore {
 
   // ── commands ────────────────────────────────────────────────────────────
 
-  /** Send the composer draft. In Tauri this becomes a `session_send` invoke. */
+  /** Send the composer draft. In Tauri this becomes a `session_send`
+   *  invoke; the first send auto-creates the persisted session. */
   send(): void {
     const text = this.draft.trim();
     if (!text || this.running) return;
     this.draft = '';
-    this.blocks.push({ id: nextBlockId++, kind: 'user', text });
-    this.sessionState = 'running';
-    this.sessionTurns += 1;
-    this.sessionBeganAt ??= Date.now();
-    this.finishStreamingBlocks();
+    const begin = () => {
+      this.blocks.push({ id: nextBlockId++, kind: 'user', text });
+      this.sessionState = 'running';
+      this.sessionTurns += 1;
+      this.sessionBeganAt ??= Date.now();
+      this.finishStreamingBlocks();
+      this.scheduleUiSave();
 
-    if (!inTauri()) {
-      // Outside Tauri there is no backend — leave the turn visibly "running"
-      // so the UI demonstrates the busy state honestly.
-      return;
+      if (!inTauri()) {
+        // Outside Tauri there is no backend — leave the turn visibly
+        // "running" so the UI demonstrates the busy state honestly.
+        return;
+      }
+      void import('./ipc')
+        .then((m) => m.sessionSend(text))
+        .catch((err: unknown) => {
+          this.sessionState = 'failed';
+          this.pushError(String(err));
+          this.scheduleUiSave();
+        });
+    };
+    if (inTauri() && !this.sessionId) {
+      void this.ensureSession()
+        .then(begin)
+        .catch((err: unknown) => {
+          this.draft = text;
+          this.pushError(`session error: ${String(err)}`);
+        });
+    } else {
+      begin();
     }
-    void import('./ipc')
-      .then((m) => m.sessionSend(text))
-      .catch((err: unknown) => {
-        this.sessionState = 'failed';
-        this.pushError(String(err));
-      });
   }
 
   cancel(): void {
@@ -273,6 +327,7 @@ class SessionStore {
       await m.providerSetModel(this.providerName, id).catch(() => {});
     }
     await m.sessionSetOptions(id, null).catch(() => {});
+    this.scheduleUiSave();
   }
 
   /** Pick a thinking level — applies next turn, persisted locally. */
@@ -285,12 +340,234 @@ class SessionStore {
         .then((m) => m.sessionSetOptions(null, level))
         .catch(() => {});
     }
+    this.scheduleUiSave();
   }
 
   cycleThinking(): void {
     const order: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
     const i = order.indexOf(this.thinkingLevel);
     this.setThinking(order[(i + 1) % order.length] ?? 'off');
+  }
+
+  // ── session lifecycle ───────────────────────────────────────────────────
+
+  /** Which persisted-session mode the current surface maps to. */
+  sessionMode(): SessionMode {
+    return this.mode === 'code' ? 'code' : 'chat';
+  }
+
+  /** Entering Chat/Code resumes that mode's last session, or opens the
+   *  browser when none exists. Called from App's mode effect. */
+  async enterMode(mode: SessionMode): Promise<void> {
+    if (this.pickerMode === mode) {
+      void this.refreshSessions(mode);
+      return;
+    }
+    if (this.sessionId && this.sessionMeta?.mode === mode) {
+      this.pickerMode = null;
+      return;
+    }
+    const saved = inTauri() ? localStorage.getItem(`hate:session:${mode}`) : null;
+    if (saved) {
+      try {
+        await this.openSession(saved);
+        return;
+      } catch {
+        localStorage.removeItem(`hate:session:${mode}`);
+      }
+    }
+    this.pickerMode = mode;
+    void this.refreshSessions(mode);
+  }
+
+  async refreshSessions(mode?: SessionMode): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    this.sessionsState = 'loading';
+    try {
+      this.sessions = await m.sessionsList(mode ?? this.pickerMode ?? undefined);
+      this.sessionsState = 'ready';
+    } catch {
+      this.sessionsState = 'error';
+    }
+  }
+
+  /** Open a persisted session — restores transcript UI and primes the
+   *  backend actor (message history reloads on next send). */
+  async openSession(id: string): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    this.sessionBusy = true;
+    try {
+      const res = await m.sessionOpen(id);
+      this.sessionId = res.meta.id;
+      this.sessionMeta = res.meta;
+      this.applyUiState(res.ui_state);
+      // A code session owns its folder — adopt it so the file tree and
+      // future turns agree with what the session was created against.
+      if (
+        res.meta.mode === 'code' &&
+        res.meta.workspace &&
+        res.meta.workspace !== this.workspacePath
+      ) {
+        this.workspacePath = res.meta.workspace;
+        void m.workspaceSet(res.meta.workspace).catch(() => {});
+      }
+      // Hand the session's model/thinking to the backend slot so the
+      // next spawn uses them (live swaps also go through set_options).
+      void m
+        .sessionSetOptions(this.model || null, this.thinkingLevel)
+        .catch(() => {});
+      localStorage.setItem(`hate:session:${res.meta.mode}`, id);
+      this.pickerMode = null;
+      void this.refreshSessions(res.meta.mode as SessionMode);
+    } finally {
+      this.sessionBusy = false;
+    }
+  }
+
+  /** Start a fresh persisted session in the current mode. */
+  async newSession(): Promise<void> {
+    if (!inTauri()) {
+      this.resetConversation();
+      this.pickerMode = null;
+      return;
+    }
+    const m = await import('./ipc');
+    this.sessionBusy = true;
+    try {
+      const meta = await m.sessionNew(this.sessionMode());
+      this.sessionId = meta.id;
+      this.sessionMeta = meta;
+      this.resetConversation();
+      void m
+        .sessionSetOptions(this.model || null, this.thinkingLevel)
+        .catch(() => {});
+      localStorage.setItem(`hate:session:${meta.mode}`, meta.id);
+      this.pickerMode = null;
+      void this.refreshSessions(meta.mode);
+    } finally {
+      this.sessionBusy = false;
+    }
+  }
+
+  /** Permanently delete a session; if it's the active one, fall back
+   *  to the browser for that mode. */
+  async deleteSession(id: string): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    await m.sessionDelete(id);
+    this.sessions = this.sessions.filter((s) => s.id !== id);
+    if (this.sessionId === id) {
+      this.sessionId = null;
+      this.sessionMeta = null;
+      this.resetConversation();
+      this.pickerMode = this.sessionMode();
+      void this.refreshSessions(this.pickerMode);
+    }
+  }
+
+  /** Wipe conversation state without touching persistence — used by
+   *  `newSession` and session restore. */
+  private resetConversation(): void {
+    this.blocks = [];
+    nextBlockId = 1;
+    this.plan = [];
+    this.usage = { input: 0, cached_input: 0, output: 0, thinking: 0 };
+    this.checkpoints = [];
+    this.changedFiles = [];
+    this.sessionTurns = 0;
+    this.sessionBeganAt = null;
+    this.sessionTotals = { input: 0, cached_input: 0, output: 0, thinking: 0 };
+    this.ctxUsed = 0;
+    this.costUsd = 0;
+    this.cacheRatio = 0;
+    this.draft = '';
+    this.pendingPermission = null;
+    this.awaitingPrompt = null;
+    this.sessionState = 'idle';
+  }
+
+  /** Restore the frontend half of a session from its `ui_state` blob. */
+  private applyUiState(raw: string | null): void {
+    if (!raw) {
+      this.resetConversation();
+      return;
+    }
+    try {
+      const s = JSON.parse(raw) as Partial<UiState>;
+      this.blocks = s.blocks ?? [];
+      nextBlockId = this.blocks.reduce((m, b) => Math.max(m, b.id + 1), 1);
+      this.draft = s.draft ?? '';
+      this.plan = s.plan ?? [];
+      this.usage = s.usage ?? { input: 0, cached_input: 0, output: 0, thinking: 0 };
+      this.sessionTurns = s.sessionTurns ?? 0;
+      this.sessionBeganAt = s.sessionBeganAt ?? null;
+      this.sessionTotals =
+        s.sessionTotals ?? { input: 0, cached_input: 0, output: 0, thinking: 0 };
+      this.ctxUsed = s.ctxUsed ?? 0;
+      this.costUsd = s.costUsd ?? 0;
+      this.cacheRatio = s.cacheRatio ?? 0;
+      this.model = s.model ?? this.model;
+      this.provider = s.provider ?? this.provider;
+      this.providerName = s.providerName ?? this.providerName;
+      if (isThinkingLevel(s.thinkingLevel ?? null)) {
+        this.thinkingLevel = s.thinkingLevel as ThinkingLevel;
+      }
+      this.checkpoints = s.checkpoints ?? [];
+      this.changedFiles = s.changedFiles ?? [];
+      this.pendingPermission = null;
+      this.awaitingPrompt = null;
+      this.sessionState = 'idle';
+      this.finishStreamingBlocks();
+    } catch {
+      this.resetConversation();
+    }
+  }
+
+  private uiSnapshot(): string {
+    const s: UiState = {
+      blocks: this.blocks,
+      draft: this.draft,
+      plan: this.plan,
+      usage: this.usage,
+      sessionTurns: this.sessionTurns,
+      sessionBeganAt: this.sessionBeganAt,
+      sessionTotals: this.sessionTotals,
+      ctxUsed: this.ctxUsed,
+      costUsd: this.costUsd,
+      cacheRatio: this.cacheRatio,
+      model: this.model,
+      provider: this.provider,
+      providerName: this.providerName,
+      thinkingLevel: this.thinkingLevel,
+      checkpoints: this.checkpoints,
+      changedFiles: this.changedFiles,
+    };
+    return JSON.stringify(s);
+  }
+
+  /** Debounced ui_state write — every transcript mutation schedules one;
+   *  the last write within ~800ms wins. */
+  private scheduleUiSave(): void {
+    if (!inTauri() || !this.sessionId) return;
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      const id = this.sessionId;
+      if (!id) return;
+      const blob = this.uiSnapshot();
+      void import('./ipc')
+        .then((m) => m.sessionSaveUi(id, blob))
+        .catch(() => {});
+    }, 800);
+  }
+
+  /** Guarantee an active persisted session before a send; falls back to
+   *  an ephemeral session when persistence is unavailable. */
+  private async ensureSession(): Promise<void> {
+    if (this.sessionId || !inTauri()) return;
+    await this.newSession();
   }
 
   clearTranscript(): void {
@@ -416,6 +693,10 @@ class SessionStore {
         this.pushError(e.error.message ?? 'unknown error');
         break;
     }
+    // Every event can mutate transcript state — debounce-persists the
+    // UI blob so a crash loses at most ~1s of chrome (message history
+    // is journaled by the actor at turn end regardless).
+    this.scheduleUiSave();
   }
 
   private recomputeDerived(): void {

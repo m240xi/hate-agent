@@ -22,6 +22,7 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::event::{AgentError, Event};
+use crate::persist::{PersistCtx, PersistedSession};
 use crate::provider::{ChatRequest, Delta, Message, Provider, ProviderError, ThinkingLevel};
 use crate::state::SessionState;
 use crate::types::{FailureReason, Outcome, SessionId, TokenUsage, ToolCall, TurnId, TurnOutcome};
@@ -67,6 +68,8 @@ pub struct SessionConfig {
     pub limits: Limits,
     /// Token/cost ledger; `None` disables accounting (tests).
     pub ledger: Option<Arc<Ledger>>,
+    /// Session persistence; `None` = ephemeral (CLI one-shots, tests).
+    pub persist: Option<PersistCtx>,
 }
 
 /// Commands the outside world can send a session.
@@ -192,10 +195,17 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
     let (tx, rx) = mpsc::channel::<Command>(64);
     let (events, _) = broadcast::channel::<Event>(EVENT_BUFFER);
     let session_id = SessionId::new();
+    // A restored session seeds history/counters from the journal; the
+    // wall-clock budget restarts fresh (Instant can't round-trip).
+    let (history, turn, usage, cost_usd) =
+        match cfg.persist.as_ref().and_then(|p| p.restore.as_ref()) {
+            Some(r) => (r.messages.clone(), TurnId(r.turn), r.usage, r.cost_usd),
+            None => (Vec::new(), TurnId(0), TokenUsage::default(), 0.0),
+        };
     let snapshot = Arc::new(std::sync::RwLock::new(SessionSnapshot {
         state: "idle".to_string(),
-        turn: 0,
-        usage: TokenUsage::default(),
+        turn: turn.0,
+        usage,
         running: false,
     }));
 
@@ -204,15 +214,15 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
         rx,
         events: events.clone(),
         session_id,
-        history: Vec::new(),
+        history,
         pending_user: None,
         state: SessionState::Idle,
-        turn: TurnId(0),
+        turn,
         task_started: Instant::now(),
         turn_started: Instant::now(),
         cancel: CancellationToken::new(),
         turn_done: None,
-        cost_usd: 0.0,
+        cost_usd,
         snapshot: snapshot.clone(),
     };
     tokio::spawn(actor.run());
@@ -319,6 +329,9 @@ impl Actor {
                     debug!(thinking = ?t, "session thinking level switched");
                     self.cfg.thinking = t;
                 }
+                // Option changes are session state — persist even when no
+                // turn ever runs so a model pick survives a restart.
+                self.persist_now();
             }
         }
     }
@@ -470,6 +483,42 @@ impl Actor {
         }
         self.state = SessionState::Idle;
         self.set_snapshot();
+        // Every turn outcome (completed/failed/cancelled) changes history
+        // or counters — this is the "context always survives" write.
+        self.persist_now();
+    }
+
+    /// Snapshot actor state into the journal. Synchronous and cheap —
+    /// one SQLite upsert of a few hundred KB at most, once per turn.
+    fn persist_now(&self) {
+        let Some(p) = self.cfg.persist.as_ref() else {
+            return;
+        };
+        let title = self
+            .history
+            .iter()
+            .find_map(|m| match m {
+                Message::User { content } => {
+                    let line = content.lines().next().unwrap_or("").trim();
+                    (!line.is_empty()).then(|| line.chars().take(80).collect::<String>())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "New session".to_string());
+        let usage = self.snapshot.read().expect("snapshot poisoned").usage;
+        p.journal.save(&PersistedSession {
+            key: p.key.clone(),
+            mode: p.mode.clone(),
+            provider: self.cfg.provider_name.clone(),
+            model: self.cfg.model.clone(),
+            thinking: self.cfg.thinking,
+            workspace: p.workspace.clone(),
+            title,
+            messages: self.history.clone(),
+            turn: self.turn.0,
+            usage,
+            cost_usd: self.cost_usd,
+        });
     }
 
     /// Fold one request's usage into the session snapshot totals.

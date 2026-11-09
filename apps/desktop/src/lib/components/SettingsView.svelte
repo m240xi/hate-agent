@@ -59,7 +59,16 @@
     }
   });
 
-  onDestroy(() => unlisten?.());
+  onDestroy(() => {
+    unlisten?.();
+    if (mcpSaveTimer) {
+      clearTimeout(mcpSaveTimer);
+      mcpSaveTimer = null;
+    }
+    // Persist pending edits — the invoke completes even though the
+    // view is gone; the next mount reads the saved state.
+    if (mcpDirty && inTauri) void flushMcpSave();
+  });
 
   async function connectNous(): Promise<void> {
     loginBusy = true;
@@ -119,8 +128,15 @@
   let mcpBusy = $state(false);
   let mcpError = $state<string | null>(null);
   let mcpLoaded = $state(false);
-  let mcpOpen = $state<string | null>(null); // row name with editor open
+  let mcpOpen = $state<number | null>(null); // row index with editor open
   let showMcpAdd = $state(false);
+
+  // Auto-save: every mutation schedules a debounced whole-list save.
+  // flushMcpSave serializes in-flight saves and merges only status
+  // fields back, so typing during a save is never clobbered.
+  let mcpSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let mcpSaving = false;
+  let mcpSavePending = false;
 
   // Add-form drafts.
   let nfName = $state('');
@@ -159,10 +175,10 @@
     mcpLoaded = true;
   }
 
-  function openMcpEditor(name: string): void {
-    mcpOpen = mcpOpen === name ? null : name;
-    const row = mcpRows.find((r) => r.name === name);
-    if (row && mcpOpen === name) {
+  function openMcpEditor(i: number): void {
+    mcpOpen = mcpOpen === i ? null : i;
+    const row = mcpRows[i];
+    if (row && mcpOpen === i) {
       editEnv = pairsToText(row.env ?? {});
       editHeaders = pairsToText(row.headers ?? {});
     }
@@ -172,6 +188,14 @@
     const name = nfName.trim();
     if (!name) {
       mcpError = 'server needs a name';
+      return;
+    }
+    if (nfKind === 'stdio' && !nfCommand.trim()) {
+      mcpError = 'stdio server needs a command (e.g. npx)';
+      return;
+    }
+    if (nfKind === 'http' && !nfUrl.trim()) {
+      mcpError = 'http server needs a URL';
       return;
     }
     if (mcpRows.some((r) => r.name.toLowerCase() === name.toLowerCase())) {
@@ -185,14 +209,14 @@
       state: 'new',
       tools: 0,
       info: '',
-      command: nfKind === 'stdio' ? nfCommand.trim() || null : null,
+      command: nfKind === 'stdio' ? nfCommand.trim() : null,
       args: nfKind === 'stdio' ? nfArgs.trim().split(/\s+/).filter(Boolean) : [],
       env: nfKind === 'stdio' ? textToPairs(nfEnv) : {},
-      url: nfKind === 'http' ? nfUrl.trim() || null : null,
+      url: nfKind === 'http' ? nfUrl.trim() : null,
       headers: nfKind === 'http' ? textToPairs(nfHeaders) : {},
     };
     mcpRows = [...mcpRows, row];
-    mcpDirty = true;
+    queueMcpSave();
     mcpError = null;
     nfName = nfCommand = nfArgs = nfEnv = nfUrl = nfHeaders = '';
     showMcpAdd = false;
@@ -200,7 +224,9 @@
 
   function removeMcpRow(i: number): void {
     mcpRows = mcpRows.filter((_, j) => j !== i);
-    mcpDirty = true;
+    if (mcpOpen === i) mcpOpen = null;
+    else if (mcpOpen !== null && mcpOpen > i) mcpOpen -= 1;
+    queueMcpSave();
   }
 
   function mcpKindSwitch(row: McpServerInfo, kind: 'stdio' | 'http'): void {
@@ -215,14 +241,30 @@
       row.args = [];
       row.env = {};
     }
-    mcpDirty = true;
+    queueMcpSave();
   }
 
-  async function saveMcp(): Promise<void> {
+  function queueMcpSave(): void {
+    mcpDirty = true;
+    if (mcpSaveTimer) clearTimeout(mcpSaveTimer);
+    mcpSaveTimer = setTimeout(() => void flushMcpSave(), 800);
+  }
+
+  async function flushMcpSave(): Promise<void> {
+    if (mcpSaveTimer) {
+      clearTimeout(mcpSaveTimer);
+      mcpSaveTimer = null;
+    }
+    if (mcpSaving) {
+      mcpSavePending = true;
+      return;
+    }
+    if (!inTauri) return;
+    const m = await import('../ipc');
+    mcpSaving = true;
     mcpBusy = true;
     mcpError = null;
     try {
-      const m = await import('../ipc');
       const configs: McpServerConfig[] = mcpRows.map((r) => ({
         name: r.name,
         kind: r.kind as 'stdio' | 'http',
@@ -233,21 +275,31 @@
         url: r.url ?? null,
         headers: r.headers ?? {},
       }));
-      mcpRows = await m.mcpSave(configs);
-      mcpDirty = false;
-      mcpOpen = null;
+      const saved = await m.mcpSave(configs);
+      // Merge only live status fields — edits made while the save was
+      // in flight stay untouched; a queued resave persists them next.
+      const byName = new Map(saved.map((s) => [s.name.toLowerCase(), s]));
+      mcpRows = mcpRows.map((r) => {
+        const s = byName.get(r.name.toLowerCase());
+        return s ? { ...r, state: s.state, tools: s.tools, info: s.info } : r;
+      });
+      mcpDirty = mcpSavePending;
     } catch (e) {
       mcpError = e instanceof Error ? e.message : String(e);
     } finally {
+      mcpSaving = false;
       mcpBusy = false;
+      if (mcpSavePending) {
+        mcpSavePending = false;
+        void flushMcpSave();
+      }
     }
   }
 
   function mcpStateLabel(row: McpServerInfo): string {
     if (row.state === 'connected') return `connected · ${row.tools} tool${row.tools === 1 ? '' : 's'}`;
-    if (row.state === 'connecting') return 'connecting…';
+    if (row.state === 'connecting' || row.state === 'new') return 'saving…';
     if (row.state === 'disabled') return 'disabled';
-    if (row.state === 'new') return 'unsaved';
     return 'error';
   }
 </script>
@@ -407,7 +459,7 @@
                 <span
                   class="mcp-dot"
                   class:dot-ok={row.state === 'connected'}
-                  class:dot-busy={row.state === 'connecting'}
+                  class:dot-busy={row.state === 'connecting' || row.state === 'new'}
                   class:dot-err={row.state === 'error'}
                   title={row.state}
                 ></span>
@@ -423,14 +475,14 @@
                   <input
                     type="checkbox"
                     bind:checked={row.enabled}
-                    onchange={() => (mcpDirty = true)}
+                    onchange={queueMcpSave}
                   />
                   on
                 </label>
                 <button
                   class="icon-btn"
-                  title={mcpOpen === row.name ? 'Close editor' : 'Edit server'}
-                  onclick={() => openMcpEditor(row.name)}
+                  title={mcpOpen === i ? 'Close editor' : 'Edit server'}
+                  onclick={() => openMcpEditor(i)}
                 >
                   <Icon name="edit" size={13} />
                 </button>
@@ -451,11 +503,11 @@
                 {#if row.info}<span class="mcp-info"> · {row.info}</span>{/if}
               </div>
 
-              {#if mcpOpen === row.name}
+              {#if mcpOpen === i}
                 <div class="mcp-editor">
                   <label class="fld">
                     <span class="fld-label">Name</span>
-                    <input class="input" bind:value={row.name} oninput={() => (mcpDirty = true)} />
+                    <input class="input" bind:value={row.name} oninput={queueMcpSave} />
                   </label>
                   <div class="fld">
                     <span class="fld-label">Transport</span>
@@ -479,7 +531,7 @@
                         class="input mono"
                         placeholder="npx"
                         bind:value={row.command}
-                        oninput={() => (mcpDirty = true)}
+                        oninput={queueMcpSave}
                       />
                     </label>
                     <label class="fld">
@@ -493,7 +545,7 @@
                             .trim()
                             .split(/\s+/)
                             .filter(Boolean);
-                          mcpDirty = true;
+                          queueMcpSave();
                         }}
                       />
                     </label>
@@ -505,7 +557,7 @@
                         bind:value={editEnv}
                         oninput={() => {
                           row.env = textToPairs(editEnv);
-                          mcpDirty = true;
+                          queueMcpSave();
                         }}
                       ></textarea>
                     </label>
@@ -516,7 +568,7 @@
                         class="input mono"
                         placeholder="http://localhost:3002/mcp"
                         bind:value={row.url}
-                        oninput={() => (mcpDirty = true)}
+                        oninput={queueMcpSave}
                       />
                     </label>
                     <label class="fld">
@@ -533,7 +585,7 @@
                               v,
                             ]),
                           );
-                          mcpDirty = true;
+                          queueMcpSave();
                         }}
                       ></textarea>
                     </label>
@@ -622,13 +674,13 @@
         </button>
       {/if}
 
-      {#if mcpDirty || mcpError}
+      {#if mcpDirty || mcpError || mcpBusy}
         <div class="mcp-foot">
           {#if mcpError}<span class="mcp-error">{mcpError}</span>{/if}
-          <button class="btn primary" disabled={mcpBusy || !mcpDirty} onclick={saveMcp}>
-            {mcpBusy ? 'Saving…' : 'Save MCP servers'}
+          <button class="btn primary" disabled={mcpBusy} onclick={() => void flushMcpSave()}>
+            {mcpBusy ? 'Saving…' : 'Save now'}
           </button>
-          {#if !mcpDirty && !mcpBusy}<span class="muted">no unsaved changes</span>{/if}
+          {#if !mcpDirty && !mcpBusy && !mcpError}<span class="muted">changes save automatically</span>{/if}
         </div>
       {/if}
     </section>

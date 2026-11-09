@@ -95,6 +95,18 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
         out.push(json!({"role": "system", "content": system}));
     }
     for m in &req.messages {
+        // An empty assistant turn (failed/odd round, possibly from
+        // another provider before a mid-session swap) carries nothing;
+        // several OpenAI-compatible servers 400 on it.
+        if let Message::Assistant {
+            content,
+            tool_calls,
+        } = m
+            && content.trim().is_empty()
+            && tool_calls.is_empty()
+        {
+            continue;
+        }
         out.push(match m {
             Message::User { content } => json!({"role": "user", "content": content}),
             Message::Assistant {

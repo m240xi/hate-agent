@@ -119,9 +119,33 @@ struct CountRequest {
     tools: Vec<Value>,
 }
 
+/// Anthropic's tool ids must match `^[a-zA-Z0-9_-]+$`; other providers
+/// mint ids like `functions.read_file:0` (Kimi). Map invalid chars to
+/// `_` — deterministic, so a `tool_use` and its `tool_result` still
+/// pair up after a mid-session provider swap.
+fn wire_tool_id(id: &str) -> String {
+    let s: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() { "tool".to_string() } else { s }
+}
+
 /// Convert core messages to Anthropic's shape. Consecutive `Tool`
 /// messages must collapse into ONE user message of `tool_result` blocks —
 /// the API rejects split results.
+///
+/// History may come from another provider (mid-session swap), so the
+/// conversion is defensive: empty/whitespace-only text is dropped
+/// (Anthropic 400s on empty text blocks), tool ids are sanitized, and
+/// when this request advertises no tools, prior tool traffic is
+/// rendered as text (Anthropic rejects `tool_use` blocks without tools).
 fn wire_messages(req: &ChatRequest) -> Vec<Value> {
     fn flush_results(out: &mut Vec<Value>, pending: &mut Vec<Value>) {
         if !pending.is_empty() {
@@ -129,49 +153,66 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
         }
     }
 
+    let tools_on = !req.tools.is_empty();
     let mut out: Vec<Value> = Vec::with_capacity(req.messages.len());
     let mut pending_results: Vec<Value> = Vec::new();
 
     for m in &req.messages {
         match m {
             Message::Tool {
-                call_id, content, ..
+                call_id,
+                name,
+                content,
             } => {
-                pending_results.push(json!({
-                    "type": "tool_result",
-                    "tool_use_id": call_id,
-                    "content": content,
-                }));
+                if tools_on {
+                    pending_results.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": wire_tool_id(call_id),
+                        "content": content,
+                    }));
+                } else {
+                    pending_results.push(json!({
+                        "type": "text",
+                        "text": format!("[tool result: {name}]\n{content}"),
+                    }));
+                }
             }
-            other => {
+            Message::User { content } => {
                 flush_results(&mut out, &mut pending_results);
-                out.push(match other {
-                    Message::User { content } => {
-                        json!({"role": "user", "content": content})
+                if !content.trim().is_empty() {
+                    out.push(json!({"role": "user", "content": content}));
+                }
+            }
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
+                flush_results(&mut out, &mut pending_results);
+                let mut blocks: Vec<Value> = Vec::new();
+                if !content.trim().is_empty() {
+                    blocks.push(json!({"type": "text", "text": content}));
+                }
+                for c in tool_calls {
+                    if tools_on {
+                        blocks.push(json!({
+                            "type": "tool_use",
+                            "id": wire_tool_id(&c.id),
+                            "name": c.name.as_str(),
+                            "input": c.args,
+                        }));
+                    } else {
+                        blocks.push(json!({
+                            "type": "text",
+                            "text": format!("[called tool: {} {}]", c.name.as_str(), c.args),
+                        }));
                     }
-                    Message::Assistant {
-                        content,
-                        tool_calls,
-                    } => {
-                        let mut blocks: Vec<Value> = Vec::new();
-                        if !content.is_empty() {
-                            blocks.push(json!({"type": "text", "text": content}));
-                        }
-                        for c in tool_calls {
-                            blocks.push(json!({
-                                "type": "tool_use",
-                                "id": c.id,
-                                "name": c.name.as_str(),
-                                "input": c.args,
-                            }));
-                        }
-                        if blocks.is_empty() {
-                            blocks.push(json!({"type": "text", "text": ""}));
-                        }
-                        json!({"role": "assistant", "content": blocks})
-                    }
-                    Message::Tool { .. } => unreachable!("handled above"),
-                });
+                }
+                // An empty assistant turn (failed/odd round from another
+                // provider) carries nothing — drop it rather than send an
+                // empty text block.
+                if !blocks.is_empty() {
+                    out.push(json!({"role": "assistant", "content": blocks}));
+                }
             }
         }
     }
@@ -804,5 +845,60 @@ mod tests {
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
         // No tools → no tool breakpoint.
         assert_eq!(wire_tools(&r.tools).len(), 0);
+    }
+
+    /// History inherited from another provider after a mid-session
+    /// swap: foreign tool ids, empty assistant turns, blank user turns.
+    #[test]
+    fn foreign_history_is_wire_safe() {
+        let foreign = "functions.bash:0";
+        let messages = vec![
+            Message::User {
+                content: "run it".to_string(),
+            },
+            Message::Assistant {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: foreign.to_string(),
+                    name: ToolName::new("bash"),
+                    args: serde_json::json!({"command": "ls"}),
+                }],
+            },
+            Message::Tool {
+                call_id: foreign.to_string(),
+                name: "bash".to_string(),
+                content: "ok".to_string(),
+            },
+            Message::Assistant {
+                content: "  ".to_string(),
+                tool_calls: Vec::new(),
+            },
+            Message::User {
+                content: String::new(),
+            },
+            Message::User {
+                content: "next".to_string(),
+            },
+        ];
+
+        let msgs = wire_messages(&req(messages.clone(), vec![bash_spec()]));
+        let json = serde_json::to_string(&msgs).unwrap();
+        assert!(
+            !json.contains("functions.bash:0"),
+            "invalid id leaked: {json}"
+        );
+        assert_eq!(msgs[1]["content"][0]["id"], "functions_bash_0");
+        assert_eq!(msgs[2]["content"][0]["tool_use_id"], "functions_bash_0");
+        // Empty assistant + blank user dropped: user, assistant(tool),
+        // user(result), user("next").
+        assert_eq!(msgs.len(), 4);
+        assert!(!json.contains(r#""text":"""#), "empty text block: {json}");
+
+        // Same history, no tools advertised → tool traffic as text.
+        let msgs = wire_messages(&req(messages, Vec::new()));
+        let json = serde_json::to_string(&msgs).unwrap();
+        assert!(!json.contains("tool_use"), "tool_use without tools: {json}");
+        assert!(json.contains("[called tool: bash"));
+        assert!(json.contains("[tool result: bash]"));
     }
 }

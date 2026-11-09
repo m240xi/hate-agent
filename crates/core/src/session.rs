@@ -13,6 +13,7 @@
 //! waiting tool loop.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -494,6 +495,18 @@ impl Actor {
             out.push_str("\n\n");
             out.push_str(&store.render_prompt(&self.signals));
         }
+        // Runtime identity — last, so the static prefix above stays
+        // cache-stable; it only changes on a model switch, which is a
+        // cache miss anyway (caches are per-model). Without it, models
+        // guess (distilled ones claim to be Claude/GPT) and parrot
+        // self-descriptions left in history by an earlier model.
+        let _ = write!(
+            out,
+            "\n\n## Runtime\nYou are the model `{}`, served via the `{}` provider. If asked which \
+             model you are, answer with exactly that. Earlier replies in this conversation may \
+             have come from a different model — never repeat their self-descriptions.",
+            self.cfg.model, self.cfg.provider_name
+        );
         out
     }
 

@@ -1094,3 +1094,50 @@ async fn set_provider_swaps_adapter_mid_session() {
     }
     assert_eq!(text, "from-b", "turn 2 must run on the swapped adapter");
 }
+
+/// The system prompt names the running model, and the name follows a
+/// mid-session provider swap — otherwise models guess their identity
+/// or parrot an earlier model's self-description from history.
+#[tokio::test]
+async fn system_prompt_names_current_model_after_swap() {
+    let systems = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let make = |systems: &Arc<std::sync::Mutex<Vec<Option<String>>>>| -> Arc<dyn Provider> {
+        Arc::new(CaptureSystem {
+            script: vec![Delta::Text("ok".to_string()), Delta::Done],
+            systems: systems.clone(),
+        })
+    };
+    let session = spawn_session(SessionConfig {
+        provider: make(&systems),
+        model: "deepseek/deepseek-v4-flash".to_string(),
+        provider_name: "nous".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: None,
+        mcp: None,
+        skills: None,
+        auto_skills: false,
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        context_window: 0,
+    });
+    let mut rx = session.subscribe();
+    drive_turn(&session, &mut rx, "which model are you?").await;
+
+    session
+        .command(Command::SetProvider {
+            provider: make(&systems),
+            provider_name: "claude".to_string(),
+            model: Some("claude-sonnet-5".to_string()),
+        })
+        .expect("set provider");
+    drive_turn(&session, &mut rx, "and now?").await;
+
+    let seen = systems.lock().unwrap().clone();
+    let first = seen[0].clone().expect("system 1");
+    let second = seen[1].clone().expect("system 2");
+    assert!(first.contains("`deepseek/deepseek-v4-flash`, served via the `nous` provider"));
+    assert!(second.contains("`claude-sonnet-5`, served via the `claude` provider"));
+    assert!(!second.contains("deepseek-v4-flash"));
+}

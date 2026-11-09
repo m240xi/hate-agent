@@ -180,7 +180,12 @@ class SessionStore {
 
   /** Catalog row for the active model (undefined until models load). */
   get selectedModel(): ProviderModel | undefined {
-    return this.models.find((m) => m.id === this.model);
+    // Provider-aware: two providers can list the same id (e.g. an
+    // aggregator mirroring a vendor catalog).
+    return (
+      this.models.find((m) => m.id === this.model && m.provider === this.providerName) ??
+      this.models.find((m) => m.id === this.model)
+    );
   }
 
   /** Context window to measure `ctxUsed` against — real catalog value
@@ -378,40 +383,85 @@ class SessionStore {
    *  hot-swaps the live session. `provider` tags catalog rows from the
    *  multi-provider fan-out; a pick from a *different* provider swaps
    *  the session's adapter too (adapters are stateless), so it applies
-   *  from the next turn with no respawn. */
+   *  from the next turn with no respawn.
+   *
+   *  Transactional: the UI's provider/model only change once the
+   *  backend has accepted the swap. If the provider can't be reached
+   *  (logged out, removed), the pick is refused with a visible note and
+   *  nothing moves — UI and session can never disagree. */
   async setModel(id: string, provider?: string | null): Promise<void> {
-    if (!id || (id === this.model && (!provider || provider === this.providerName)))
+    const target = provider || this.providerName;
+    if (!id || (id === this.model && target === this.providerName)) return;
+    if (!inTauri()) {
+      this.model = id;
+      if (target) this.providerName = this.provider = target;
       return;
-    const target = provider ?? this.providerName;
-    this.model = id;
-    if (!inTauri()) return;
+    }
     const m = await import('./ipc');
-    if (target && target !== this.providerName) {
+    const crossProvider = !!target && target !== this.providerName;
+    if (crossProvider) {
+      try {
+        // Adapter + model swap as ONE backend operation — a model id
+        // must never ride into a session running another provider.
+        await m.sessionSetProvider(target, id);
+      } catch (e) {
+        this.blocks.push({
+          id: nextBlockId++,
+          kind: 'error',
+          text: `couldn't switch to ${target}: ${e instanceof Error ? e.message : String(e)} — still on ${this.providerName}`,
+        });
+        return;
+      }
       this.providerName = target;
       this.provider = target;
-      await m.providerSetModel(target, id).catch(() => {});
-      // Swap the live session's adapter + model together — never let a
-      // model id ride into a session running a different provider.
-      await m.sessionSetProvider(target, id).catch(() => {});
-      await m
-        .sessionSetOptions(id, null, this.selectedModel?.context_tokens ?? null)
-        .catch(() => {});
-      this.blocks.push({
-        id: nextBlockId++,
-        kind: 'text',
-        text: `provider switched to ${target}`,
-        streaming: false,
-      });
-      this.scheduleUiSave();
-      return;
+      // The backend also made `target` the default provider.
+      this.providers = this.providers.map((p) => ({ ...p, is_default: p.name === target }));
     }
-    if (this.providerName) {
-      await m.providerSetModel(this.providerName, id).catch(() => {});
-    }
+    this.model = id;
+    await m.providerSetModel(target, id).catch(() => {});
     await m
       .sessionSetOptions(id, null, this.selectedModel?.context_tokens ?? null)
       .catch(() => {});
+    if (crossProvider) {
+      this.blocks.push({
+        id: nextBlockId++,
+        kind: 'text',
+        text: `switched to ${target} · ${this.selectedModel?.name ?? id}`,
+        streaming: false,
+      });
+    }
     this.scheduleUiSave();
+  }
+
+  /** Push the UI's provider + model to the backend slot as one unit —
+   *  used whenever a session is primed (new/opened) so the next spawn
+   *  runs exactly the pair the composer shows. If the provider is
+   *  unusable, fall back to the configured default rather than leave
+   *  the UI showing a pair the backend won't run. */
+  private async syncSelection(m: typeof import('./ipc')): Promise<void> {
+    if (this.providerName) {
+      try {
+        await m.sessionSetProvider(this.providerName, this.model || null);
+      } catch (e) {
+        const def = this.providers.find((p) => p.is_default) ?? this.providers[0];
+        this.blocks.push({
+          id: nextBlockId++,
+          kind: 'error',
+          text: `${this.providerName} unavailable: ${e instanceof Error ? e.message : String(e)}${def ? ` — using ${def.name}` : ''}`,
+        });
+        if (def) {
+          this.providerName = this.provider = def.name;
+          this.model = def.model;
+        }
+      }
+    }
+    await m
+      .sessionSetOptions(
+        this.model || null,
+        this.thinkingLevel,
+        this.selectedModel?.context_tokens ?? null,
+      )
+      .catch(() => {});
   }
 
   /** Pick a thinking level — applies next turn, persisted locally. */
@@ -444,7 +494,9 @@ class SessionStore {
   async cycleModel(): Promise<void> {
     const list = this.models;
     if (list.length === 0) return;
-    const i = list.findIndex((m) => m.id === this.model);
+    const i = list.findIndex(
+      (m) => m.id === this.model && (!m.provider || m.provider === this.providerName),
+    );
     const next = list[(i + 1) % list.length];
     if (next) await this.setModel(next.id, next.provider);
   }
@@ -529,15 +581,9 @@ class SessionStore {
         void m.workspaceSet(res.meta.workspace).catch(() => {});
         void this.refreshIndex();
       }
-      // Hand the session's model/thinking to the backend slot so the
-      // next spawn uses them (live swaps also go through set_options).
-      void m
-        .sessionSetOptions(
-          this.model || null,
-          this.thinkingLevel,
-          this.selectedModel?.context_tokens ?? null,
-        )
-        .catch(() => {});
+      // Hand the session's provider + model + thinking to the backend
+      // slot as one unit so the next spawn runs what the UI shows.
+      await this.syncSelection(m);
       localStorage.setItem(`hate:session:${res.meta.mode}`, id);
       this.pickerMode = null;
       void this.refreshSessions(res.meta.mode as SessionMode);
@@ -560,13 +606,9 @@ class SessionStore {
       this.sessionId = meta.id;
       this.sessionMeta = meta;
       this.resetConversation();
-      void m
-        .sessionSetOptions(
-          this.model || null,
-          this.thinkingLevel,
-          this.selectedModel?.context_tokens ?? null,
-        )
-        .catch(() => {});
+      // A fresh slot falls back to the default provider — pin it to the
+      // pair the composer shows instead.
+      await this.syncSelection(m);
       localStorage.setItem(`hate:session:${meta.mode}`, meta.id);
       this.pickerMode = null;
       void this.refreshSessions(meta.mode);

@@ -9,6 +9,15 @@
   // elapsed, cumulative tokens) — the Claude-Code-style status line.
   let query = $state('');
   let highlightId = $state('');
+
+  /** Row identity = provider + id: two providers can list the same id. */
+  function rowKey(m: ProviderModel): string {
+    return `${m.provider ?? ''}::${m.id}`;
+  }
+
+  function isSelected(m: ProviderModel): boolean {
+    return m.id === session.model && (!m.provider || m.provider === session.providerName);
+  }
   let panelOpen = $state(false);
   let now = $state(Date.now());
 
@@ -119,7 +128,7 @@
   // filtered list changes.
   $effect(() => {
     void query;
-    highlightId = flat[0]?.id ?? '';
+    highlightId = flat[0] ? rowKey(flat[0]) : '';
   });
 
   // Live elapsed clock — only ticks while the panel is open.
@@ -191,18 +200,18 @@
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
       if (flat.length === 0) return;
-      const i = flat.findIndex((m) => m.id === highlightId);
+      const i = flat.findIndex((m) => rowKey(m) === highlightId);
       const next =
         e.key === 'ArrowDown'
           ? flat[(i + 1) % flat.length]
           : flat[(i - 1 + flat.length) % flat.length];
-      highlightId = next?.id ?? highlightId;
+      highlightId = next ? rowKey(next) : highlightId;
       document
-        .getElementById(`mp-row-${CSS.escape(highlightId)}`)
+        .getElementById(`mp-row-${highlightId}`)
         ?.scrollIntoView({ block: 'nearest' });
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      const m = flat.find((x) => x.id === highlightId) ?? flat[0];
+      const m = flat.find((x) => rowKey(x) === highlightId) ?? flat[0];
       if (m) void session.setModel(m.id, m.provider);
     }
   }
@@ -240,18 +249,18 @@
             {/if}
             {#each vg.items as m (m.id)}
               <button
-                id="mp-row-{m.id}"
+                id="mp-row-{rowKey(m)}"
                 type="button"
                 class="mp-row"
-                class:selected={m.id === session.model}
-                class:highlighted={m.id === highlightId}
+                class:selected={isSelected(m)}
+                class:highlighted={rowKey(m) === highlightId}
                 role="option"
-                aria-selected={m.id === session.model}
+                aria-selected={isSelected(m)}
                 onclick={() => {
                   void session.setModel(m.id, m.provider);
                   close();
                 }}
-                onmouseenter={() => (highlightId = m.id)}
+                onmouseenter={() => (highlightId = rowKey(m))}
               >
                 <span class="mp-main">
                   <span class="mp-name">{displayName(m)}</span>

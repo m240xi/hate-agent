@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use hate_context::O200kCounter;
 use rmcp::ServiceExt;
@@ -22,6 +22,7 @@ pub const MCP_PREFIX: &str = "mcp__";
 const CALL_TIMEOUT: Duration = Duration::from_secs(180);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SERVERS: usize = 16;
+const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_TOOLS_PER_SERVER: usize = 48;
 const DESC_CHARS: usize = 220;
 const SCHEMA_TEXT_CHARS: usize = 140;
@@ -100,6 +101,7 @@ pub struct McpHub {
     configs: RwLock<Vec<McpServerConfig>>,
     reload: tokio::sync::Mutex<()>,
     configuring: std::sync::atomic::AtomicUsize,
+    last_sweep: Mutex<Option<Instant>>,
     counter: O200kCounter,
 }
 
@@ -110,6 +112,7 @@ impl McpHub {
             configs: RwLock::new(Vec::new()),
             reload: tokio::sync::Mutex::new(()),
             configuring: std::sync::atomic::AtomicUsize::new(0),
+            last_sweep: Mutex::new(None),
             counter: O200kCounter::new().expect("o200k tokenizer init"),
         }
     }
@@ -166,6 +169,73 @@ impl McpHub {
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         *self.servers.write().expect("mcp servers poisoned") =
             results.into_iter().flatten().collect();
+    }
+
+    fn is_live(&self, name: &str) -> bool {
+        self.servers
+            .read()
+            .expect("mcp servers poisoned")
+            .iter()
+            .any(|s| s.name == name && !s.tools.is_empty())
+    }
+
+    /// Retry enabled servers that aren't live yet. Servers can appear
+    /// after the app starts (Roblox Studio launches later, a proxy takes
+    /// time to expose tools), so the hub re-checks on demand instead of
+    /// only at configure time. Throttled: returns `false` when a sweep
+    /// ran within [`SWEEP_INTERVAL`].
+    pub async fn ensure_live(&self, force: bool) -> bool {
+        {
+            let mut last = self.last_sweep.lock().expect("sweep poisoned");
+            let now = Instant::now();
+            if !force && last.is_some_and(|t| now.duration_since(t) < SWEEP_INTERVAL) {
+                return false;
+            }
+            *last = Some(now);
+        }
+        let missing: Vec<McpServerConfig> = self
+            .configs()
+            .into_iter()
+            .filter(|c| c.enabled && !self.is_live(&c.name))
+            .take(MAX_SERVERS)
+            .collect();
+        if missing.is_empty() {
+            return false;
+        }
+        let _guard = self.reload.lock().await;
+        self.configuring
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let results = futures_util::future::join_all(missing.iter().map(|cfg| async move {
+            match tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await {
+                Ok(Ok(s)) => Some(s),
+                Ok(Err(e)) => {
+                    tracing::debug!(server = %cfg.name, error = %e, "mcp retry failed");
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!(server = %cfg.name, "mcp retry timed out");
+                    None
+                }
+            }
+        }))
+        .await;
+        self.configuring
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        let mut servers = self.servers.write().expect("mcp servers poisoned");
+        for s in results.into_iter().flatten() {
+            servers.retain(|x| x.name != s.name);
+            servers.push(s);
+        }
+        true
+    }
+
+    /// Fire-and-forget sweep for hot paths (turn start): never blocks
+    /// the turn, the new tools show up on the next one.
+    pub fn kick_refresh(self: &Arc<Self>) {
+        let hub = Arc::clone(self);
+        tokio::spawn(async move {
+            hub.ensure_live(false).await;
+        });
     }
 
     pub fn configs(&self) -> Vec<McpServerConfig> {

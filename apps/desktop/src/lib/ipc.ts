@@ -268,6 +268,10 @@ export async function mcpList(): Promise<McpServerInfo[]> {
   return invoke<McpServerInfo[]>('mcp_list');
 }
 
+export async function mcpRefresh(): Promise<McpServerInfo[]> {
+  return invoke<McpServerInfo[]>('mcp_refresh');
+}
+
 export async function mcpSave(servers: McpServerConfig[]): Promise<McpServerInfo[]> {
   return invoke<McpServerInfo[]>('mcp_save', { servers });
 }

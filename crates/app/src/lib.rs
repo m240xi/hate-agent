@@ -1,5 +1,4 @@
 #![deny(unsafe_code)]
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
 mod sessions_db;
@@ -41,6 +40,7 @@ pub fn run() {
         commands::workspace_pick,
         commands::workspace_index,
         commands::mcp_list,
+        commands::mcp_refresh,
         commands::mcp_save,
         commands::sessions_list,
         commands::session_new,

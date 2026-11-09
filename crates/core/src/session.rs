@@ -341,6 +341,7 @@ impl Actor {
             .map(|t| t.specs())
             .unwrap_or_default();
         if let Some(hub) = self.cfg.mcp.as_ref() {
+            hub.kick_refresh();
             specs.extend(hub.specs());
         }
         match force_compact(&mut self.history, &system, &specs) {
@@ -902,6 +903,7 @@ async fn run_turn(
 
     let mut specs = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
     if let Some(hub) = mcp.as_ref() {
+        hub.kick_refresh();
         specs.extend(hub.specs());
     }
     if let Some(store) = skills.as_ref() {

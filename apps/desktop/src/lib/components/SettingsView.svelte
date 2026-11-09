@@ -93,6 +93,10 @@
       mcpSaveTimer = null;
     }
     if (mcpDirty && inTauri) void flushMcpSave();
+    if (mcpPoll) {
+      clearInterval(mcpPoll);
+      mcpPoll = null;
+    }
   });
 
   async function connectNous(): Promise<void> {
@@ -237,6 +241,7 @@
   let showMcpAdd = $state(false);
 
   let mcpSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let mcpPoll: ReturnType<typeof setInterval> | null = null;
   let mcpSaving = false;
   let mcpSavePending = false;
 
@@ -284,6 +289,29 @@
     const m = await import('../ipc');
     mcpRows = await m.mcpList().catch(() => []);
     mcpLoaded = true;
+    if (!mcpPoll) mcpPoll = setInterval(() => void pollMcp(), 8000);
+  }
+
+  async function pollMcp(): Promise<void> {
+    if (!inTauri || mcpDirty || mcpBusy) return;
+    const m = await import('../ipc');
+    const rows = await m.mcpList().catch(() => null);
+    if (!rows) return;
+    mcpRows = mcpRows.map((row) => {
+      const live = rows.find((r) => r.name === row.name);
+      return live ? { ...row, state: live.state, tools: live.tools, info: live.info } : row;
+    });
+  }
+
+  async function refreshMcp(): Promise<void> {
+    if (!inTauri) return;
+    mcpBusy = true;
+    try {
+      const m = await import('../ipc');
+      mcpRows = await m.mcpRefresh();
+    } finally {
+      mcpBusy = false;
+    }
   }
 
   function openMcpEditor(i: number): void {
@@ -685,7 +713,15 @@
     </section>
 
     <section class="group">
-      <h2 class="group-title">MCP servers</h2>
+      <h2 class="group-title">
+        MCP servers
+        <button
+          class="btn ghost mcp-refresh"
+          onclick={() => void refreshMcp()}
+          disabled={mcpBusy}
+          title="Reconnect servers that aren't up yet — e.g. an app that started after hate-agent"
+        >{mcpBusy ? 'reconnecting…' : 'refresh'}</button>
+      </h2>
       <p class="group-hint muted">
         Model Context Protocol tools — stdio commands and HTTP endpoints.
         Their tools reach the agent as <code class="mono">mcp__server__tool</code>;
@@ -1400,6 +1436,12 @@
   }
   .mcp-row.mcp-off {
     opacity: 0.55;
+  }
+  .mcp-refresh {
+    font-size: 11px;
+    padding: 2px 8px;
+    margin-left: 8px;
+    vertical-align: middle;
   }
   .mcp-head {
     display: flex;

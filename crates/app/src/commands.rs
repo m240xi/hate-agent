@@ -1251,6 +1251,13 @@ pub fn mcp_list(state: State<'_, McpState>) -> Vec<McpServerInfo> {
 
 #[tauri::command]
 #[specta::specta]
+pub async fn mcp_refresh(state: State<'_, McpState>) -> Result<Vec<McpServerInfo>, String> {
+    state.hub.ensure_live(true).await;
+    Ok(mcp_rows(&state))
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn mcp_save(
     state: State<'_, McpState>,
     servers: Vec<McpServerConfigDto>,

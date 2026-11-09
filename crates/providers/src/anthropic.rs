@@ -371,6 +371,7 @@ impl Provider for AnthropicProvider {
                 out.extend(body.data.into_iter().map(|e| ModelInfo {
                     id: e.id.clone(),
                     name: e.display_name.or(Some(e.id)),
+                    meta: None, // Anthropic's catalog doesn't publish pricing/context
                 }));
                 if body.has_more {
                     match last {

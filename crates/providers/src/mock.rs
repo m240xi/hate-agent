@@ -109,6 +109,7 @@ impl Provider for MockProvider {
             Ok(vec![ModelInfo {
                 id: "mock-model".to_string(),
                 name: Some("Mock model".to_string()),
+                meta: None,
             }])
         })
     }

@@ -407,13 +407,30 @@ pub fn providers_list() -> Result<Vec<ProviderInfo>, String> {
     Ok(out)
 }
 
-/// One model entry for the composer dropdown.
+/// One model entry for the composer picker — catalog metadata
+/// flattened so the frontend gets a flat row shape.
 #[derive(Debug, Clone, serde::Serialize, Type)]
 pub struct ProviderModel {
     /// Provider-side model id (`moonshotai/kimi-k3`, …).
     pub id: String,
     /// Display name when the provider supplies one.
     pub name: Option<String>,
+    /// Context window in tokens, when published.
+    pub context_tokens: Option<u32>,
+    /// USD per 1M input tokens, when priced.
+    pub price_in_mtok: Option<f64>,
+    /// USD per 1M output tokens, when priced.
+    pub price_out_mtok: Option<f64>,
+    /// USD per 1M cached-input tokens, when priced.
+    pub price_cache_mtok: Option<f64>,
+    /// Reasoning effort strings the model accepts.
+    pub reasoning_efforts: Vec<String>,
+    /// Provider's default reasoning effort.
+    pub default_effort: Option<String>,
+    /// Endpoint says tool calls are supported.
+    pub supports_tools: Option<bool>,
+    /// Endpoint says image input is supported.
+    pub supports_vision: Option<bool>,
 }
 
 /// List models the resolved provider's credential can access — drives
@@ -427,9 +444,20 @@ pub async fn models_list(provider: Option<String>) -> Result<Vec<ProviderModel>,
     let models = provider.list_models().await.map_err(|e| e.to_string())?;
     Ok(models
         .into_iter()
-        .map(|m| ProviderModel {
-            id: m.id,
-            name: m.name,
+        .map(|m| {
+            let meta = m.meta.unwrap_or_default();
+            ProviderModel {
+                id: m.id,
+                name: m.name,
+                context_tokens: meta.context_tokens,
+                price_in_mtok: meta.price_in_mtok,
+                price_out_mtok: meta.price_out_mtok,
+                price_cache_mtok: meta.price_cache_mtok,
+                reasoning_efforts: meta.reasoning_efforts,
+                default_effort: meta.default_effort,
+                supports_tools: meta.supports_tools,
+                supports_vision: meta.supports_vision,
+            }
         })
         .collect())
 }

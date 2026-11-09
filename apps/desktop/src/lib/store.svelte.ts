@@ -93,6 +93,16 @@ class SessionStore {
   modelsError = $state('');
   thinkingLevel = $state<ThinkingLevel>('off');
 
+  // ── session stats (Claude-Code-style status line) ───────────────────────
+  /** User messages sent this session — the turn counter. */
+  sessionTurns = $state(0);
+  /** First-send timestamp; `null` before the session starts. */
+  sessionBeganAt = $state<number | null>(null);
+  /** Cumulative token spend across completed turns. */
+  sessionTotals = $state<TokenUsage>({ input: 0, cached_input: 0, output: 0, thinking: 0 });
+  /** Prompt tokens of the most recent request — the live context fill. */
+  ctxUsed = $state(0);
+
   // ── composer / permission ───────────────────────────────────────────────
   draft = $state('');
   pendingPermission = $state<PermissionRequest | null>(null);
@@ -118,6 +128,22 @@ class SessionStore {
 
   get running(): boolean {
     return this.sessionState === 'running';
+  }
+
+  /** Catalog row for the active model (undefined until models load). */
+  get selectedModel(): ProviderModel | undefined {
+    return this.models.find((m) => m.id === this.model);
+  }
+
+  /** Context window to measure `ctxUsed` against — real catalog value
+   *  when known, else the conservative default. */
+  get ctxLimit(): number {
+    return this.selectedModel?.context_tokens ?? this.budgetTokens;
+  }
+
+  /** 0..1 fill of the current context window. */
+  get ctxRatio(): number {
+    return this.ctxLimit > 0 ? Math.min(1, this.ctxUsed / this.ctxLimit) : 0;
   }
 
   /** Wire the event stream. Called once on app mount. */
@@ -190,6 +216,8 @@ class SessionStore {
     this.draft = '';
     this.blocks.push({ id: nextBlockId++, kind: 'user', text });
     this.sessionState = 'running';
+    this.sessionTurns += 1;
+    this.sessionBeganAt ??= Date.now();
     this.finishStreamingBlocks();
 
     if (!inTauri()) {
@@ -268,6 +296,10 @@ class SessionStore {
   clearTranscript(): void {
     this.blocks = [];
     nextBlockId = 1;
+    this.sessionTurns = 0;
+    this.sessionBeganAt = null;
+    this.sessionTotals = { input: 0, cached_input: 0, output: 0, thinking: 0 };
+    this.ctxUsed = 0;
   }
 
   setMode(mode: AppMode): void {
@@ -340,6 +372,8 @@ class SessionStore {
         break;
       case 'tokens_counted':
         this.usage = { ...e.usage };
+        // Per-request prompt size — the live context-window fill.
+        this.ctxUsed = e.usage.input;
         this.recomputeDerived();
         break;
       case 'compaction_started':
@@ -353,6 +387,11 @@ class SessionStore {
         break;
       case 'turn_complete':
         this.usage = { ...e.outcome.usage };
+        const t = this.sessionTotals;
+        t.input += e.outcome.usage.input;
+        t.cached_input += e.outcome.usage.cached_input;
+        t.output += e.outcome.usage.output;
+        t.thinking += e.outcome.usage.thinking;
         this.costUsd = e.outcome.cost_usd ?? this.costUsd;
         this.recomputeDerived();
         this.sessionState = 'done';

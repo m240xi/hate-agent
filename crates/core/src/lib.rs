@@ -15,7 +15,7 @@ mod types;
 pub use event::{AgentError, Event};
 pub use provider::{
     BoxFuture, CacheMode, Capabilities, ChatRequest, CredentialSource, Delta, Message, ModelInfo,
-    Provider, ProviderError, ThinkingLevel, ToolSpec,
+    ModelMeta, Provider, ProviderError, ThinkingLevel, ToolSpec,
 };
 pub use session::{
     Command, Limits, SessionConfig, SessionError, SessionHandle, SessionSnapshot, spawn_session,

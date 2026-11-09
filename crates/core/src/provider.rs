@@ -223,6 +223,36 @@ pub struct ModelInfo {
     pub id: String,
     /// Human-readable name when the provider supplies one.
     pub name: Option<String>,
+    /// Provider-reported extras (context window, pricing, effort
+    /// vocabulary). `None` when the endpoint doesn't publish them —
+    /// the UI hides what it doesn't know rather than guessing.
+    #[serde(default)]
+    pub meta: Option<ModelMeta>,
+}
+
+/// Catalog metadata a provider may publish per model. Every field is
+/// optional: routers like Nous Portal fill all of them, plain
+/// OpenAI-compatible `/models` endpoints fill none.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelMeta {
+    /// Context window size in tokens.
+    pub context_tokens: Option<u32>,
+    /// USD per 1M input (prompt) tokens.
+    pub price_in_mtok: Option<f64>,
+    /// USD per 1M output (completion) tokens.
+    pub price_out_mtok: Option<f64>,
+    /// USD per 1M cached-input tokens, when reported separately.
+    pub price_cache_mtok: Option<f64>,
+    /// Reasoning effort strings the model accepts (`low`, `high`,
+    /// `max`, …). Empty = provider didn't say.
+    #[serde(default)]
+    pub reasoning_efforts: Vec<String>,
+    /// The effort the provider defaults to.
+    pub default_effort: Option<String>,
+    /// Endpoint says the model supports tool calls.
+    pub supports_tools: Option<bool>,
+    /// Endpoint says the model accepts image input.
+    pub supports_vision: Option<bool>,
 }
 
 /// Where a provider gets its bearer credential. Implemented by `hate-auth`

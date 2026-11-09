@@ -36,6 +36,16 @@ export async function sessionSetOptions(
 export interface ProviderModel {
   id: string;
   name: string | null;
+  context_tokens: number | null;
+  /** USD per 1M tokens; null when the provider doesn't publish pricing. */
+  price_in_mtok: number | null;
+  price_out_mtok: number | null;
+  price_cache_mtok: number | null;
+  /** Reasoning effort strings the model accepts (e.g. low/high/max). */
+  reasoning_efforts: string[];
+  default_effort: string | null;
+  supports_tools: boolean | null;
+  supports_vision: boolean | null;
 }
 
 export async function modelsList(provider?: string): Promise<ProviderModel[]> {

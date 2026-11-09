@@ -211,9 +211,53 @@ struct ModelsResponse {
     data: Vec<ModelListEntry>,
 }
 
+/// OpenRouter-shaped catalog entry — plain `OpenAI` `/models` endpoints
+/// only fill `id`; routers (Nous Portal) publish the rest.
 #[derive(Debug, Deserialize)]
 struct ModelListEntry {
     id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    context_length: Option<u64>,
+    #[serde(default)]
+    pricing: Option<EntryPricing>,
+    #[serde(default)]
+    reasoning: Option<EntryReasoning>,
+    #[serde(default)]
+    supported_parameters: Option<Vec<String>>,
+    #[serde(default)]
+    architecture: Option<EntryArchitecture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EntryPricing {
+    /// USD per *token* as a decimal string.
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    completion: Option<String>,
+    #[serde(default)]
+    input_cache_read: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EntryReasoning {
+    #[serde(default)]
+    supported_efforts: Vec<String>,
+    #[serde(default)]
+    default_effort: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EntryArchitecture {
+    #[serde(default)]
+    input_modalities: Vec<String>,
+}
+
+/// Per-token USD string → USD per 1M tokens. `None` on absent/garbage.
+fn price_per_mtok(raw: Option<&str>) -> Option<f64> {
+    raw?.parse::<f64>().ok().map(|v| v * 1_000_000.0)
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,9 +401,52 @@ impl Provider for OpenAiCompatProvider {
             Ok(body
                 .data
                 .into_iter()
-                .map(|m| ModelInfo {
-                    id: m.id.clone(),
-                    name: Some(m.id),
+                .map(|m| {
+                    let tools = m
+                        .supported_parameters
+                        .as_ref()
+                        .is_some_and(|p| p.iter().any(|s| s == "tools"));
+                    let vision = m
+                        .architecture
+                        .as_ref()
+                        .is_some_and(|a| a.input_modalities.iter().any(|s| s == "image"));
+                    let has_catalog_meta = m.pricing.is_some()
+                        || m.context_length.is_some()
+                        || m.reasoning.is_some()
+                        || m.supported_parameters.is_some()
+                        || m.architecture.is_some();
+                    ModelInfo {
+                        name: m.name.clone().or_else(|| Some(m.id.clone())),
+                        meta: has_catalog_meta.then(|| hate_core::ModelMeta {
+                            context_tokens: m
+                                .context_length
+                                .map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+                            price_in_mtok: m
+                                .pricing
+                                .as_ref()
+                                .and_then(|p| price_per_mtok(p.prompt.as_deref())),
+                            price_out_mtok: m
+                                .pricing
+                                .as_ref()
+                                .and_then(|p| price_per_mtok(p.completion.as_deref())),
+                            price_cache_mtok: m
+                                .pricing
+                                .as_ref()
+                                .and_then(|p| price_per_mtok(p.input_cache_read.as_deref())),
+                            reasoning_efforts: m
+                                .reasoning
+                                .as_ref()
+                                .map(|r| r.supported_efforts.clone())
+                                .unwrap_or_default(),
+                            default_effort: m
+                                .reasoning
+                                .as_ref()
+                                .and_then(|r| r.default_effort.clone()),
+                            supports_tools: m.supported_parameters.as_ref().map(|_| tools),
+                            supports_vision: m.architecture.as_ref().map(|_| vision),
+                        }),
+                        id: m.id,
+                    }
                 })
                 .collect())
         })

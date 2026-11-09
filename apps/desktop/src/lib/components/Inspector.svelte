@@ -8,8 +8,45 @@
     return String(n);
   }
 
-  // Task inspector: plan steps, live token/cost meter against budget,
-  // checkpoints, changed files. Pure consumer of SessionStore.
+  function fmtCtx(n: number | null | undefined): string {
+    if (n == null) return '—';
+    if (n >= 1_000_000) {
+      const m = n / 1_000_000;
+      return `${m >= 10 ? Math.round(m) : m.toFixed(1)}M`;
+    }
+    if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+    return String(n);
+  }
+
+  // Session clock — ticks only while a session is live.
+  let now = $state(Date.now());
+  $effect(() => {
+    if (session.sessionBeganAt === null) return;
+    const t = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(t);
+  });
+
+  const elapsed = $derived(
+    session.sessionBeganAt === null ? '—' : fmtElapsed(now - session.sessionBeganAt),
+  );
+
+  function fmtElapsed(ms: number): string {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    const mm = String(m).padStart(2, '0');
+    const ss = String(sec).padStart(2, '0');
+    return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
+  }
+
+  const sessionTokTotal = $derived(
+    session.sessionTotals.input + session.sessionTotals.output,
+  );
+
+  // Task inspector: plan steps, live token/cost meter against the model's
+  // real context window, session stats, checkpoints, changed files.
+  // Pure consumer of SessionStore.
 </script>
 
 <div class="inspector">
@@ -36,10 +73,11 @@
     <div class="meter" role="img" aria-label="context usage">
       <div
         class="meter-fill"
-        style:width="{Math.min(100, (session.usage.input / session.budgetTokens) * 100)}%"
+        style:width="{Math.min(100, session.ctxRatio * 100)}%"
       ></div>
     </div>
     <div class="meter-nums mono">
+      <span title="context window fill">ctx {fmt(session.ctxUsed)}/{fmtCtx(session.ctxLimit)}</span>
       <span>{fmt(session.usage.input)} in</span>
       <span class="dim">{fmt(session.usage.cached_input)} cached</span>
       <span>{fmt(session.usage.output)} out</span>
@@ -52,6 +90,11 @@
     <div class="model-row mono">
       <span class="dim">{session.provider}</span>
       <span class="model-name">{session.model}</span>
+    </div>
+    <div class="sess-row mono" title="session stats">
+      <span>{session.sessionTurns} turns</span>
+      <span>{elapsed}</span>
+      <span>{fmt(sessionTokTotal)} tok</span>
     </div>
   </section>
 
@@ -188,6 +231,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .sess-row {
+    display: flex;
+    gap: 12px;
+    font-size: 10px;
+    color: var(--fg-2);
+    margin-top: 7px;
+    flex-wrap: wrap;
   }
   .cps,
   .files {

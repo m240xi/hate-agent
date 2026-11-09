@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use hate_auth::{AuthContext, PortalAuth};
-use hate_core::{Command, Event, Limits, SessionConfig, spawn_session};
+use hate_core::{Command, Event, Limits, SessionConfig, WorkspaceTools, spawn_session};
 use hate_ledger::Ledger;
 use hate_providers::{ProviderKind, ProviderSpec, build, warn_if_unknown};
 use tokio_util::sync::CancellationToken;
@@ -310,6 +310,11 @@ async fn run(
         limits: Limits::default(),
         ledger: ledger(),
         persist: None, // one-shot CLI runs stay ephemeral
+        // `hate run` operates on the current directory — read tools on.
+        tools: std::env::current_dir()
+            .ok()
+            .and_then(|p| WorkspaceTools::new(p).ok())
+            .map(std::sync::Arc::new),
     });
 
     // Ctrl-C cancels the in-flight turn (Esc is the desktop equivalent).
@@ -338,6 +343,28 @@ async fn run(
                 eprintln!(
                     "\n[usage] in={} cached={} out={} thinking={}",
                     usage.input, usage.cached_input, usage.output, usage.thinking
+                );
+            }
+            Ok(Event::ToolStarted { call }) => {
+                let args = serde_json::to_string(&call.args).unwrap_or_default();
+                eprintln!("\n[tool] {} {args}", call.name);
+            }
+            Ok(Event::ToolFinished {
+                ok,
+                full_tokens,
+                sent_tokens,
+                ..
+            }) => {
+                eprintln!(
+                    "[tool] {} — {} tok → {} tok{}",
+                    if ok { "ok" } else { "failed" },
+                    full_tokens,
+                    sent_tokens,
+                    if ok && full_tokens > sent_tokens {
+                        format!(" (saved {} tok)", full_tokens - sent_tokens)
+                    } else {
+                        String::new()
+                    }
                 );
             }
             Ok(Event::TurnComplete { outcome }) => {

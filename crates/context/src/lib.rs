@@ -46,6 +46,12 @@ impl O200kCounter {
             .map_err(|e| CountError::Tokenizer(e.clone()))?;
         Ok(Self { bpe })
     }
+
+    /// Synchronous count for CPU-adjacent callers (tool output shaping)
+    /// that can't await the trait's boxed future.
+    pub fn count_sync(&self, text: &str) -> u64 {
+        self.bpe.encode_ordinary(text).len() as u64
+    }
 }
 
 impl TokenCounter for O200kCounter {

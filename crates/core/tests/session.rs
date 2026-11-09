@@ -79,6 +79,7 @@ fn session_with(provider: Arc<dyn Provider>) -> hate_core::SessionHandle {
         limits: Limits::default(),
         ledger: None,
         persist: None,
+        tools: None,
     })
 }
 
@@ -258,6 +259,171 @@ async fn provider_error_surfaces_as_failed() {
         match rx.recv().await.expect("stream") {
             Event::Failed { reason } => {
                 assert!(format!("{reason:?}").contains("429"));
+                break;
+            }
+            Event::TurnComplete { .. } => panic!("should not complete"),
+            _ => {}
+        }
+    }
+}
+
+/// Multi-round scripted provider: each `stream()` call replays the next
+/// script and records the request's messages so tests can assert what
+/// the loop fed back.
+struct Rounds {
+    rounds: std::sync::Mutex<std::collections::VecDeque<Vec<Delta>>>,
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+impl Provider for Rounds {
+    fn stream(
+        &self,
+        req: ChatRequest,
+        _cancel: CancellationToken,
+    ) -> BoxStream<'static, Result<Delta, ProviderError>> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(serde_json::to_string(&req.messages).unwrap());
+        let script = self
+            .rounds
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| vec![Delta::Done]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            for d in script {
+                if tx.send(Ok(d)).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Box::pin(futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)))
+    }
+
+    fn count_tokens<'a>(
+        &'a self,
+        _req: &'a ChatRequest,
+    ) -> BoxFuture<'a, Result<u64, ProviderError>> {
+        Box::pin(async { Ok(0) })
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            vision: false,
+            tools: true,
+            cache: CacheMode::None,
+            thinking: false,
+        }
+    }
+}
+
+#[tokio::test]
+async fn tool_calls_execute_and_feed_results_back() {
+    use hate_core::{ToolCall, ToolName, WorkspaceTools};
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "hello tool\n").unwrap();
+    let tools = Arc::new(WorkspaceTools::new(dir.path()).unwrap());
+
+    let provider = Arc::new(Rounds {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+            vec![
+                Delta::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: ToolName::new("read_file"),
+                    args: json!({"path": "note.txt"}),
+                }),
+                Delta::Done,
+            ],
+            vec![Delta::Text("read it".into()), Delta::Done],
+        ])),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider: provider.clone(),
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: Some(tools),
+    });
+    let mut rx = session.subscribe();
+    session
+        .command(Command::UserMessage("read note.txt".to_string()))
+        .expect("command");
+
+    let mut saw_tool_events = false;
+    let tool_calls;
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::ToolStarted { call } => {
+                assert_eq!(call.name.as_str(), "read_file");
+                saw_tool_events = true;
+            }
+            Event::ToolFinished {
+                ok, full_tokens, ..
+            } => {
+                assert!(ok);
+                assert!(full_tokens > 0);
+                saw_tool_events = true;
+            }
+            Event::TurnComplete { outcome } => {
+                tool_calls = outcome.tool_calls;
+                break;
+            }
+            Event::Failed { reason } => panic!("turn failed: {reason:?}"),
+            _ => {}
+        }
+    }
+
+    assert!(saw_tool_events, "tool lifecycle events emitted");
+    assert_eq!(tool_calls, 1);
+
+    // Two provider requests: round 2 must contain the tool result.
+    let seen = provider.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "expected two provider rounds");
+    assert!(
+        seen[1].contains("hello tool"),
+        "tool output fed back to model: {}",
+        &seen[1][..seen[1].len().min(400)]
+    );
+}
+
+#[tokio::test]
+async fn tool_call_without_tools_fails_honestly() {
+    use hate_core::{ToolCall, ToolName};
+    use serde_json::json;
+
+    let provider = Arc::new(Rounds {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
+            Delta::ToolCall(ToolCall {
+                id: "c1".into(),
+                name: ToolName::new("read_file"),
+                args: json!({"path": "x"}),
+            }),
+            Delta::Done,
+        ]])),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let session = session_with(provider);
+    let mut rx = session.subscribe();
+    session
+        .command(Command::UserMessage("hi".to_string()))
+        .expect("command");
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::Failed { reason } => {
+                assert!(format!("{reason:?}").contains("no tools"));
                 break;
             }
             Event::TurnComplete { .. } => panic!("should not complete"),

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use hate_auth::AuthContext;
 use hate_core::{
     Command, Limits, PersistCtx, PersistedSession, SessionConfig, SessionHandle, SessionMeta,
-    ThinkingLevel, spawn_session,
+    ThinkingLevel, WorkspaceTools, spawn_session,
 };
 use hate_ledger::Ledger;
 use hate_providers::{ProviderKind, ProviderSpec, build, warn_if_unknown};
@@ -143,6 +143,25 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         None => None,
     };
 
+    // Code sessions get the read-only workspace tool surface; chat stays
+    // text-only. A workspace that can't be canonicalized degrades to no
+    // tools rather than failing the session.
+    let tools = if guard.mode == "code" {
+        guard
+            .workspace
+            .clone()
+            .or_else(|| ctx.config.workspace_path.clone())
+            .and_then(|p| match WorkspaceTools::new(&p) {
+                Ok(t) => Some(std::sync::Arc::new(t)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "workspace tools unavailable");
+                    None
+                }
+            })
+    } else {
+        None
+    };
+
     let ledger = ledger_handle();
     let handle = spawn_session(SessionConfig {
         provider,
@@ -152,6 +171,7 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         limits: Limits::default(),
         ledger,
         persist,
+        tools,
     });
 
     let mut rx = handle.subscribe();

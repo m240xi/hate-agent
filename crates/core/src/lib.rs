@@ -11,6 +11,7 @@ pub mod persist;
 pub mod provider;
 mod session;
 mod state;
+mod tools;
 mod types;
 
 pub use event::{AgentError, Event};
@@ -23,6 +24,7 @@ pub use session::{
     Command, Limits, SessionConfig, SessionError, SessionHandle, SessionSnapshot, spawn_session,
 };
 pub use state::SessionState;
+pub use tools::{ToolOutput, WorkspaceTools};
 pub use types::{
     CheckpointId, CompactionReason, FailureReason, Outcome, PermissionDecision, PermissionRequest,
     Plan, RequestId, SessionId, Step, TokenUsage, ToolCall, ToolName, TurnId, TurnOutcome,

@@ -25,6 +25,7 @@ use crate::event::{AgentError, Event};
 use crate::persist::{PersistCtx, PersistedSession};
 use crate::provider::{ChatRequest, Delta, Message, Provider, ProviderError, ThinkingLevel};
 use crate::state::SessionState;
+use crate::tools::WorkspaceTools;
 use crate::types::{FailureReason, Outcome, SessionId, TokenUsage, ToolCall, TurnId, TurnOutcome};
 use hate_ledger::{Ledger, RecordRequest};
 
@@ -70,6 +71,9 @@ pub struct SessionConfig {
     pub ledger: Option<Arc<Ledger>>,
     /// Session persistence; `None` = ephemeral (CLI one-shots, tests).
     pub persist: Option<PersistCtx>,
+    /// Workspace tool surface (M2 read tools). `None` = text-only turns —
+    /// chat sessions and sessions without a workspace stay tool-free.
+    pub tools: Option<Arc<WorkspaceTools>>,
 }
 
 /// Commands the outside world can send a session.
@@ -165,25 +169,36 @@ impl SessionHandle {
     }
 }
 
-/// What a finished turn reports back to the actor.
+/// What a finished turn reports back to the actor. `tail` holds every
+/// message the turn produced *after* the user message — assistant rounds
+/// plus tool results — so history stays faithful even when a turn ran
+/// several provider requests or ended early.
 enum TurnReport {
-    /// Stream completed cleanly.
+    /// Turn finished (model stopped calling tools, or hit a cap).
     Completed {
-        /// Assistant text accumulated from deltas.
-        text: String,
-        /// Tool calls the model requested (unexecuted in M1).
-        tool_calls: Vec<ToolCall>,
-        /// Usage reported by the provider.
+        /// Messages appended after the user message.
+        tail: Vec<Message>,
+        /// Summed usage across all provider rounds.
         usage: TokenUsage,
+        /// Tool calls executed during the turn.
+        tool_calls: u32,
         /// Request latency, ms.
         latency_ms: u64,
-        /// USD cost from the ledger price table, when priced.
+        /// USD cost summed across priced rounds, when priced.
         cost_usd: Option<f64>,
     },
-    /// Provider/stream failure.
-    Failed(ProviderError),
-    /// Cancellation token fired.
-    Cancelled,
+    /// Provider/stream failure; `tail` preserves completed tool rounds.
+    Failed {
+        /// The provider error.
+        error: ProviderError,
+        /// Completed-round messages worth keeping in history.
+        tail: Vec<Message>,
+    },
+    /// Cancellation token fired; `tail` preserves completed rounds.
+    Cancelled {
+        /// Completed-round messages worth keeping in history.
+        tail: Vec<Message>,
+    },
 }
 
 /// Spawn a session actor on the current tokio runtime.
@@ -282,10 +297,11 @@ impl Actor {
                             self.turn_done = None;
                             // A closed channel means the turn task died
                             // without reporting — surface it, never hang.
-                            Some(rep.unwrap_or_else(|| {
-                                TurnReport::Failed(ProviderError::Stream(
+                            Some(rep.unwrap_or_else(|| TurnReport::Failed {
+                                error: ProviderError::Stream(
                                     "turn task terminated without report".to_string(),
-                                ))
+                                ),
+                                tail: Vec::new(),
                             }))
                         }
                     }
@@ -360,24 +376,17 @@ impl Actor {
         let mut messages = self.history.clone();
         messages.push(Message::User { content: text });
 
-        let req = ChatRequest {
-            model: self.cfg.model.clone(),
-            system: Some(hate_prompt::SYSTEM_PROMPT.to_string()),
-            messages,
-            tools: Vec::new(), // M2 registers the tool surface here.
-            max_output_tokens: 8192,
-            temperature: None,
-            thinking: self.cfg.thinking,
-        };
-
         let (done_tx, done_rx) = mpsc::channel(1);
         self.turn_done = Some(done_rx);
 
         let provider = Arc::clone(&self.cfg.provider);
         let cancel = self.cancel.clone();
         let events = self.events.clone();
+        let system = Some(hate_prompt::SYSTEM_PROMPT.to_string());
         let model = self.cfg.model.clone();
         let provider_name = self.cfg.provider_name.clone();
+        let thinking = self.cfg.thinking;
+        let tools = self.cfg.tools.clone();
         let ledger = self.cfg.ledger.clone();
         let session_id = self.session_id;
         let turn_id = self.turn;
@@ -386,12 +395,15 @@ impl Actor {
         tokio::spawn(async move {
             run_turn(
                 provider,
-                req,
+                messages,
+                system,
+                model,
+                provider_name,
+                thinking,
+                tools,
                 cancel,
                 events,
                 done_tx,
-                model,
-                provider_name,
                 ledger,
                 session_id,
                 turn_id,
@@ -435,25 +447,13 @@ impl Actor {
 
         match rep {
             TurnReport::Completed {
-                text,
-                tool_calls,
+                tail,
                 usage,
+                tool_calls,
                 latency_ms,
                 cost_usd,
             } => {
-                // M1: tool calls can't execute yet — surface honestly.
-                if !tool_calls.is_empty() {
-                    self.emit(Event::Error {
-                        error: AgentError::Provider(format!(
-                            "model requested {} tool call(s) but no tools are registered yet (M2)",
-                            tool_calls.len()
-                        )),
-                    });
-                }
-                self.history.push(Message::Assistant {
-                    content: text,
-                    tool_calls,
-                });
+                self.history.extend(tail);
                 if let Some(cost) = cost_usd {
                     self.cost_usd += cost;
                 }
@@ -461,16 +461,22 @@ impl Actor {
                 let outcome = TurnOutcome {
                     outcome: Outcome::Completed,
                     usage,
-                    tool_calls: 0,
+                    tool_calls,
                     elapsed_ms: latency_ms,
                     cost_usd,
                 };
                 self.emit(Event::TurnComplete { outcome });
             }
-            TurnReport::Failed(e) => {
-                self.emit(Event::Failed { reason: e.into() });
+            TurnReport::Failed { error, tail } => {
+                // Completed tool rounds stay in history — the model did
+                // real work before the failure and should see it.
+                self.history.extend(tail);
+                self.emit(Event::Failed {
+                    reason: error.into(),
+                });
             }
-            TurnReport::Cancelled => {
+            TurnReport::Cancelled { tail } => {
+                self.history.extend(tail);
                 let outcome = TurnOutcome {
                     outcome: Outcome::Cancelled,
                     usage: TokenUsage::default(),
@@ -544,116 +550,252 @@ impl Actor {
     }
 }
 
-/// The per-turn stream pump. Runs on its own task so the actor stays
-/// responsive; sends exactly one [`TurnReport`] when done.
+/// The per-turn driver. Owns the whole tool-call loop: stream one
+/// provider round, execute any requested tools, feed the results back,
+/// and keep going until the model answers with no calls. Sends exactly
+/// one [`TurnReport`] when done; every round is a billed request, so
+/// usage/cost/tool counts accumulate across the whole turn.
 #[allow(clippy::too_many_arguments)]
 async fn run_turn(
     provider: Arc<dyn Provider>,
-    req: ChatRequest,
+    mut convo: Vec<Message>,
+    system: Option<String>,
+    model: String,
+    provider_name: String,
+    thinking: ThinkingLevel,
+    tools: Option<Arc<WorkspaceTools>>,
     cancel: CancellationToken,
     events: broadcast::Sender<Event>,
     done_tx: mpsc::Sender<TurnReport>,
-    model: String,
-    provider_name: String,
     ledger: Option<Arc<Ledger>>,
     session_id: SessionId,
     turn_id: TurnId,
     started: Instant,
 ) {
-    let request_id = Uuid::new_v4().to_string();
-    let stream = provider.stream(req, cancel.clone());
-    tokio::pin!(stream);
+    // A model that never stops calling tools must not loop forever.
+    const MAX_TOOL_ROUNDS: u32 = 12;
+    const MAX_TOOL_CALLS: u32 = 48;
 
-    let mut text = String::new();
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut usage = TokenUsage::default();
-
-    let emit = |ev: Event| {
-        let _ = events.send(ev);
-    };
+    // Messages this turn appends start after the user message.
+    let base = convo.len();
+    let specs = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
+    let mut total_usage = TokenUsage::default();
+    let mut total_cost: Option<f64> = None;
+    let mut tool_calls_done = 0u32;
+    let mut round = 0u32;
 
     loop {
-        // Prioritise the cancel check: `select!` picks randomly among ready
-        // branches, so a saturated stream could otherwise starve it.
         if cancel.is_cancelled() {
-            let _ = done_tx.send(TurnReport::Cancelled).await;
+            let _ = done_tx
+                .send(TurnReport::Cancelled {
+                    tail: convo[base..].to_vec(),
+                })
+                .await;
             return;
         }
-        tokio::select! {
-            () = cancel.cancelled() => {
-                let _ = done_tx.send(TurnReport::Cancelled).await;
+        if round >= MAX_TOOL_ROUNDS {
+            let _ = done_tx
+                .send(TurnReport::Failed {
+                    error: ProviderError::Stream(format!(
+                        "tool loop exceeded {MAX_TOOL_ROUNDS} provider rounds"
+                    )),
+                    tail: convo[base..].to_vec(),
+                })
+                .await;
+            return;
+        }
+        round += 1;
+
+        let req = ChatRequest {
+            model: model.clone(),
+            system: system.clone(),
+            messages: convo.clone(),
+            tools: specs.clone(),
+            max_output_tokens: 8192,
+            temperature: None,
+            thinking,
+        };
+
+        let round_started = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
+        let stream = provider.stream(req, cancel.clone());
+        tokio::pin!(stream);
+
+        let mut text = String::new();
+        let mut calls: Vec<ToolCall> = Vec::new();
+        let mut usage = TokenUsage::default();
+
+        let emit = |ev: Event| {
+            let _ = events.send(ev);
+        };
+
+        loop {
+            // Prioritise the cancel check: `select!` picks randomly among
+            // ready branches, so a saturated stream could starve it.
+            if cancel.is_cancelled() {
+                let _ = done_tx
+                    .send(TurnReport::Cancelled {
+                        tail: convo[base..].to_vec(),
+                    })
+                    .await;
                 return;
             }
-            item = stream.next() => {
-                match item {
-                    Some(Ok(Delta::Text(t))) => {
-                        text.push_str(&t);
-                        emit(Event::Delta { text: t });
-                    }
-                    Some(Ok(Delta::Thinking(t))) => {
-                        emit(Event::ThinkingDelta { text: t });
-                    }
-                    Some(Ok(Delta::ToolCall(call))) => {
-                        tool_calls.push(call);
-                    }
-                    Some(Ok(Delta::Usage(u))) => {
-                        usage = u;
-                        emit(Event::TokensCounted { usage, turn: turn_id });
-                    }
-                    Some(Ok(Delta::Done)) => break,
-                    // Channel closed without Done: cancelled streams end
-                    // this way, but so do truncated ones — distinguish.
-                    None => {
-                        if cancel.is_cancelled() {
-                            let _ = done_tx.send(TurnReport::Cancelled).await;
-                        } else {
-                            let _ = done_tx
-                                .send(TurnReport::Failed(ProviderError::Stream(
-                                    "provider stream ended without Delta::Done".to_string(),
-                                )))
-                                .await;
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    let _ = done_tx
+                        .send(TurnReport::Cancelled {
+                            tail: convo[base..].to_vec(),
+                        })
+                        .await;
+                    return;
+                }
+                item = stream.next() => {
+                    match item {
+                        Some(Ok(Delta::Text(t))) => {
+                            text.push_str(&t);
+                            emit(Event::Delta { text: t });
                         }
-                        return;
-                    }
-                    Some(Err(e)) => {
-                        let _ = done_tx.send(TurnReport::Failed(e)).await;
-                        return;
+                        Some(Ok(Delta::Thinking(t))) => {
+                            emit(Event::ThinkingDelta { text: t });
+                        }
+                        Some(Ok(Delta::ToolCall(call))) => {
+                            calls.push(call);
+                        }
+                        Some(Ok(Delta::Usage(u))) => {
+                            usage = u;
+                            emit(Event::TokensCounted { usage, turn: turn_id });
+                        }
+                        Some(Ok(Delta::Done)) => break,
+                        // Channel closed without Done: cancelled streams
+                        // end this way, but so do truncated ones.
+                        None => {
+                            if cancel.is_cancelled() {
+                                let _ = done_tx
+                                    .send(TurnReport::Cancelled {
+                                        tail: convo[base..].to_vec(),
+                                    })
+                                    .await;
+                            } else {
+                                let _ = done_tx
+                                    .send(TurnReport::Failed {
+                                        error: ProviderError::Stream(
+                                            "provider stream ended without Delta::Done".to_string(),
+                                        ),
+                                        tail: convo[base..].to_vec(),
+                                    })
+                                    .await;
+                            }
+                            return;
+                        }
+                        Some(Err(e)) => {
+                            let _ = done_tx
+                                .send(TurnReport::Failed {
+                                    error: e,
+                                    tail: convo[base..].to_vec(),
+                                })
+                                .await;
+                            return;
+                        }
                     }
                 }
             }
         }
-    }
 
-    let latency_ms = started.elapsed().as_millis() as u64;
+        // ── round complete: account for it, then decide ────────────────
+        let round_latency = round_started.elapsed().as_millis() as u64;
 
-    // Ledger write is best-effort: accounting failure must not fail a turn.
-    let mut cost_usd = None;
-    if let Some(ledger) = &ledger {
-        let rec = RecordRequest {
-            session_id: session_id.0.to_string(),
-            turn_id: turn_id.0,
-            request_id,
-            model,
-            provider: provider_name,
-            input_tokens: usage.input,
-            cached_input_tokens: usage.cached_input,
-            output_tokens: usage.output,
-            thinking_tokens: usage.thinking,
-            latency_ms,
-        };
-        match ledger.record_request(&rec) {
-            Ok(cost) => cost_usd = cost,
-            Err(e) => warn!(error = %e, "ledger record failed"),
+        // Ledger write is best-effort: accounting failure must not fail
+        // a turn. One record per provider request (per round).
+        if let Some(ledger) = &ledger {
+            let rec = RecordRequest {
+                session_id: session_id.0.to_string(),
+                turn_id: turn_id.0,
+                request_id,
+                model: model.clone(),
+                provider: provider_name.clone(),
+                input_tokens: usage.input,
+                cached_input_tokens: usage.cached_input,
+                output_tokens: usage.output,
+                thinking_tokens: usage.thinking,
+                latency_ms: round_latency,
+            };
+            match ledger.record_request(&rec) {
+                Ok(Some(cost)) => total_cost = Some(total_cost.unwrap_or(0.0) + cost),
+                Ok(None) => {}
+                Err(e) => warn!(error = %e, "ledger record failed"),
+            }
         }
-    }
+        total_usage.input += usage.input;
+        total_usage.cached_input += usage.cached_input;
+        total_usage.output += usage.output;
+        total_usage.thinking += usage.thinking;
+        tool_calls_done += calls.len() as u32;
 
-    let _ = done_tx
-        .send(TurnReport::Completed {
-            text,
-            tool_calls,
-            usage,
-            latency_ms,
-            cost_usd,
-        })
-        .await;
+        if calls.is_empty() {
+            let _ = done_tx
+                .send(TurnReport::Completed {
+                    tail: convo[base..].to_vec(),
+                    usage: total_usage,
+                    tool_calls: tool_calls_done,
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    cost_usd: total_cost,
+                })
+                .await;
+            return;
+        }
+
+        let Some(tools) = tools.clone() else {
+            let _ = done_tx
+                .send(TurnReport::Failed {
+                    error: ProviderError::Stream(format!(
+                        "model requested {} tool call(s) but this session has no tools",
+                        calls.len()
+                    )),
+                    tail: convo[base..].to_vec(),
+                })
+                .await;
+            return;
+        };
+
+        if tool_calls_done > MAX_TOOL_CALLS {
+            let _ = done_tx
+                .send(TurnReport::Failed {
+                    error: ProviderError::Stream(format!(
+                        "tool call limit exceeded ({MAX_TOOL_CALLS})"
+                    )),
+                    tail: convo[base..].to_vec(),
+                })
+                .await;
+            return;
+        }
+
+        // Record the assistant round, then run every call so the batch
+        // stays atomic: history never holds a call without its result,
+        // even if the user cancels immediately after.
+        convo.push(Message::Assistant {
+            content: text,
+            tool_calls: calls.clone(),
+        });
+        for call in calls {
+            emit(Event::ToolStarted { call: call.clone() });
+            let out = tools.execute(&call).await;
+            emit(Event::ToolOutput {
+                call_id: call.id.clone(),
+                preview: out.preview,
+                tokens: out.sent_tokens,
+            });
+            emit(Event::ToolFinished {
+                call_id: call.id.clone(),
+                ok: out.ok,
+                full_tokens: out.full_tokens,
+                sent_tokens: out.sent_tokens,
+            });
+            convo.push(Message::Tool {
+                call_id: call.id.clone(),
+                name: call.name.as_str().to_string(),
+                content: out.content,
+            });
+        }
+        // Next iteration streams the follow-up request with results in.
+    }
 }

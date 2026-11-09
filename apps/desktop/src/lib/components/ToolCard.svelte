@@ -14,6 +14,9 @@
 
   const TOOL_ICON: Record<string, string> = {
     read: 'file',
+    read_file: 'file',
+    list_dir: 'folder',
+    glob: 'search',
     edit: 'edit',
     write: 'edit',
     bash: 'terminal',
@@ -42,9 +45,11 @@
     block.ok === undefined ? 'var(--fg-3)' : block.ok ? 'var(--ok)' : 'var(--err)',
   );
 
+  const fmtTok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+
   const savings = $derived(
     block.fullTokens !== undefined && block.sentTokens !== undefined
-      ? `${block.fullTokens} → ${block.sentTokens}`
+      ? `${fmtTok(block.fullTokens)} → ${fmtTok(block.sentTokens)}`
       : null,
   );
 </script>

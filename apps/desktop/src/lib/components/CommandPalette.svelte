@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { session } from '../store.svelte';
+  import { THEMES } from '../themes';
   import Icon from './Icon.svelte';
 
   // `/` command palette. Only commands that do real work today are
@@ -31,7 +32,7 @@
     },
     {
       name: '/theme',
-      hint: 'cycle dark / light / system',
+      hint: 'cycle theme',
       run: () => cycleTheme(),
     },
     {
@@ -92,11 +93,9 @@
   );
 
   function cycleTheme(): void {
-    const root = document.documentElement;
-    const cur = root.dataset.theme ?? 'system';
-    const next = cur === 'dark' ? 'light' : cur === 'light' ? 'system' : 'dark';
-    if (next === 'system') delete root.dataset.theme;
-    else root.dataset.theme = next;
+    const ids = THEMES.map((t) => t.id);
+    const i = ids.indexOf(session.theme);
+    session.setTheme(ids[(i + 1) % ids.length] ?? 'auto');
   }
 
   function choose(c: Command): void {

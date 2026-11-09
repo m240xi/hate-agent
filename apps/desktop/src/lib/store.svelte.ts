@@ -27,6 +27,7 @@ import type {
   TranscriptBlock,
 } from './types';
 import type { ProviderInfo, ProviderModel, SessionMeta, ThinkingLevel } from './ipc';
+import { isThemeId } from './themes';
 
 const inTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -162,8 +163,9 @@ class SessionStore {
   // ── app shell ───────────────────────────────────────────────────────────
   /** Landing picks the surface; persisted across launches. */
   mode = $state<AppMode>('home');
-  /** `auto` follows the OS; explicit themes force the palette. */
-  theme = $state<'auto' | 'dark' | 'light'>('auto');
+  /** `auto` follows the OS; explicit themes force the palette.
+   *  Ids come from `themes.ts` — app.css defines each `data-theme`. */
+  theme = $state<string>('auto');
   /** Folder the code session operates in (from config.toml). */
   workspacePath = $state<string | null>(null);
 
@@ -197,7 +199,7 @@ class SessionStore {
     const saved = localStorage.getItem('hate:mode');
     if (MODES.includes(saved as AppMode)) this.mode = saved as AppMode;
     const savedTheme = localStorage.getItem('hate:theme');
-    if (savedTheme === 'dark' || savedTheme === 'light') this.theme = savedTheme;
+    if (isThemeId(savedTheme)) this.theme = savedTheme;
     const savedThinking = localStorage.getItem('hate:thinking');
     if (isThinkingLevel(savedThinking)) this.thinkingLevel = savedThinking;
     this.applyTheme();
@@ -689,7 +691,7 @@ class SessionStore {
     localStorage.setItem('hate:mode', mode);
   }
 
-  setTheme(theme: 'auto' | 'dark' | 'light'): void {
+  setTheme(theme: string): void {
     this.theme = theme;
     localStorage.setItem('hate:theme', theme);
     this.applyTheme();

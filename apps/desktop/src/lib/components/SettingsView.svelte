@@ -23,7 +23,7 @@
   let keyDrafts = $state<Record<string, string>>({});
   let keyBusy = $state<string | null>(null);
 
-  const THEMES = ['light', 'dark', 'auto'] as const;
+  import { THEMES } from '../themes';
 
   async function refresh(): Promise<void> {
     if (!inTauri) return;
@@ -325,18 +325,23 @@
     <section class="group">
       <h2 class="group-title">Appearance</h2>
       <p class="group-hint">
-        Light or dark. Auto follows your system's setting.
+        Pick a palette — Auto follows your system's setting.
       </p>
       <div class="card">
-        <div class="seg" role="group" aria-label="Theme">
+        <div class="theme-grid" role="group" aria-label="Theme">
           {#each THEMES as t}
             <button
-              class="seg-item"
-              class:active={session.theme === t}
-              onclick={() => session.setTheme(t)}
-              aria-pressed={session.theme === t}
+              class="theme-card"
+              class:active={session.theme === t.id}
+              onclick={() => session.setTheme(t.id)}
+              aria-pressed={session.theme === t.id}
+              title={t.hint}
             >
-              {t}
+              <span class="theme-prev" style:background={t.bg}>
+                <span class="theme-bar" style:background={t.accent}></span>
+                <span class="theme-line" style:background={t.fg}></span>
+              </span>
+              <span class="theme-name">{t.label}</span>
             </button>
           {/each}
         </div>
@@ -801,6 +806,63 @@
     border-color: var(--accent);
     color: var(--accent-fg);
     box-shadow: 0 2px 0 rgba(0, 0, 0, 0.4);
+  }
+  .theme-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+    gap: 10px;
+  }
+  .theme-card {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 8px;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    transition:
+      border-color var(--motion),
+      transform var(--motion);
+  }
+  .theme-card:hover {
+    border-color: var(--border-strong);
+    transform: translateY(-1px);
+  }
+  .theme-card.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .theme-prev {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 5px;
+    height: 44px;
+    padding: 8px;
+    border-radius: 5px;
+    border: 1px solid rgba(128, 128, 128, 0.25);
+    overflow: hidden;
+  }
+  .theme-bar {
+    height: 5px;
+    width: 55%;
+    border-radius: 2px;
+  }
+  .theme-line {
+    height: 3px;
+    width: 80%;
+    border-radius: 2px;
+    opacity: 0.55;
+  }
+  .theme-name {
+    font-family: var(--font-ui);
+    font-size: 12px;
+    color: var(--fg-1);
+  }
+  .theme-card.active .theme-name {
+    color: var(--accent);
   }
   .provider-list {
     display: flex;

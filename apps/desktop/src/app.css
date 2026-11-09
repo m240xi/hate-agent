@@ -143,6 +143,77 @@
   --info: #3d6a85;
 }
 
+/* ── custom palettes ────────────────────────────────────────────────
+   Same token contract as dark/light; only the values change. All
+   three stay dark — hue lives in surfaces + accent, semantics keep
+   enough separation to read at a glance. */
+
+:root[data-theme='phosphor'] {
+  color-scheme: dark;
+  --bg-0: #020604;
+  --bg-1: #071009;
+  --bg-2: #0c1810;
+  --bg-3: #122419;
+  --fg-0: #e2f5e4;
+  --fg-1: #b8d4ba;
+  --fg-2: #7d9c82;
+  --fg-3: #57705c;
+  --border: rgba(190, 242, 200, 0.09);
+  --border-strong: rgba(190, 242, 200, 0.18);
+  --accent: #8fe6a8;
+  --accent-dim: #3f7a52;
+  --accent-fg: #04140a;
+  --accent-soft: rgba(143, 230, 168, 0.09);
+  --ok: #5ec4b6;
+  --warn: #e0b45c;
+  --err: #e0705c;
+  --info: #7fa8c9;
+}
+
+:root[data-theme='ember'] {
+  color-scheme: dark;
+  --bg-0: #0b0605;
+  --bg-1: #140d09;
+  --bg-2: #1d130d;
+  --bg-3: #281a12;
+  --fg-0: #f5ebe0;
+  --fg-1: #d8c4ae;
+  --fg-2: #9c8670;
+  --fg-3: #6b5747;
+  --border: rgba(245, 200, 150, 0.09);
+  --border-strong: rgba(245, 200, 150, 0.18);
+  --accent: #f2a95e;
+  --accent-dim: #8a5a30;
+  --accent-fg: #1a0e04;
+  --accent-soft: rgba(242, 169, 94, 0.1);
+  --ok: #8fbf7f;
+  --warn: #e8c05c;
+  --err: #d96a5c;
+  --info: #8fa8bf;
+}
+
+:root[data-theme='sakura'] {
+  color-scheme: dark;
+  --bg-0: #0a0710;
+  --bg-1: #110c18;
+  --bg-2: #181024;
+  --bg-3: #211838;
+  --fg-0: #f2ecf7;
+  --fg-1: #d4c8de;
+  --fg-2: #9685a8;
+  --fg-3: #675a7d;
+  --border: rgba(230, 190, 220, 0.09);
+  --border-strong: rgba(230, 190, 220, 0.18);
+  --accent: #e8a0c4;
+  --accent-dim: #7d4a68;
+  --accent-fg: #1c0a14;
+  --accent-soft: rgba(232, 160, 196, 0.1);
+  --ok: #8fc4a0;
+  --warn: #dcc06a;
+  --err: #d97070;
+  --info: #9a8fc4;
+}
+
 * {
   box-sizing: border-box;
 }

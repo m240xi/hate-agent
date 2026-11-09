@@ -9,6 +9,8 @@
   import PermissionBar from './PermissionBar.svelte';
   import EmptyState from './EmptyState.svelte';
   import SessionBrowser from './SessionBrowser.svelte';
+  import Pane from './Pane.svelte';
+  import Inspector from './Inspector.svelte';
 </script>
 
 <div class="chat">
@@ -31,6 +33,17 @@
       <Composer />
     {/if}
   </div>
+
+  <Pane
+    side="right"
+    title="Inspector"
+    collapsed={session.rightCollapsed}
+    width={session.rightWidth}
+    onToggle={() => (session.rightCollapsed = !session.rightCollapsed)}
+    onResize={(w) => (session.rightWidth = w)}
+  >
+    <Inspector />
+  </Pane>
 </div>
 
 <style>

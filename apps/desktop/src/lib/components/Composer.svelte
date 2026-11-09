@@ -80,9 +80,6 @@
         <kbd>/</kbd> commands · <kbd>@</kbd> files · <kbd>⇧tab</kbd> think
       </span>
       <span class="spacer"></span>
-      {#if session.provider}
-        <span class="provider mono" title="active provider">{session.provider}</span>
-      {/if}
       <ModelPicker />
       <ThinkingMenu />
       {#if session.running}
@@ -187,11 +184,6 @@
   }
   .spacer {
     flex: 1;
-  }
-  .provider {
-    font-size: 10.5px;
-    color: var(--fg-3);
-    flex: none;
   }
   .send {
     display: inline-flex;

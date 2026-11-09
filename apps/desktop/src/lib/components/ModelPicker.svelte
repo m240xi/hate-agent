@@ -17,17 +17,36 @@
     items: ProviderModel[];
   }
 
+  /** Aggregator catalogs prefix the vendor: "Anthropic: Claude Fable
+   *  Latest". The picker shows just the model name — the id line
+   *  underneath still carries the full slug for disambiguation. */
+  const VENDOR_PREFIX =
+    /^(anthropic|openai|google|deepmind|meta|mistral|xai|deepseek|qwen|moonshot(?:ai)?|z\.?ai|zhipu|minimax|nous|openrouter|amazon|aws|nvidia|cohere|ai21|databricks|snowflake|ibm|writer|inflection)\s*:\s*/i;
+
+  function displayName(m: ProviderModel): string {
+    const n = m.name ?? m.id;
+    return n.replace(VENDOR_PREFIX, '') || n;
+  }
+
+  // With more than one provider contributing models, group headers are
+  // provider names; single-provider catalogs keep the vendor-prefix
+  // grouping (anthropic/, openai/, …) which reads better there.
+  const multiProvider = $derived(
+    new Set(session.models.map((m) => m.provider).filter(Boolean)).size > 1,
+  );
+
   const sections = $derived.by<Section[]>(() => {
     const q = query.trim().toLowerCase();
     const groups = new Map<string, ProviderModel[]>();
     for (const m of session.models) {
-      const hay = `${m.id} ${m.name ?? ''}`.toLowerCase();
+      const hay = `${m.id} ${m.name ?? ''} ${m.provider ?? ''}`.toLowerCase();
       if (q && !hay.includes(q)) continue;
       const slash = m.id.indexOf('/');
       const vendor = slash > 0 ? m.id.slice(0, slash) : 'other';
-      const list = groups.get(vendor) ?? [];
+      const key = multiProvider ? (m.provider ?? vendor) : vendor;
+      const list = groups.get(key) ?? [];
       list.push(m);
-      groups.set(vendor, list);
+      groups.set(key, list);
     }
     return [...groups.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -97,7 +116,7 @@
     if (session.modelsState === 'error' && session.models.length === 0)
       return 'model list failed';
     const m = session.selectedModel;
-    return m?.name ?? session.model ?? 'model';
+    return m ? displayName(m) : (session.model ?? 'model');
   });
 
   const triggerTitle = $derived(
@@ -127,7 +146,7 @@
     } else if (e.key === 'Enter') {
       e.preventDefault();
       const m = flat.find((x) => x.id === highlightId) ?? flat[0];
-      if (m) void session.setModel(m.id);
+      if (m) void session.setModel(m.id, m.provider);
     }
   }
 </script>
@@ -165,13 +184,13 @@
               role="option"
               aria-selected={m.id === session.model}
               onclick={() => {
-                void session.setModel(m.id);
+                void session.setModel(m.id, m.provider);
                 close();
               }}
               onmouseenter={() => (highlightId = m.id)}
             >
               <span class="mp-main">
-                <span class="mp-name">{m.name ?? m.id}</span>
+                <span class="mp-name">{displayName(m)}</span>
                 <span class="mp-id mono">{m.id}</span>
               </span>
               <span class="mp-meta">

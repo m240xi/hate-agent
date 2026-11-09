@@ -223,7 +223,22 @@ class SessionStore {
         this.model = def.model;
       }
       this.modelsState = 'loading';
-      m.modelsList()
+      // Fan out across every configured provider so the picker can
+      // group by provider; unauthed/unreachable ones just yield [].
+      const catalog =
+        this.providers.length > 0
+          ? Promise.all(
+              this.providers.map((p) =>
+                m
+                  .modelsList(p.name)
+                  .then((list) =>
+                    list.map((x) => ({ ...x, provider: p.name })),
+                  )
+                  .catch(() => [] as ProviderModel[]),
+              ),
+            ).then((lists) => lists.flat())
+          : m.modelsList();
+      catalog
         .then((list) => {
           this.models = filterChatModels(list);
           this.modelsState = 'ready';
@@ -353,13 +368,31 @@ class SessionStore {
     }
   }
 
-  /** Pick a model from the provider's catalog — persists to config.toml
-   *  (CLI shares it) and hot-swaps the live session. */
-  async setModel(id: string): Promise<void> {
-    if (!id || id === this.model) return;
+  /** Pick a model — persists to config.toml (CLI shares it) and
+   *  hot-swaps the live session. `provider` tags catalog rows from the
+   *  multi-provider fan-out; a pick from a *different* provider can't
+   *  hot-swap (the session's adapter is fixed at spawn), so it persists
+   *  and applies from the next session instead. */
+  async setModel(id: string, provider?: string | null): Promise<void> {
+    if (!id || (id === this.model && (!provider || provider === this.providerName)))
+      return;
+    const target = provider ?? this.providerName;
     this.model = id;
     if (!inTauri()) return;
     const m = await import('./ipc');
+    if (target && target !== this.providerName) {
+      this.providerName = target;
+      this.provider = target;
+      await m.providerSetModel(target, id).catch(() => {});
+      this.blocks.push({
+        id: nextBlockId++,
+        kind: 'text',
+        text: `provider switched to ${target} — applies to new sessions`,
+        streaming: false,
+      });
+      this.scheduleUiSave();
+      return;
+    }
     if (this.providerName) {
       await m.providerSetModel(this.providerName, id).catch(() => {});
     }
@@ -397,11 +430,11 @@ class SessionStore {
   /** `/model` — cycle the provider catalog; persists + hot-swaps the
    *  live session exactly like picking from the model menu. */
   async cycleModel(): Promise<void> {
-    const ids = this.models.map((m) => m.id);
-    if (ids.length === 0) return;
-    const i = ids.indexOf(this.model);
-    const next = ids[(i + 1) % ids.length] ?? ids[0];
-    if (next) await this.setModel(next);
+    const list = this.models;
+    if (list.length === 0) return;
+    const i = list.findIndex((m) => m.id === this.model);
+    const next = list[(i + 1) % list.length];
+    if (next) await this.setModel(next.id, next.provider);
   }
 
   /** `/compact` — ask the backend to shrink context now; the

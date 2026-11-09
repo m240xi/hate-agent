@@ -37,6 +37,9 @@ export async function sessionSetOptions(
 export interface ProviderModel {
   id: string;
   name: string | null;
+  /** Configured provider this row came from — tagged client-side when
+   *  the catalog is fanned out across providers; absent otherwise. */
+  provider?: string | null;
   context_tokens: number | null;
   /** USD per 1M tokens; null when the provider doesn't publish pricing. */
   price_in_mtok: number | null;

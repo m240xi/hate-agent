@@ -34,6 +34,15 @@ export async function sessionSetOptions(
   return invoke<void>('session_set_options', { model, thinking, contextWindow });
 }
 
+/** Swap the live session's provider adapter (cross-provider model pick).
+ *  Applies from the next turn — no respawn needed. */
+export async function sessionSetProvider(
+  provider: string,
+  model?: string | null,
+): Promise<void> {
+  return invoke<void>('session_set_provider', { provider, model: model ?? null });
+}
+
 export interface ProviderModel {
   id: string;
   name: string | null;

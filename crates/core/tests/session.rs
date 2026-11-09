@@ -1013,3 +1013,84 @@ async fn reflection_authors_skill_after_three_turns() {
     assert!(saved.body.contains("luau-lsp"));
     assert_eq!(saved.triggers, vec!["roblox", "luau"]);
 }
+
+/// Mid-session provider swap: after `SetProvider`, the next turn must
+/// run on the new adapter — never the old provider with the new model
+/// id (that produced 404s when a cross-provider pick leaked).
+#[tokio::test]
+async fn set_provider_swaps_adapter_mid_session() {
+    use hate_core::provider::Provider;
+
+    let a: Arc<dyn Provider> = Arc::new(Scripted {
+        script: vec![Delta::Text("from-a".to_string()), Delta::Done],
+        usage: TokenUsage::default(),
+        delta_delay: Duration::ZERO,
+    });
+    let b: Arc<dyn Provider> = Arc::new(Scripted {
+        script: vec![Delta::Text("from-b".to_string()), Delta::Done],
+        usage: TokenUsage::default(),
+        delta_delay: Duration::ZERO,
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider: a,
+        model: "m1".to_string(),
+        provider_name: "a".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: None,
+        mcp: None,
+        skills: None,
+        auto_skills: false,
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        context_window: 0,
+    });
+    let mut rx = session.subscribe();
+
+    // Turn 1 on provider A.
+    session
+        .command(Command::UserMessage("hi".to_string()))
+        .expect("command");
+    let mut text = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("stream open");
+        match &ev {
+            Event::Delta { text: t } => text.push_str(t),
+            Event::TurnComplete { .. } | Event::Failed { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "from-a");
+
+    // Swap to provider B and drive another turn.
+    session
+        .command(Command::SetProvider {
+            provider: b,
+            provider_name: "b".to_string(),
+            model: Some("m2".to_string()),
+        })
+        .expect("set provider");
+    session
+        .command(Command::UserMessage("again".to_string()))
+        .expect("command");
+    text.clear();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("stream open");
+        match &ev {
+            Event::Delta { text: t } => text.push_str(t),
+            Event::TurnComplete { .. } | Event::Failed { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "from-b", "turn 2 must run on the swapped adapter");
+}

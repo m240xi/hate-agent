@@ -22,6 +22,7 @@ pub fn run() {
         commands::session_respond_permission,
         commands::session_rewind,
         commands::session_set_options,
+        commands::session_set_provider,
         commands::models_list,
         commands::provider_set_model,
         commands::provider_presets,

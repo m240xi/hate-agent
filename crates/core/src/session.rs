@@ -102,8 +102,8 @@ pub struct SessionConfig {
     pub context_window: u64,
 }
 
-/// Commands the outside world can send a session.
-#[derive(Debug)]
+/// Commands the outside world can send a session. Not `Debug`: the
+/// provider-swap arm carries a trait object.
 pub enum Command {
     /// A new user message — starts a turn.
     UserMessage(String),
@@ -129,6 +129,18 @@ pub enum Command {
         /// New context window when the model's catalog metadata is
         /// known — keeps compaction thresholds honest after a switch.
         context_window: Option<u64>,
+    },
+    /// Swap the session's provider adapter mid-session — a model pick
+    /// from a different provider. Adapters are stateless HTTP clients,
+    /// so this is a clean swap: the next turn uses the new provider and
+    /// model immediately, with no respawn.
+    SetProvider {
+        /// Resolved adapter (built by the caller from config).
+        provider: Arc<dyn Provider>,
+        /// Provider name for ledger records (`claude`, `nous`, …).
+        provider_name: String,
+        /// Model id to use with the new provider; `None` keeps current.
+        model: Option<String>,
     },
     /// `/compact` — force a context compaction now. Only handled while
     /// idle; a turn in flight owns its convo clone and can't be touched.
@@ -411,6 +423,21 @@ impl Actor {
                 }
                 // Option changes are session state — persist even when no
                 // turn ever runs so a model pick survives a restart.
+                self.persist_now();
+            }
+            Command::SetProvider {
+                provider,
+                provider_name,
+                model,
+            } => {
+                debug!(provider = %provider_name, "session provider switched");
+                self.cfg.provider = provider;
+                self.cfg.provider_name = provider_name;
+                if let Some(m) = model {
+                    self.cfg.model = m;
+                }
+                // Provider identity is session state — persist so a
+                // restore comes back on the right adapter.
                 self.persist_now();
             }
             Command::Compact => self.compact_now(),

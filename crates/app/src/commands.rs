@@ -411,6 +411,41 @@ pub fn session_set_options(
     Ok(())
 }
 
+/// Switch the live session to another provider (cross-provider model
+/// pick). Resolves the adapter from config and hands it to the actor —
+/// adapters are stateless, so the next turn runs on the new provider
+/// immediately. Also makes `provider` the configured default so new
+/// sessions and the CLI agree with the pick.
+#[tauri::command]
+#[specta::specta]
+pub fn session_set_provider(
+    state: State<'_, Sessions>,
+    provider: String,
+    model: Option<String>,
+) -> Result<(), String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let (name, configured_model, adapter) = resolve_target(&ctx, Some(&provider))?;
+    let model = model.unwrap_or(configured_model);
+    let mut slot = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    slot.provider = Some(name.clone());
+    slot.model = Some(model.clone());
+    if let Some(h) = slot.handle.as_ref() {
+        h.command(Command::SetProvider {
+            provider: adapter,
+            provider_name: name.clone(),
+            model: Some(model),
+        })
+        .map_err(|e| e.to_string())?;
+    }
+    let mut config = ctx.config.clone();
+    config.default_provider = Some(name);
+    config.save().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// What the frontend shows while the user approves device login.
 #[derive(Debug, Clone, serde::Serialize, Type)]
 pub struct NousLoginInfo {

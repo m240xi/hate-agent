@@ -376,9 +376,9 @@ class SessionStore {
 
   /** Pick a model — persists to config.toml (CLI shares it) and
    *  hot-swaps the live session. `provider` tags catalog rows from the
-   *  multi-provider fan-out; a pick from a *different* provider can't
-   *  hot-swap (the session's adapter is fixed at spawn), so it persists
-   *  and applies from the next session instead. */
+   *  multi-provider fan-out; a pick from a *different* provider swaps
+   *  the session's adapter too (adapters are stateless), so it applies
+   *  from the next turn with no respawn. */
   async setModel(id: string, provider?: string | null): Promise<void> {
     if (!id || (id === this.model && (!provider || provider === this.providerName)))
       return;
@@ -390,10 +390,16 @@ class SessionStore {
       this.providerName = target;
       this.provider = target;
       await m.providerSetModel(target, id).catch(() => {});
+      // Swap the live session's adapter + model together — never let a
+      // model id ride into a session running a different provider.
+      await m.sessionSetProvider(target, id).catch(() => {});
+      await m
+        .sessionSetOptions(id, null, this.selectedModel?.context_tokens ?? null)
+        .catch(() => {});
       this.blocks.push({
         id: nextBlockId++,
         kind: 'text',
-        text: `provider switched to ${target} — applies to new sessions`,
+        text: `provider switched to ${target}`,
         streaming: false,
       });
       this.scheduleUiSave();
@@ -505,6 +511,13 @@ class SessionStore {
       this.sessionId = res.meta.id;
       this.sessionMeta = res.meta;
       this.applyUiState(res.ui_state);
+      // The journal is authoritative for provider/model — adopt it so
+      // the composer never shows a pair the session isn't running.
+      if (res.meta.provider) {
+        this.providerName = res.meta.provider;
+        this.provider = res.meta.provider;
+      }
+      if (res.meta.model) this.model = res.meta.model;
       // A code session owns its folder — adopt it so the file tree and
       // future turns agree with what the session was created against.
       if (

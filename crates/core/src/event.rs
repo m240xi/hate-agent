@@ -111,6 +111,16 @@ pub enum Event {
         /// The checkpoint id.
         id: CheckpointId,
     },
+    /// A learned skill was created or updated (auto-reflection or the
+    /// `skill_save` tool).
+    SkillSaved {
+        /// Skill slug.
+        name: String,
+        /// Human title.
+        title: String,
+        /// Body size in bytes.
+        bytes: u32,
+    },
     /// The current turn finished.
     TurnComplete {
         /// Outcome details.

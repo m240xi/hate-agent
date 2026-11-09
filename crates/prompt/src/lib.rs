@@ -23,6 +23,8 @@ pub enum Segment {
     Environment,
     /// S3 — project instructions (AGENTS.md etc.).
     Project,
+    /// S3.5 — learned-skill index + matching skill bodies.
+    Skills,
     /// S4 — conversation history.
     History,
     /// S5 — the new user message.

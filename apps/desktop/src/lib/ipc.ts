@@ -160,6 +160,36 @@ export async function providerRemove(name: string): Promise<void> {
   return invoke<void>('provider_remove', { name });
 }
 
+// Learned skills — markdown knowledge files the agent authors from
+// sessions and reuses via the prompt index + `skill_view` tool.
+export interface SkillInfo {
+  name: string;
+  title: string;
+  triggers: string[];
+  bytes: number;
+  updated: number;
+}
+
+export async function skillsList(): Promise<SkillInfo[]> {
+  return invoke<SkillInfo[]>('skills_list');
+}
+
+export async function skillsRead(name: string): Promise<string> {
+  return invoke<string>('skills_read', { name });
+}
+
+export async function skillsDelete(name: string): Promise<boolean> {
+  return invoke<boolean>('skills_delete', { name });
+}
+
+export async function skillsAutoGet(): Promise<boolean> {
+  return invoke<boolean>('skills_auto_get');
+}
+
+export async function skillsSetAuto(enabled: boolean): Promise<void> {
+  return invoke<void>('skills_set_auto', { enabled });
+}
+
 // Claude subscription OAuth — begin opens the browser and returns the
 // authorize URL; complete exchanges the pasted callback code. Result
 // arrives on the `auth-event` channel as `claude_login`.

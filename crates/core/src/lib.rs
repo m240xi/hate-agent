@@ -13,6 +13,7 @@ pub mod mcp;
 pub mod persist;
 pub mod provider;
 mod session;
+pub mod skills;
 mod state;
 mod tools;
 mod types;
@@ -30,6 +31,7 @@ pub use session::{
     Command, Limits, PermissionHub, SessionConfig, SessionError, SessionHandle, SessionSnapshot,
     spawn_session,
 };
+pub use skills::{Skill, SkillStore};
 pub use state::SessionState;
 pub use tools::{ToolOutput, WorkspaceTools};
 pub use types::{

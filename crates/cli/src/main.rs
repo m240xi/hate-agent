@@ -370,6 +370,9 @@ async fn run(
         .join("hate-agent")
         .join("mcp.json");
     let mcp = std::sync::Arc::new(hate_core::McpHub::from_config_file(&mcp_path).await);
+    let skills = hate_core::SkillStore::default_dir()
+        .map(|d| std::sync::Arc::new(hate_core::SkillStore::new(d)));
+    let auto_skills = hate_auth::Config::load().map_or(true, |c| c.auto_skills);
 
     let session = spawn_session(SessionConfig {
         provider,
@@ -386,6 +389,8 @@ async fn run(
             .map(std::sync::Arc::new),
         permissions: std::sync::Arc::new(PermissionHub::default()),
         mcp: Some(mcp),
+        skills,
+        auto_skills,
         context_window,
     });
 

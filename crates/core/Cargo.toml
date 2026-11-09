@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+dirs = "6"
 futures-util = "0.3"
 hate-context = { path = "../context" }
 hate-ledger = { path = "../ledger" }

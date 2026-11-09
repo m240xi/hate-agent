@@ -13,10 +13,15 @@
     NousLoginInfo,
     ProviderInfo,
     ProviderPreset,
+    SkillInfo,
   } from '../ipc';
 
   let providers = $state<ProviderInfo[]>([]);
   let presets = $state<ProviderPreset[]>([]);
+  let skills = $state<SkillInfo[]>([]);
+  let skillAuto = $state(true);
+  let skillOpen = $state<string | null>(null);
+  let skillBodies = $state<Record<string, string>>({});
   let appInfo = $state<AppInfo | null>(null);
   let inTauri = $state(false);
   let error = $state<string | null>(null);
@@ -46,6 +51,8 @@
     const m = await import('../ipc');
     providers = await m.providersList().catch(() => []);
     presets = await m.providerPresets().catch(() => []);
+    skills = await m.skillsList().catch(() => []);
+    skillAuto = await m.skillsAutoGet().catch(() => true);
     appInfo = await m.appInfo().catch(() => null);
     await loadMcp();
   }
@@ -159,6 +166,36 @@
       claudeBusy = false;
       claudeError = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  async function toggleSkill(name: string): Promise<void> {
+    if (skillOpen === name) {
+      skillOpen = null;
+      return;
+    }
+    skillOpen = name;
+    if (!skillBodies[name]) {
+      const m = await import('../ipc');
+      const body = await m.skillsRead(name).catch(() => '(unreadable)');
+      skillBodies = { ...skillBodies, [name]: body };
+    }
+  }
+
+  async function removeSkill(name: string): Promise<void> {
+    const m = await import('../ipc');
+    await m.skillsDelete(name).catch((e: unknown) => {
+      error = String(e);
+    });
+    skillOpen = null;
+    await refresh();
+  }
+
+  async function setAutoSkills(enabled: boolean): Promise<void> {
+    skillAuto = enabled;
+    const m = await import('../ipc');
+    await m.skillsSetAuto(enabled).catch((e: unknown) => {
+      error = String(e);
+    });
   }
 
   async function finishClaudeLogin(): Promise<void> {
@@ -621,6 +658,51 @@
           >
             Clear
           </button>
+        {/if}
+      </div>
+    </section>
+
+    <section class="group">
+      <h2 class="group-title">Skills</h2>
+      <p class="group-hint">
+        Markdown knowledge files the agent writes from your sessions — best
+        practices, commands, and pitfalls it reuses automatically. Matched
+        skills ride the prompt; everything else is one
+        <code class="mono">skill_view</code> call away.
+      </p>
+      <div class="card">
+        <label class="skill-toggle">
+          <input
+            type="checkbox"
+            checked={skillAuto}
+            onchange={(e) => setAutoSkills(e.currentTarget.checked)}
+          />
+          <span>Auto-create skills from sessions (one small model call after 3+ turns)</span>
+        </label>
+        {#if skills.length === 0}
+          <p class="muted skill-empty">No skills yet — they appear here as you work.</p>
+        {:else}
+          <div class="skill-list">
+            {#each skills as s (s.name)}
+              <div class="skill-row">
+                <button class="skill-head" onclick={() => toggleSkill(s.name)}>
+                  <span class="skill-title">
+                    {skillOpen === s.name ? '▾' : '▸'} {s.title}
+                  </span>
+                  <span class="skill-meta mono">
+                    {s.name} · {(s.bytes / 1024).toFixed(1)} KB
+                    {#if s.triggers.length > 0}
+                      · {s.triggers.join(', ')}
+                    {/if}
+                  </span>
+                </button>
+                <button class="btn ghost" onclick={() => removeSkill(s.name)}>Delete</button>
+              </div>
+              {#if skillOpen === s.name}
+                <pre class="skill-body mono">{skillBodies[s.name] ?? 'loading…'}</pre>
+              {/if}
+            {/each}
+          </div>
         {/if}
       </div>
     </section>
@@ -1161,6 +1243,68 @@
     font-family: var(--font-mono);
     font-size: 10px;
     color: var(--fg-3);
+  }
+  .skill-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--fg-1);
+    cursor: pointer;
+  }
+  .skill-toggle input {
+    accent-color: var(--accent);
+  }
+  .skill-empty {
+    padding: 0 14px 12px;
+    font-size: 12px;
+  }
+  .skill-list {
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--border);
+  }
+  .skill-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px 6px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .skill-row:last-of-type {
+    border-bottom: none;
+  }
+  .skill-head {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    text-align: left;
+    background: none;
+    border: none;
+    padding: 4px 0;
+    cursor: pointer;
+  }
+  .skill-title {
+    font-size: 12px;
+    color: var(--fg-0);
+  }
+  .skill-meta {
+    font-size: 10px;
+    color: var(--fg-3);
+  }
+  .skill-body {
+    margin: 0;
+    padding: 10px 14px;
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--fg-1);
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--border);
+    max-height: 260px;
+    overflow: auto;
+    white-space: pre-wrap;
   }
   .workspace-row {
     display: flex;

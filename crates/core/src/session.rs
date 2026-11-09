@@ -26,6 +26,7 @@ use crate::event::{AgentError, Event};
 use crate::mcp::{MCP_PREFIX, McpHub};
 use crate::persist::{PersistCtx, PersistedSession};
 use crate::provider::{ChatRequest, Delta, Message, Provider, ProviderError, ThinkingLevel};
+use crate::skills::{self, Skill, SkillStore, build_digest, parse_reflection, text_signals};
 use crate::state::SessionState;
 use crate::tools::{ToolOutput, WorkspaceTools};
 use crate::types::{
@@ -86,6 +87,14 @@ pub struct SessionConfig {
     /// servers are configured. Live `configure()` reloads are visible
     /// from the next turn on.
     pub mcp: Option<Arc<McpHub>>,
+    /// Learned-skill library. `None` disables skill tools and prompt
+    /// injection; chat sessions still get it (skills aren't
+    /// workspace-bound).
+    pub skills: Option<Arc<SkillStore>>,
+    /// Whether a background reflection pass may author a skill after
+    /// enough turns. Independent of `skills` (which enables manual
+    /// `skill_save`).
+    pub auto_skills: bool,
     /// Permission decision router shared with the in-flight turn task.
     pub permissions: Arc<PermissionHub>,
     /// Model context window in tokens; `0` = unknown → compaction
@@ -247,6 +256,14 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
         running: false,
     }));
 
+    // Workspace domain signals drive skill auto-injection; chat sessions
+    // have none and rely on the skill index + `skill_view`.
+    let signals = cfg
+        .tools
+        .as_ref()
+        .map(|t| skills::workspace_signals(t.root()))
+        .unwrap_or_default();
+
     let actor = Actor {
         cfg,
         rx,
@@ -261,6 +278,8 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
         cancel: CancellationToken::new(),
         turn_done: None,
         cost_usd,
+        signals,
+        reflection_attempted: false,
         snapshot: snapshot.clone(),
     };
     tokio::spawn(actor.run());
@@ -296,6 +315,11 @@ struct Actor {
     turn_done: Option<mpsc::Receiver<TurnReport>>,
     /// Accumulated USD spend this task (from priced ledger records).
     cost_usd: f64,
+    /// Domain signals captured at spawn (workspace extensions/configs) —
+    /// matched against skill triggers for prompt injection.
+    signals: Vec<String>,
+    /// One auto-reflection attempt per session, ever.
+    reflection_attempted: bool,
     snapshot: Arc<std::sync::RwLock<SessionSnapshot>>,
 }
 
@@ -431,17 +455,19 @@ impl Actor {
     /// S0 + S3 — the system string `begin_turn` sends, so compaction
     /// estimates measure what the provider actually receives.
     fn system_prompt(&self) -> String {
-        // S0 system prompt + S3 project instructions when the workspace
-        // declares them (AGENTS.md etc.). Stable per session, so prefix
-        // caching still hits.
-        match self.cfg.tools.as_ref().and_then(|t| t.project_context()) {
-            Some(ctx) => format!(
-                "{}\n\nProject instructions (from the workspace):\n{}",
-                hate_prompt::SYSTEM_PROMPT,
-                ctx
-            ),
-            None => hate_prompt::SYSTEM_PROMPT.to_string(),
+        // S0 system prompt + S3 project instructions + S3.5 learned
+        // skills. Stable per session except when a skill is authored —
+        // that costs one prefix-cache miss and buys immediate reuse.
+        let mut out = hate_prompt::SYSTEM_PROMPT.to_string();
+        if let Some(ctx) = self.cfg.tools.as_ref().and_then(|t| t.project_context()) {
+            out.push_str("\n\nProject instructions (from the workspace):\n");
+            out.push_str(ctx);
         }
+        if let Some(store) = self.cfg.skills.as_ref() {
+            out.push_str("\n\n");
+            out.push_str(&store.render_prompt(&self.signals));
+        }
+        out
     }
 
     #[instrument(skip_all, fields(turn = self.turn.0 + 1))]
@@ -480,6 +506,7 @@ impl Actor {
         let thinking = self.cfg.thinking;
         let tools = self.cfg.tools.clone();
         let mcp = self.cfg.mcp.clone();
+        let skills = self.cfg.skills.clone();
         let permissions = self.cfg.permissions.clone();
         let ledger = self.cfg.ledger.clone();
         let context_window = self.cfg.context_window;
@@ -497,6 +524,7 @@ impl Actor {
                 thinking,
                 tools,
                 mcp,
+                skills,
                 permissions,
                 cancel,
                 events,
@@ -610,6 +638,118 @@ impl Actor {
         // Every turn outcome (completed/failed/cancelled) changes history
         // or counters — this is the "context always survives" write.
         self.persist_now();
+        self.maybe_reflect();
+    }
+
+    /// After a completed turn, maybe spawn the background skill
+    /// reflection pass: enough conversation, a detectable domain, no
+    /// matching skill yet, auto-skills enabled — and at most once per
+    /// session. The pass is one small provider call whose result lands
+    /// as a skill file plus a transcript note.
+    fn maybe_reflect(&mut self) {
+        const MIN_TURNS: u32 = 3;
+        if self.reflection_attempted || !self.cfg.auto_skills || self.turn.0 < MIN_TURNS {
+            return;
+        }
+        let Some(store) = self.cfg.skills.clone() else {
+            return;
+        };
+        // Domain probe: workspace signals, plus recent user text so
+        // chat/research sessions (no workspace) can match too.
+        let mut probe = self.signals.clone();
+        for m in self.history.iter().rev().take(6) {
+            if let Message::User { content } = m {
+                probe.extend(text_signals(content));
+            }
+        }
+        // A skill already covering this domain means there's nothing to
+        // learn from scratch — skip the call entirely.
+        if store.load().iter().any(|s| s.matches(&probe)) {
+            return;
+        }
+        self.reflection_attempted = true;
+
+        let digest = build_digest(&self.history, &self.signals);
+        let provider = Arc::clone(&self.cfg.provider);
+        let model = self.cfg.model.clone();
+        let provider_name = self.cfg.provider_name.clone();
+        let events = self.events.clone();
+        let ledger = self.cfg.ledger.clone();
+        let session_id = self.session_id;
+        let turn_id = self.turn;
+        tokio::spawn(async move {
+            let req = ChatRequest {
+                model: model.clone(),
+                system: Some(skills::REFLECTION_SYSTEM.to_string()),
+                messages: vec![Message::User { content: digest }],
+                tools: Vec::new(),
+                // Enough headroom for a 120-line skill body without
+                // inviting the model to write an essay.
+                max_output_tokens: 2000,
+                temperature: None,
+                thinking: ThinkingLevel::Off,
+            };
+            let started = Instant::now();
+            let mut stream = provider.stream(req, CancellationToken::new());
+            let mut text = String::new();
+            let mut usage = TokenUsage::default();
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(Delta::Text(t)) => text.push_str(&t),
+                    Ok(Delta::Usage(u)) => usage = u,
+                    Ok(Delta::Done) => break,
+                    Err(e) => {
+                        debug!(error = %e, "skill reflection call failed");
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            // Keep accounting honest — the reflection call is billed.
+            if let Some(ledger) = ledger {
+                let rec = RecordRequest {
+                    session_id: session_id.0.to_string(),
+                    turn_id: turn_id.0,
+                    request_id: Uuid::new_v4().to_string(),
+                    model,
+                    provider: provider_name,
+                    input_tokens: usage.input,
+                    cached_input_tokens: usage.cached_input,
+                    output_tokens: usage.output,
+                    thinking_tokens: usage.thinking,
+                    latency_ms: started.elapsed().as_millis() as u64,
+                };
+                if let Err(e) = ledger.record_request(&rec) {
+                    debug!(error = %e, "reflection ledger record failed");
+                }
+            }
+            let Some((title, triggers, body)) = parse_reflection(&text) else {
+                debug!("skill reflection produced no usable skill");
+                return;
+            };
+            let skill = Skill {
+                name: skills::slugify(&title),
+                title,
+                triggers,
+                updated: skills::now_secs(),
+                body,
+            };
+            // Never clobber an existing skill (possibly hand-edited).
+            if store.get(&skill.name).is_some() {
+                debug!(name = %skill.name, "reflection skipped: skill exists");
+                return;
+            }
+            match store.save(&skill) {
+                Ok(saved) => {
+                    let _ = events.send(Event::SkillSaved {
+                        name: saved.name,
+                        title: saved.title,
+                        bytes: saved.body.len() as u32,
+                    });
+                }
+                Err(e) => warn!(error = %e, "skill reflection save failed"),
+            }
+        });
     }
 
     /// Persist this turn's captured file originals as a checkpoint and
@@ -818,6 +958,8 @@ enum ToolBackend<'a> {
     Ws(&'a Arc<WorkspaceTools>),
     /// Tools advertised by configured MCP servers.
     Mcp(&'a Arc<McpHub>),
+    /// Learned-skill tools (`skill_view`, `skill_save`).
+    Skill(&'a Arc<SkillStore>),
 }
 
 impl ToolBackend<'_> {
@@ -826,6 +968,10 @@ impl ToolBackend<'_> {
         match self {
             Self::Ws(t) => t.gate_reason(call),
             Self::Mcp(h) => h.gate_reason(call),
+            // Skills are the agent's own memory: saving is advertised,
+            // visible in the transcript, and auto-created by design —
+            // a permission prompt would defeat the feature.
+            Self::Skill(_) => None,
         }
     }
 
@@ -835,6 +981,7 @@ impl ToolBackend<'_> {
         match self {
             Self::Ws(t) => t.execute(call).await,
             Self::Mcp(h) => h.execute(call, cancel).await,
+            Self::Skill(s) => s.execute(call),
         }
     }
 
@@ -843,6 +990,7 @@ impl ToolBackend<'_> {
         match self {
             Self::Ws(t) => t.tool_error(msg),
             Self::Mcp(h) => h.tool_error(msg),
+            Self::Skill(s) => s.tool_error(msg),
         }
     }
 }
@@ -852,9 +1000,11 @@ impl ToolBackend<'_> {
 fn error_backend<'a>(
     mcp: Option<&'a Arc<McpHub>>,
     tools: Option<&'a Arc<WorkspaceTools>>,
+    skills: Option<&'a Arc<SkillStore>>,
 ) -> ToolBackend<'a> {
     mcp.map(ToolBackend::Mcp)
         .or_else(|| tools.map(ToolBackend::Ws))
+        .or_else(|| skills.map(ToolBackend::Skill))
         .expect("error_backend requires at least one tool backend")
 }
 
@@ -873,6 +1023,7 @@ async fn run_turn(
     thinking: ThinkingLevel,
     tools: Option<Arc<WorkspaceTools>>,
     mcp: Option<Arc<McpHub>>,
+    skills: Option<Arc<SkillStore>>,
     permissions: Arc<PermissionHub>,
     cancel: CancellationToken,
     events: broadcast::Sender<Event>,
@@ -890,6 +1041,9 @@ async fn run_turn(
     let mut specs = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
     if let Some(hub) = mcp.as_ref() {
         specs.extend(hub.specs());
+    }
+    if let Some(store) = skills.as_ref() {
+        specs.extend(store.specs());
     }
     let mut total_usage = TokenUsage::default();
     let mut total_cost: Option<f64> = None;
@@ -1080,7 +1234,7 @@ async fn run_turn(
             return;
         }
 
-        if tools.is_none() && mcp.is_none() {
+        if tools.is_none() && mcp.is_none() && skills.is_none() {
             let _ = done_tx
                 .send(TurnReport::Failed {
                     error: ProviderError::Stream(
@@ -1109,11 +1263,14 @@ async fn run_turn(
         // its result, even if the user cancels immediately after.
         for call in calls {
             emit(Event::ToolStarted { call: call.clone() });
-            // `mcp__…` routes to the MCP hub; everything else to the
-            // workspace tools. A call for a backend this session lacks
-            // becomes an honest tool error, not a turn failure.
+            // `mcp__…` routes to the MCP hub, `skill_*` to the skill
+            // store, everything else to the workspace tools. A call for
+            // a backend this session lacks becomes an honest tool
+            // error, not a turn failure.
             let backend = if call.name.as_str().starts_with(MCP_PREFIX) {
                 mcp.as_ref().map(ToolBackend::Mcp)
+            } else if matches!(call.name.as_str(), "skill_view" | "skill_save") {
+                skills.as_ref().map(ToolBackend::Skill)
             } else {
                 tools.as_ref().map(ToolBackend::Ws)
             };
@@ -1136,11 +1293,31 @@ async fn run_turn(
                     }
                     None => b.execute(&call, &cancel).await,
                 },
-                None => error_backend(mcp.as_ref(), tools.as_ref()).tool_error(format!(
-                    "unknown tool `{}` for this session",
-                    call.name.as_str()
-                )),
+                None => error_backend(mcp.as_ref(), tools.as_ref(), skills.as_ref()).tool_error(
+                    format!("unknown tool `{}` for this session", call.name.as_str()),
+                ),
             };
+            // Surface skill authorship in the transcript — the UI shows
+            // "learned skill" notes so auto-learning is never silent.
+            if out.ok
+                && call.name.as_str() == "skill_save"
+                && let Some(store) = skills.as_ref()
+            {
+                let name = call
+                    .args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| call.args.get("title").and_then(|v| v.as_str()))
+                    .map(skills::slugify)
+                    .unwrap_or_default();
+                if let Some(skill) = store.get(&name) {
+                    let _ = events.send(Event::SkillSaved {
+                        name: skill.name,
+                        title: skill.title,
+                        bytes: skill.body.len() as u32,
+                    });
+                }
+            }
             emit(Event::ToolOutput {
                 call_id: call.id.clone(),
                 preview: out.preview,

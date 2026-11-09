@@ -803,6 +803,15 @@ class SessionStore {
           ...this.checkpoints,
         ];
         break;
+      case 'skill_saved':
+        // The agent authored a reusable skill — visible, never silent.
+        this.blocks.push({
+          id: nextBlockId++,
+          kind: 'text',
+          text: `📚 learned skill: ${e.title} — ${(e.bytes / 1024).toFixed(1)} KB (Settings → Skills)`,
+          streaming: false,
+        });
+        break;
       case 'turn_complete':
         this.usage = { ...e.outcome.usage };
         const t = this.sessionTotals;

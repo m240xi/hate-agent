@@ -82,6 +82,8 @@ fn session_with(provider: Arc<dyn Provider>) -> hate_core::SessionHandle {
         tools: None,
         permissions: Arc::new(hate_core::PermissionHub::default()),
         mcp: None,
+        skills: None,
+        auto_skills: false,
         context_window: 0,
     })
 }
@@ -361,6 +363,8 @@ async fn tool_calls_execute_and_feed_results_back() {
         tools: Some(tools),
         permissions: Arc::new(hate_core::PermissionHub::default()),
         mcp: None,
+        skills: None,
+        auto_skills: false,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -473,6 +477,8 @@ async fn gated_tool_waits_for_permission_then_denies() {
         tools: Some(tools),
         permissions,
         mcp: None,
+        skills: None,
+        auto_skills: false,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -549,6 +555,8 @@ async fn allow_session_skips_repeat_prompts() {
         tools: Some(tools),
         permissions: Arc::new(PermissionHub::default()),
         mcp: None,
+        skills: None,
+        auto_skills: false,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -626,6 +634,8 @@ async fn compaction_bounds_journaled_history() {
         tools: None,
         permissions: Arc::new(hate_core::PermissionHub::default()),
         mcp: None,
+        skills: None,
+        auto_skills: false,
         // Tiny window → compacts as soon as history reaches the tail+4
         // minimum; the system prompt alone already exceeds 72% of it.
         context_window: 400,
@@ -735,6 +745,8 @@ async fn stale_tool_outputs_elide_next_turn() {
         tools: Some(tools),
         permissions: Arc::new(hate_core::PermissionHub::default()),
         mcp: None,
+        skills: None,
+        auto_skills: false,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -758,4 +770,246 @@ async fn stale_tool_outputs_elide_next_turn() {
         !turn2_req.contains(&"x".repeat(9000)),
         "full tool output leaked into turn 2 request"
     );
+}
+
+// ── dynamic skills ────────────────────────────────────────────────────────
+
+/// Provider that records every request's system prompt so tests can
+/// assert what prompt assembly produced.
+struct CaptureSystem {
+    script: Vec<Delta>,
+    systems: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+}
+
+impl Provider for CaptureSystem {
+    fn stream(
+        &self,
+        req: ChatRequest,
+        _cancel: CancellationToken,
+    ) -> BoxStream<'static, Result<Delta, ProviderError>> {
+        self.systems.lock().unwrap().push(req.system);
+        let script = self.script.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            for d in script {
+                if tx.send(Ok(d)).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Box::pin(futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)))
+    }
+
+    fn count_tokens<'a>(
+        &'a self,
+        _req: &'a ChatRequest,
+    ) -> BoxFuture<'a, Result<u64, ProviderError>> {
+        Box::pin(async { Ok(0) })
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            vision: false,
+            tools: true,
+            cache: CacheMode::None,
+            thinking: false,
+        }
+    }
+}
+
+/// `skill_save` from the model lands on disk and in the event stream.
+#[tokio::test]
+async fn skill_save_tool_persists_and_emits() {
+    use hate_core::{SkillStore, ToolCall, ToolName};
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(SkillStore::new(dir.path().join("skills")));
+    let body = "Always use Rojo for file sync. ".repeat(20);
+
+    let provider = Arc::new(Rounds {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+            vec![
+                Delta::ToolCall(ToolCall {
+                    id: "c1".to_string(),
+                    name: ToolName::new("skill_save"),
+                    args: json!({
+                        "title": "Roblox Luau",
+                        "triggers": ["roblox", "luau"],
+                        "body": body,
+                    }),
+                }),
+                Delta::Done,
+            ],
+            vec![Delta::Text("saved".to_string()), Delta::Done],
+        ])),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider,
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: None,
+        mcp: None,
+        skills: Some(store.clone()),
+        auto_skills: false,
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        context_window: 0,
+    });
+    let mut rx = session.subscribe();
+    session
+        .command(Command::UserMessage("save what you learned".to_string()))
+        .expect("command");
+
+    let mut saw_skill_event = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("stream open");
+        if let Event::SkillSaved { name, bytes, .. } = &ev {
+            assert_eq!(name, "roblox-luau");
+            assert!(*bytes > 200);
+            saw_skill_event = true;
+        }
+        if matches!(ev, Event::TurnComplete { .. } | Event::Failed { .. }) {
+            break;
+        }
+    }
+    assert!(saw_skill_event, "expected a SkillSaved event");
+    let saved = store.get("roblox-luau").expect("skill on disk");
+    assert_eq!(saved.triggers, vec!["roblox", "luau"]);
+    assert!(saved.body.contains("Rojo"));
+}
+
+/// A skill matching the workspace signals is inlined into the system
+/// prompt at spawn.
+#[tokio::test]
+async fn matching_skill_injected_into_system_prompt() {
+    use hate_core::{Skill, SkillStore, WorkspaceTools};
+
+    let skills_dir = tempfile::tempdir().expect("skills tempdir");
+    let store = Arc::new(SkillStore::new(skills_dir.path().join("skills")));
+    store
+        .save(&Skill {
+            name: "roblox-luau".to_string(),
+            title: "Roblox Luau".to_string(),
+            triggers: vec!["roblox".to_string(), "luau".to_string()],
+            updated: 0,
+            body: format!("# Luau\n\n{}", "Use --!strict everywhere. ".repeat(20)),
+        })
+        .expect("save skill");
+
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(ws.path().join("main.luau"), "print('hi')").expect("write");
+    let tools = Arc::new(WorkspaceTools::new(ws.path()).expect("tools"));
+
+    let systems = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = Arc::new(CaptureSystem {
+        script: vec![Delta::Text("ok".to_string()), Delta::Done],
+        systems: systems.clone(),
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider,
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: Some(tools),
+        mcp: None,
+        skills: Some(store),
+        auto_skills: false,
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        context_window: 0,
+    });
+    let mut rx = session.subscribe();
+    drive_turn(&session, &mut rx, "hello").await;
+
+    let sys = systems
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .flatten()
+        .expect("system prompt recorded");
+    assert!(sys.contains("## Learned skills"), "skills section missing");
+    assert!(sys.contains("- roblox-luau — Roblox Luau"));
+    assert!(
+        sys.contains("Use --!strict everywhere."),
+        "matching skill body not inlined"
+    );
+}
+
+/// Three completed turns with auto-skills on triggers one reflection
+/// call; its output becomes a skill file and a `SkillSaved` event.
+#[tokio::test]
+async fn reflection_authors_skill_after_three_turns() {
+    use hate_core::SkillStore;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(SkillStore::new(dir.path().join("skills")));
+    let body = "Prefer `luau-lsp` for type checking. ".repeat(15);
+    let reflection = format!("TITLE: Roblox Luau Basics\nTRIGGERS: roblox, luau\n{body}");
+
+    let provider = Arc::new(Rounds {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+            vec![Delta::Text("a".to_string()), Delta::Done],
+            vec![Delta::Text("b".to_string()), Delta::Done],
+            vec![Delta::Text("c".to_string()), Delta::Done],
+            vec![Delta::Text(reflection), Delta::Done],
+        ])),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider,
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: None,
+        mcp: None,
+        skills: Some(store.clone()),
+        auto_skills: true,
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        context_window: 0,
+    });
+    let mut rx = session.subscribe();
+    drive_turn(&session, &mut rx, "working on my roblox game").await;
+    drive_turn(&session, &mut rx, "adding a part with luau").await;
+    drive_turn(&session, &mut rx, "now a click detector").await;
+
+    // Reflection runs in the background after turn 3 — wait for it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_event = false;
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(Event::SkillSaved { name, .. })) => {
+                assert_eq!(name, "roblox-luau-basics");
+                saw_event = true;
+                break;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    assert!(saw_event, "expected reflection to emit SkillSaved");
+    let saved = store.get("roblox-luau-basics").expect("skill on disk");
+    assert!(saved.body.contains("luau-lsp"));
+    assert_eq!(saved.triggers, vec!["roblox", "luau"]);
 }

@@ -48,6 +48,7 @@ export type SessionEvent =
   | { type: 'tokens_counted'; usage: TokenUsage; turn: number }
   | { type: 'compaction_started'; reason: string; before: number; after: number }
   | { type: 'checkpoint_created'; id: string }
+  | { type: 'skill_saved'; name: string; title: string; bytes: number }
   | { type: 'turn_complete'; outcome: TurnOutcome }
   | { type: 'failed'; reason: FailureReason }
   | { type: 'error'; error: { kind?: string; message?: string } }

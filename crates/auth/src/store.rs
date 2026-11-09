@@ -38,7 +38,7 @@ pub struct ProviderConfig {
 }
 
 /// `~/.config/hate-agent/config.toml` (or platform equivalent).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Name of the provider used when none is specified.
     #[serde(default)]
@@ -49,6 +49,25 @@ pub struct Config {
     /// Folder the code session operates in (picked in the UI).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
+    /// Whether sessions may auto-author learned skills after enough
+    /// turns. Missing in old configs → on.
+    #[serde(default = "default_true")]
+    pub auto_skills: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            default_provider: None,
+            providers: BTreeMap::new(),
+            workspace_path: None,
+            auto_skills: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Config {

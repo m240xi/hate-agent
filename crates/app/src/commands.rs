@@ -175,6 +175,11 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
     // MCP tools are workspace-independent — every session (chat
     // included) sees whatever servers are currently connected.
     let mcp = app.state::<McpState>().hub.clone();
+    // Learned skills live in the shared config dir; chat sessions get
+    // them too. `auto_skills` gates the background reflection pass.
+    let skills = hate_core::SkillStore::default_dir()
+        .map(|d| std::sync::Arc::new(hate_core::SkillStore::new(d)));
+    let auto_skills = ctx.config.auto_skills;
     let handle = spawn_session(SessionConfig {
         provider,
         model,
@@ -185,6 +190,8 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         persist,
         tools,
         mcp: Some(mcp),
+        skills,
+        auto_skills,
         permissions: std::sync::Arc::new(PermissionHub::default()),
         context_window: guard.context_window,
     });
@@ -933,6 +940,82 @@ pub async fn auth_claude_complete(
     };
     let _ = app.emit("auth-event", payload);
     result.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// One row of the Settings → Skills list — metadata only; bodies load
+/// on demand via [`skills_read`].
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct SkillInfo {
+    /// Slug (filename stem).
+    pub name: String,
+    /// Human title.
+    pub title: String,
+    /// Trigger keywords.
+    pub triggers: Vec<String>,
+    /// Body size in bytes.
+    pub bytes: u32,
+    /// Last-write unix seconds.
+    pub updated: u32,
+}
+
+fn skill_store() -> Result<hate_core::SkillStore, String> {
+    let dir = hate_core::SkillStore::default_dir()
+        .ok_or_else(|| "no config directory available".to_string())?;
+    Ok(hate_core::SkillStore::new(dir))
+}
+
+/// Learned skills, sorted by name.
+#[tauri::command]
+#[specta::specta]
+pub fn skills_list() -> Result<Vec<SkillInfo>, String> {
+    let store = skill_store()?;
+    Ok(store
+        .load()
+        .into_iter()
+        .map(|s| SkillInfo {
+            name: s.name,
+            title: s.title,
+            triggers: s.triggers,
+            bytes: u32::try_from(s.body.len()).unwrap_or(u32::MAX),
+            updated: u32::try_from(s.updated).unwrap_or(u32::MAX),
+        })
+        .collect())
+}
+
+/// A skill's markdown body.
+#[tauri::command]
+#[specta::specta]
+pub fn skills_read(name: String) -> Result<String, String> {
+    let store = skill_store()?;
+    store
+        .get(&name)
+        .map(|s| s.body)
+        .ok_or_else(|| format!("no skill named {name:?}"))
+}
+
+/// Delete a skill file. Returns whether anything was removed.
+#[tauri::command]
+#[specta::specta]
+pub fn skills_delete(name: String) -> Result<bool, String> {
+    let store = skill_store()?;
+    store.delete(&name)
+}
+
+/// Whether automatic skill authoring is on (config `auto_skills`).
+#[tauri::command]
+#[specta::specta]
+pub fn skills_auto_get() -> Result<bool, String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    Ok(ctx.config.auto_skills)
+}
+
+/// Toggle automatic skill authoring (`config.toml` → `auto_skills`).
+#[tauri::command]
+#[specta::specta]
+pub fn skills_set_auto(enabled: bool) -> Result<(), String> {
+    let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    ctx.config.auto_skills = enabled;
+    ctx.config.save().map_err(|e| e.to_string())
 }
 
 /// Current workspace folder for code sessions (`None` = app data dir).

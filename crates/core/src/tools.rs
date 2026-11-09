@@ -114,6 +114,11 @@ impl WorkspaceTools {
         })
     }
 
+    /// Canonicalized workspace root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Workspace instruction-file contents for prompt assembly (S3) —
     /// `None` when the repo declares none.
     pub fn project_context(&self) -> Option<&str> {

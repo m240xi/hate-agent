@@ -36,6 +36,9 @@ enum Commands {
         /// Override the configured model.
         #[arg(short, long)]
         model: Option<String>,
+        /// Reasoning effort: off, low, medium, high.
+        #[arg(short, long)]
+        thinking: Option<String>,
     },
     /// List models the configured provider exposes.
     Models {
@@ -91,7 +94,8 @@ async fn main() {
             prompt,
             provider,
             model,
-        } => run(prompt, provider, model).await,
+            thinking,
+        } => run(prompt, provider, model, thinking).await,
         Commands::Models { provider } => models(provider).await,
     };
     std::process::exit(code);
@@ -254,7 +258,12 @@ fn dirs_data_dir() -> PathBuf {
         .join("hate-agent")
 }
 
-async fn run(prompt: String, provider: Option<String>, model: Option<String>) -> i32 {
+async fn run(
+    prompt: String,
+    provider: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
+) -> i32 {
     let prompt = if prompt == "-" {
         let mut buf = String::new();
         if std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).is_err() {
@@ -281,10 +290,23 @@ async fn run(prompt: String, provider: Option<String>, model: Option<String>) ->
         }
     };
 
+    let thinking = match thinking
+        .as_deref()
+        .map(hate_core::ThinkingLevel::parse)
+        .transpose()
+    {
+        Ok(t) => t.unwrap_or_default(),
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+
     let session = spawn_session(SessionConfig {
         provider,
         model: model.clone(),
         provider_name: provider_name.clone(),
+        thinking,
         limits: Limits::default(),
         ledger: ledger(),
     });

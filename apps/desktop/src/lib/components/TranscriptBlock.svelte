@@ -41,6 +41,8 @@
   </div>
 {:else if block.kind === 'tool' && block.call}
   <ToolCard {block} />
+{:else if block.kind === 'error'}
+  <div class="error-msg rise">{block.text}</div>
 {/if}
 
 <style>
@@ -113,5 +115,16 @@
     color: var(--fg-2);
     white-space: pre-wrap;
     padding: 4px 0 6px;
+  }
+  .error-msg {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--err);
+    white-space: pre-wrap;
+    word-break: break-word;
+    padding: 6px 10px;
+    border-left: 2px solid var(--err);
+    background: var(--bg-1);
+    border-radius: 0 var(--radius) var(--radius) 0;
   }
 </style>

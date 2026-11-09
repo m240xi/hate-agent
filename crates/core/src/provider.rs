@@ -129,16 +129,46 @@ pub struct ToolSpec {
 }
 
 /// Thinking/reasoning effort hint. Vendors map this onto their own
-/// controls (Anthropic `thinking.budget_tokens`, `OpenAI` `reasoning_effort`).
+/// controls (Anthropic `thinking.budget_tokens`, Nous `reasoning.effort`,
+/// generic OpenAI-compatible `reasoning_effort`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThinkingLevel {
-    /// No extended reasoning.
+    /// No extended reasoning — the field is omitted and the provider's
+    /// own default applies.
     #[default]
     Off,
     /// Light reasoning.
     Low,
+    /// Moderate reasoning.
+    Medium,
     /// Full reasoning budget.
     High,
+}
+
+impl ThinkingLevel {
+    /// Parse a UI/CLI string (`off`, `low`, `medium`, `high`).
+    ///
+    /// # Errors
+    /// `Err` on anything else — callers surface it, never guess.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "" => Ok(Self::Off),
+            "low" | "minimal" => Ok(Self::Low),
+            "medium" | "med" => Ok(Self::Medium),
+            "high" | "max" | "xhigh" => Ok(Self::High),
+            other => Err(format!("unknown thinking level {other:?}")),
+        }
+    }
+
+    /// Stable lowercase name for wire/UI use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 /// Everything a provider needs for one streamed request.

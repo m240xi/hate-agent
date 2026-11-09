@@ -18,7 +18,7 @@ use tracing::{debug, instrument, warn};
 
 use hate_core::provider::{
     BoxFuture, CacheMode, Capabilities, ChatRequest, Delta, Message, ModelInfo, Provider,
-    ProviderError, ToolSpec,
+    ProviderError, ThinkingLevel, ToolSpec,
 };
 use hate_core::{TokenUsage, ToolCall, ToolName};
 
@@ -30,6 +30,8 @@ pub struct OpenAiCompatProvider {
     /// e.g. `https://inference-api.nousresearch.com/v1` — no trailing slash.
     base_url: String,
     credential: SharedCredential,
+    /// Nous Portal speaks a `reasoning` object, not bare `reasoning_effort`.
+    nous_dialect: bool,
     /// o200k BPE counter, loaded lazily on first `count_tokens`.
     counter: OnceLock<hate_context::O200kCounter>,
 }
@@ -37,10 +39,15 @@ pub struct OpenAiCompatProvider {
 impl OpenAiCompatProvider {
     /// Build an adapter for `base_url` (the `/v1` root, not `/chat/completions`).
     pub fn new(base_url: impl Into<String>, credential: SharedCredential) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        // Dialect is a property of the endpoint, not the config name —
+        // a user-named provider pointed at Nous still gets Nous wire.
+        let nous_dialect = base_url.contains("nousresearch.com");
         Self {
             client: sse::http_client(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             credential,
+            nous_dialect,
             counter: OnceLock::new(),
         }
     }
@@ -63,6 +70,18 @@ struct WireRequest {
     max_tokens: u32,
     stream: bool,
     stream_options: StreamOptions,
+    /// Generic OpenAI-style effort hint (`"low"|"medium"|"high"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    /// Nous Portal shape: `{"enabled": true, "effort": "…"}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningParam>,
+}
+
+#[derive(Serialize)]
+struct ReasoningParam {
+    enabled: bool,
+    effort: &'static str,
 }
 
 #[derive(Serialize)]
@@ -256,10 +275,11 @@ impl Provider for OpenAiCompatProvider {
         let client = self.client.clone();
         let credential = Arc::clone(&self.credential);
         let url = self.completions_url();
+        let nous_dialect = self.nous_dialect;
         let (tx, mut rx) = mpsc::channel::<Result<Delta, ProviderError>>(64);
 
         tokio::spawn(async move {
-            if let Err(e) = pump(&client, &url, &credential, req, cancel, &tx).await {
+            if let Err(e) = pump(&client, &url, &credential, req, cancel, &tx, nous_dialect).await {
                 let _ = tx.send(Err(e)).await;
             }
         });
@@ -358,6 +378,7 @@ impl Provider for OpenAiCompatProvider {
 // ── streaming pump ────────────────────────────────────────────────────────
 
 #[instrument(skip_all)]
+#[allow(clippy::too_many_arguments)]
 async fn pump(
     client: &reqwest::Client,
     url: &str,
@@ -365,9 +386,23 @@ async fn pump(
     req: ChatRequest,
     cancel: CancellationToken,
     tx: &mpsc::Sender<Result<Delta, ProviderError>>,
+    nous_dialect: bool,
 ) -> Result<(), ProviderError> {
     let messages = wire_messages(&req);
     let tools = wire_tools(&req.tools);
+    // `Off` omits the field entirely — the endpoint's own default then
+    // applies (Nous defaults to medium effort per its API docs).
+    let (reasoning_effort, reasoning) = match req.thinking {
+        ThinkingLevel::Off => (None, None),
+        level if nous_dialect => (
+            None,
+            Some(ReasoningParam {
+                enabled: true,
+                effort: level.as_str(),
+            }),
+        ),
+        level => (Some(level.as_str().to_string()), None),
+    };
     let body = WireRequest {
         model: req.model,
         messages,
@@ -378,6 +413,8 @@ async fn pump(
         stream_options: StreamOptions {
             include_usage: true,
         },
+        reasoning_effort,
+        reasoning,
     };
 
     let token = tokio::select! {

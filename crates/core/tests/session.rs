@@ -75,6 +75,7 @@ fn session_with(provider: Arc<dyn Provider>) -> hate_core::SessionHandle {
         provider,
         model: "test".to_string(),
         provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
         limits: Limits::default(),
         ledger: None,
     })

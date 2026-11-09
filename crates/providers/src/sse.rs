@@ -103,8 +103,12 @@ pub fn parse(
 /// Shared reqwest client with sane timeouts for streaming APIs.
 /// Connect must fail fast; the stream itself has no total timeout —
 /// cancellation is the caller's job.
+///
+/// A `User-Agent` is mandatory: Cloudflare-fronted endpoints (Nous
+/// Portal inference) 403 empty-UA requests before they reach the API.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .user_agent(concat!("hate-agent/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .build()

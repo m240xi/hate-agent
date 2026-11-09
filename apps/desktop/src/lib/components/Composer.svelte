@@ -3,6 +3,7 @@
   import Icon from './Icon.svelte';
   import CommandPalette from './CommandPalette.svelte';
   import FilePicker from './FilePicker.svelte';
+  import type { ThinkingLevel } from '../ipc';
 
   // Bottom composer: Enter sends, Shift+Enter newline, Esc cancels,
   // `/` opens the command palette, `@` opens file fuzzy-find,
@@ -11,7 +12,12 @@
   let paletteOpen = $state(false);
   let pickerOpen = $state(false);
 
-  const THINKING_LABEL = ['off', 'low', 'high'] as const;
+  const THINKING_OPTIONS: { value: ThinkingLevel; label: string; hint: string }[] = [
+    { value: 'off', label: 'auto', hint: 'provider default effort' },
+    { value: 'low', label: 'low', hint: 'light reasoning' },
+    { value: 'medium', label: 'med', hint: 'moderate reasoning' },
+    { value: 'high', label: 'high', hint: 'full reasoning budget' },
+  ];
 
   function autoGrow(): void {
     if (!ta) return;
@@ -77,11 +83,44 @@
     <div class="composer-meta">
       <span class="hint">
         <kbd>⏎</kbd> send · <kbd>⇧⏎</kbd> newline · <kbd>esc</kbd> cancel ·
-        <kbd>/</kbd> commands · <kbd>@</kbd> files · <kbd>⇧tab</kbd> think:
-        {THINKING_LABEL[session.thinkingLevel]}
+        <kbd>/</kbd> commands · <kbd>@</kbd> files · <kbd>⇧tab</kbd> think
       </span>
       <span class="spacer"></span>
-      <span class="model mono" title="active model">{session.model}</span>
+      {#if session.provider}
+        <span class="provider mono" title="active provider">{session.provider}</span>
+      {/if}
+      <select
+        class="pick pick-model mono"
+        value={session.model}
+        onchange={(e) => void session.setModel(e.currentTarget.value)}
+        disabled={session.modelsState === 'loading'}
+        title={session.modelsState === 'error'
+          ? `model list failed: ${session.modelsError}`
+          : 'model — pick from the provider catalog'}
+        aria-label="Model"
+      >
+        {#if session.model && !session.models.some((m) => m.id === session.model)}
+          <option value={session.model}>{session.model}</option>
+        {/if}
+        {#each session.models as m (m.id)}
+          <option value={m.id}>{m.id}</option>
+        {/each}
+        {#if session.models.length === 0}
+          <option value={session.model}>{session.model || 'no models'}</option>
+        {/if}
+      </select>
+      <select
+        class="pick mono"
+        value={session.thinkingLevel}
+        onchange={(e) =>
+          session.setThinking(e.currentTarget.value as ThinkingLevel)}
+        title="thinking effort — reasoning tokens the model may spend"
+        aria-label="Thinking level"
+      >
+        {#each THINKING_OPTIONS as o (o.value)}
+          <option value={o.value} title={o.hint}>{o.label}</option>
+        {/each}
+      </select>
       {#if session.running}
         <button class="send cancel" onclick={() => session.cancel()} aria-label="Cancel turn" title="Cancel (Esc)">
           <Icon name="x" size={13} />
@@ -185,13 +224,39 @@
   .spacer {
     flex: 1;
   }
-  .model {
+  .provider {
     font-size: 10.5px;
     color: var(--fg-3);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 220px;
+    flex: none;
+  }
+  .pick {
+    flex: none;
+    max-width: 200px;
+    padding: 3px 6px;
+    font-size: 10.5px;
+    color: var(--fg-1);
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    outline: none;
+    cursor: pointer;
+  }
+  .pick:hover {
+    border-color: var(--border-strong);
+    color: var(--fg-0);
+  }
+  .pick:focus-visible {
+    border-color: var(--accent-dim);
+  }
+  .pick:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .pick-model {
+    max-width: 260px;
+  }
+  .pick-model option {
+    font-size: 12px;
   }
   .send {
     display: inline-flex;

@@ -100,18 +100,30 @@ impl Config {
     }
 
     /// Insert the built-in Nous provider when nothing is configured, so
-    /// a fresh install has a working `hate run` target.
+    /// a fresh install has a working `hate run` target. Also repairs
+    /// configs written before the Portal catalog change — the original
+    /// `hermes-4-405b` default 404s on the current inference API.
     pub fn ensure_default_provider(&mut self) {
+        /// Model shipped as the Nous default; the Portal retired it.
+        const LEGACY_DEFAULT_MODEL: &str = "hermes-4-405b";
+        /// Current default — verified against the live `/v1/models` catalog.
+        const DEFAULT_MODEL: &str = "moonshotai/kimi-k3";
+
         if self.providers.is_empty() {
             self.providers.insert(
                 "nous".to_string(),
                 ProviderConfig {
                     kind: "openai_compat".to_string(),
                     base_url: crate::nous::DEFAULT_INFERENCE_URL.to_string(),
-                    model: "hermes-4-405b".to_string(),
+                    model: DEFAULT_MODEL.to_string(),
                 },
             );
             self.default_provider = Some("nous".to_string());
+        }
+        if let Some(nous) = self.providers.get_mut("nous")
+            && nous.model == LEGACY_DEFAULT_MODEL
+        {
+            nous.model = DEFAULT_MODEL.to_string();
         }
     }
 

@@ -30,10 +30,13 @@ export interface TurnOutcome {
   cost_usd: number | null;
 }
 
-export interface FailureReason {
-  kind?: string;
-  message?: string;
-}
+// Serde's default externally-tagged enum shape: {"Provider": {…}}.
+export type FailureReason =
+  | { LimitExceeded: { limit: string; value: number } }
+  | { Provider: { message: string } }
+  | { Tool: { name: string; message: string } }
+  | { PermissionDenied: { tool: string } }
+  | { Internal: { message: string } };
 
 export type SessionEvent =
   | { type: 'delta'; text: string }
@@ -55,7 +58,7 @@ export type SessionEvent =
 
 export interface TranscriptBlock {
   id: number;
-  kind: 'user' | 'text' | 'thinking' | 'tool';
+  kind: 'user' | 'text' | 'thinking' | 'tool' | 'error';
   text?: string;
   streaming?: boolean;
   call?: ToolCall;

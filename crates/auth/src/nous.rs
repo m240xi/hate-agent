@@ -119,7 +119,10 @@ impl PortalAuth {
     /// Client against a custom Portal base (tests, staging, self-host).
     pub fn with_portal(store: Arc<dyn AuthStore>, portal_base: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .user_agent(concat!("hate-agent/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             portal_base: portal_base.trim_end_matches('/').to_string(),
             store,
             provider: "nous".to_string(),

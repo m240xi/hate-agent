@@ -16,6 +16,8 @@ import {
 import type {
   ChangedFile,
   CheckpointEntry,
+  FailureReason,
+  FileNode,
   PermissionRequest,
   PlanStep,
   SessionEvent,
@@ -23,9 +25,35 @@ import type {
   TokenUsage,
   TranscriptBlock,
 } from './types';
+import type { ProviderModel, ThinkingLevel } from './ipc';
 
 const inTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+const THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
+
+function isThinkingLevel(v: string | null): v is ThinkingLevel {
+  return v !== null && (THINKING_LEVELS as readonly string[]).includes(v);
+}
+
+/** Non-chat entries (embeddings, rerankers, batch SKUs) don't belong in
+ *  the composer picker — the catalog is a full router listing. */
+function filterChatModels(models: ProviderModel[]): ProviderModel[] {
+  const SKIP = /embed|bge-|e5-|gte-|voyage|paraphrase|rerank|:batch/i;
+  return models
+    .filter((m) => !SKIP.test(m.id))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** Human-readable text for a serde externally-tagged `FailureReason`. */
+function failureText(r: FailureReason): string {
+  if ('Provider' in r) return r.Provider.message;
+  if ('LimitExceeded' in r) return `limit exceeded: ${r.LimitExceeded.limit}`;
+  if ('Tool' in r) return `tool ${r.Tool.name}: ${r.Tool.message}`;
+  if ('PermissionDenied' in r) return `permission denied: ${r.PermissionDenied.tool}`;
+  if ('Internal' in r) return r.Internal.message;
+  return 'unknown failure';
+}
 
 export type AppMode = 'home' | 'code' | 'chat' | 'settings';
 
@@ -35,32 +63,40 @@ let nextBlockId = 2;
 
 class SessionStore {
   // ── transcript ──────────────────────────────────────────────────────────
-  blocks = $state<TranscriptBlock[]>([...fixtureInitialBlocks]);
+  // Empty in the real app — fixtures only load for browser dev playback.
+  blocks = $state<TranscriptBlock[]>([]);
 
   // ── left pane ───────────────────────────────────────────────────────────
-  tree = $state(fixtureTree);
-  symbols = $state<SymbolHit[]>(fixtureSymbols);
+  tree = $state<FileNode[]>([]);
+  symbols = $state<SymbolHit[]>([]);
   selectedPath = $state<string | null>(null);
 
   // ── right pane ──────────────────────────────────────────────────────────
-  plan = $state<PlanStep[]>([...fixturePlan]);
-  usage = $state<TokenUsage>({ ...fixtureUsage });
+  plan = $state<PlanStep[]>([]);
+  usage = $state<TokenUsage>({ input: 0, cached_input: 0, output: 0, thinking: 0 });
   budgetTokens = 200_000;
-  checkpoints = $state<CheckpointEntry[]>([...fixtureCheckpoints]);
-  changedFiles = $state<ChangedFile[]>([...fixtureChangedFiles]);
-  model = $state('nous/hermes-4-405b');
-  provider = $state('nous');
+  checkpoints = $state<CheckpointEntry[]>([]);
+  changedFiles = $state<ChangedFile[]>([]);
+  model = $state('');
+  provider = $state('');
+  /** Config name of the active provider (`nous`, …) — for `provider_set_model`. */
+  providerName = $state('');
   sessionState = $state<'idle' | 'running' | 'awaiting_permission' | 'awaiting_user' | 'done' | 'failed'>(
     'idle',
   );
-  costUsd = $state(0.0031);
-  cacheRatio = $state(0.82);
+  costUsd = $state(0);
+  cacheRatio = $state(0);
+
+  // ── model picker / thinking ─────────────────────────────────────────────
+  models = $state<ProviderModel[]>([]);
+  modelsState = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  modelsError = $state('');
+  thinkingLevel = $state<ThinkingLevel>('off');
 
   // ── composer / permission ───────────────────────────────────────────────
   draft = $state('');
   pendingPermission = $state<PermissionRequest | null>(null);
   awaitingPrompt = $state<string | null>(null);
-  thinkingLevel = $state<0 | 1 | 2>(1);
 
   // ── panes ───────────────────────────────────────────────────────────────
   leftCollapsed = $state(false);
@@ -90,15 +126,51 @@ class SessionStore {
     if (MODES.includes(saved as AppMode)) this.mode = saved as AppMode;
     const savedTheme = localStorage.getItem('hate:theme');
     if (savedTheme === 'dark' || savedTheme === 'light') this.theme = savedTheme;
+    const savedThinking = localStorage.getItem('hate:thinking');
+    if (isThinkingLevel(savedThinking)) this.thinkingLevel = savedThinking;
     this.applyTheme();
     if (inTauri()) {
       const m = await import('./ipc');
       this.workspacePath = await m.workspaceGet().catch(() => null);
+      // Push the persisted thinking level into the session slot so the
+      // first spawned session inherits it (live swaps go through
+      // `session_set_options` too).
+      void m.sessionSetOptions(null, this.thinkingLevel).catch(() => {});
+      const providers = await m.providersList().catch(() => []);
+      const def = providers.find((p) => p.is_default) ?? providers[0];
+      if (def) {
+        this.providerName = def.name;
+        this.provider = def.name;
+        this.model = def.model;
+      }
+      this.modelsState = 'loading';
+      m.modelsList()
+        .then((list) => {
+          this.models = filterChatModels(list);
+          this.modelsState = 'ready';
+        })
+        .catch((err: unknown) => {
+          this.modelsState = 'error';
+          this.modelsError = String(err);
+        });
       const { listen } = await import('@tauri-apps/api/event');
       this.unlisten = await listen<SessionEvent>('core-event', (e) => {
         this.handleEvent(e.payload);
       });
     } else {
+      // Browser dev mode: replay the fixture script so the shell demos
+      // itself without a backend.
+      this.blocks = [...fixtureInitialBlocks];
+      this.tree = fixtureTree;
+      this.symbols = fixtureSymbols;
+      this.plan = [...fixturePlan];
+      this.usage = { ...fixtureUsage };
+      this.checkpoints = [...fixtureCheckpoints];
+      this.changedFiles = [...fixtureChangedFiles];
+      this.model = 'nous/hermes-4-405b';
+      this.provider = 'nous';
+      this.costUsd = 0.0031;
+      this.cacheRatio = 0.82;
       this.startFixturePlayback();
     }
   }
@@ -129,7 +201,7 @@ class SessionStore {
       .then((m) => m.sessionSend(text))
       .catch((err: unknown) => {
         this.sessionState = 'failed';
-        this.appendText(`\n\nerror: ${String(err)}`);
+        this.pushError(String(err));
       });
   }
 
@@ -162,8 +234,35 @@ class SessionStore {
     }
   }
 
+  /** Pick a model from the provider's catalog — persists to config.toml
+   *  (CLI shares it) and hot-swaps the live session. */
+  async setModel(id: string): Promise<void> {
+    if (!id || id === this.model) return;
+    this.model = id;
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    if (this.providerName) {
+      await m.providerSetModel(this.providerName, id).catch(() => {});
+    }
+    await m.sessionSetOptions(id, null).catch(() => {});
+  }
+
+  /** Pick a thinking level — applies next turn, persisted locally. */
+  setThinking(level: ThinkingLevel): void {
+    if (level === this.thinkingLevel) return;
+    this.thinkingLevel = level;
+    localStorage.setItem('hate:thinking', level);
+    if (inTauri()) {
+      void import('./ipc')
+        .then((m) => m.sessionSetOptions(null, level))
+        .catch(() => {});
+    }
+  }
+
   cycleThinking(): void {
-    this.thinkingLevel = ((this.thinkingLevel + 1) % 3) as 0 | 1 | 2;
+    const order: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
+    const i = order.indexOf(this.thinkingLevel);
+    this.setThinking(order[(i + 1) % order.length] ?? 'off');
   }
 
   clearTranscript(): void {
@@ -268,11 +367,14 @@ class SessionStore {
         this.finishStreamingBlocks();
         break;
       case 'failed':
+        // Terminal failure — surface the reason; a silent dead turn is
+        // indistinguishable from "the app does nothing".
+        this.pushError(failureText(e.reason));
         this.sessionState = 'failed';
         this.finishStreamingBlocks();
         break;
       case 'error':
-        this.appendText(`\n\nerror: ${e.error.message ?? 'unknown'}`);
+        this.pushError(e.error.message ?? 'unknown error');
         break;
     }
   }
@@ -298,6 +400,10 @@ class SessionStore {
     } else {
       this.blocks.push({ id: nextBlockId++, kind: 'text', text, streaming: true });
     }
+  }
+
+  private pushError(text: string): void {
+    this.blocks.push({ id: nextBlockId++, kind: 'error', text: `error: ${text}` });
   }
 
   private appendThinking(text: string): void {

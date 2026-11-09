@@ -5,7 +5,7 @@
 use std::sync::Mutex;
 
 use hate_auth::AuthContext;
-use hate_core::{Command, Limits, SessionConfig, SessionHandle, spawn_session};
+use hate_core::{Command, Limits, SessionConfig, SessionHandle, ThinkingLevel, spawn_session};
 use hate_ledger::Ledger;
 use hate_providers::{ProviderKind, ProviderSpec, build, warn_if_unknown};
 use serde::Serialize;
@@ -39,28 +39,33 @@ pub fn app_info() -> AppInfo {
     }
 }
 
-/// The live session, created lazily on first `session_send`. M1 keeps a
+/// The live session plus options picked before it spawned. M1 keeps a
 /// single session per window; multi-session lands with the workspace
 /// model.
 #[derive(Default)]
-pub struct Sessions(pub Mutex<Option<SessionHandle>>);
+pub struct Sessions {
+    inner: Mutex<SessionSlot>,
+}
 
-/// Build (or reuse) the session and forward its events to the frontend
-/// as `core-event` emissions — the store's only input (spec §5).
-fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, String> {
-    let mut guard = state
-        .0
-        .lock()
-        .map_err(|_| "session lock poisoned".to_string())?;
-    if let Some(h) = guard.as_ref() {
-        return Ok(h.clone());
-    }
+#[derive(Default)]
+struct SessionSlot {
+    handle: Option<SessionHandle>,
+    /// Model/thinking chosen via `session_set_options` before the first
+    /// send — applied at spawn, then superseded by live `SetOptions`.
+    model: Option<String>,
+    thinking: Option<ThinkingLevel>,
+}
 
-    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+/// Resolve provider name + config + built adapter — shared by session
+/// spawn and `models_list` so they can't drift apart.
+fn resolve_target(
+    ctx: &AuthContext,
+    name_override: Option<&str>,
+) -> Result<(String, String, std::sync::Arc<dyn hate_core::Provider>), String> {
     let mut config = ctx.config.clone();
     config.ensure_default_provider();
     let (name, pconf) = config
-        .resolve_provider(None)
+        .resolve_provider(name_override)
         .ok_or_else(|| "no provider configured — run `hate auth login`".to_string())?;
 
     warn_if_unknown(&pconf.kind);
@@ -74,12 +79,29 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         base_url,
         credential,
     });
+    Ok((name.to_string(), pconf.model.clone(), provider))
+}
+
+/// Build (or reuse) the session and forward its events to the frontend
+/// as `core-event` emissions — the store's only input (spec §5).
+fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, String> {
+    let mut guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    if let Some(h) = guard.handle.as_ref() {
+        return Ok(h.clone());
+    }
+
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let (name, configured_model, provider) = resolve_target(&ctx, None)?;
 
     let ledger = ledger_handle();
     let handle = spawn_session(SessionConfig {
         provider,
-        model: pconf.model.clone(),
-        provider_name: name.to_string(),
+        model: guard.model.clone().unwrap_or(configured_model),
+        provider_name: name,
+        thinking: guard.thinking.unwrap_or_default(),
         limits: Limits::default(),
         ledger,
     });
@@ -92,7 +114,7 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         }
     });
 
-    *guard = Some(handle.clone());
+    guard.handle = Some(handle.clone());
     Ok(handle)
 }
 
@@ -125,10 +147,10 @@ pub async fn session_send(
 #[specta::specta]
 pub fn session_cancel(state: State<'_, Sessions>) -> Result<(), String> {
     let guard = state
-        .0
+        .inner
         .lock()
         .map_err(|_| "session lock poisoned".to_string())?;
-    if let Some(h) = guard.as_ref() {
+    if let Some(h) = guard.handle.as_ref() {
         h.command(Command::Cancel).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -139,10 +161,10 @@ pub fn session_cancel(state: State<'_, Sessions>) -> Result<(), String> {
 #[specta::specta]
 pub fn session_answer(state: State<'_, Sessions>, text: String) -> Result<(), String> {
     let guard = state
-        .0
+        .inner
         .lock()
         .map_err(|_| "session lock poisoned".to_string())?;
-    if let Some(h) = guard.as_ref() {
+    if let Some(h) = guard.handle.as_ref() {
         h.command(Command::AnswerPrompt(text))
             .map_err(|e| e.to_string())?;
     }
@@ -158,15 +180,43 @@ pub fn session_respond_permission(
     decision: String,
 ) -> Result<(), String> {
     let guard = state
-        .0
+        .inner
         .lock()
         .map_err(|_| "session lock poisoned".to_string())?;
-    if let Some(h) = guard.as_ref() {
+    if let Some(h) = guard.handle.as_ref() {
         h.command(Command::RespondPermission {
             request_id,
             decision,
         })
         .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Change model and/or thinking level. Applies to the live session
+/// immediately (next turn onward) and is remembered for the session's
+/// first spawn when called before any message was sent.
+#[tauri::command]
+#[specta::specta]
+pub fn session_set_options(
+    state: State<'_, Sessions>,
+    model: Option<String>,
+    thinking: Option<String>,
+) -> Result<(), String> {
+    let thinking = thinking.map(|t| ThinkingLevel::parse(&t)).transpose()?;
+    let mut slot = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    if let Some(m) = &model {
+        slot.model = Some(m.clone());
+    }
+    if let Some(t) = thinking {
+        slot.thinking = Some(t);
+    }
+    if let Some(h) = slot.handle.as_ref() {
+        h.command(Command::SetOptions { model, thinking })
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -355,6 +405,48 @@ pub fn providers_list() -> Result<Vec<ProviderInfo>, String> {
         });
     }
     Ok(out)
+}
+
+/// One model entry for the composer dropdown.
+#[derive(Debug, Clone, serde::Serialize, Type)]
+pub struct ProviderModel {
+    /// Provider-side model id (`moonshotai/kimi-k3`, …).
+    pub id: String,
+    /// Display name when the provider supplies one.
+    pub name: Option<String>,
+}
+
+/// List models the resolved provider's credential can access — drives
+/// the composer model picker. `provider` names a configured provider;
+/// `None` uses the default (same rule as sessions).
+#[tauri::command]
+#[specta::specta]
+pub async fn models_list(provider: Option<String>) -> Result<Vec<ProviderModel>, String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let (_name, _model, provider) = resolve_target(&ctx, provider.as_deref())?;
+    let models = provider.list_models().await.map_err(|e| e.to_string())?;
+    Ok(models
+        .into_iter()
+        .map(|m| ProviderModel {
+            id: m.id,
+            name: m.name,
+        })
+        .collect())
+}
+
+/// Persist the default model for a configured provider — the picker's
+/// selection survives restarts and applies to the CLI too.
+#[tauri::command]
+#[specta::specta]
+pub fn provider_set_model(provider: String, model: String) -> Result<(), String> {
+    let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let p = ctx
+        .config
+        .providers
+        .get_mut(&provider)
+        .ok_or_else(|| format!("unknown provider {provider:?}"))?;
+    p.model = model;
+    ctx.config.save().map_err(|e| e.to_string())
 }
 
 /// Current workspace folder for code sessions (`None` = app data dir).

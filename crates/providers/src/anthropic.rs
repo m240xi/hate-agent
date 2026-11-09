@@ -71,6 +71,16 @@ struct WireRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<Value>,
     stream: bool,
+    /// Extended-thinking control; omitted entirely when off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingParam>,
+}
+
+#[derive(Serialize)]
+struct ThinkingParam {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    budget_tokens: u32,
 }
 
 #[derive(Serialize)]
@@ -396,13 +406,26 @@ async fn pump(
     cancel: CancellationToken,
     tx: &mpsc::Sender<Result<Delta, ProviderError>>,
 ) -> Result<(), ProviderError> {
+    // Thinking tokens bill *inside* max_tokens, so the budget is added
+    // on top of the requested output ceiling (Anthropic requires
+    // budget_tokens < max_tokens).
+    let thinking = match req.thinking {
+        hate_core::provider::ThinkingLevel::Off => None,
+        hate_core::provider::ThinkingLevel::Low => Some(4_096),
+        hate_core::provider::ThinkingLevel::Medium => Some(12_288),
+        hate_core::provider::ThinkingLevel::High => Some(32_768),
+    };
     let body = WireRequest {
         model: req.model.clone(),
-        max_tokens: req.max_output_tokens,
+        max_tokens: req.max_output_tokens.saturating_add(thinking.unwrap_or(0)),
         system: req.system.clone(),
         messages: wire_messages(&req),
         tools: wire_tools(&req.tools),
         stream: true,
+        thinking: thinking.map(|budget_tokens| ThinkingParam {
+            kind: "enabled",
+            budget_tokens,
+        }),
     };
 
     let key = tokio::select! {

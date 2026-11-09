@@ -23,6 +23,29 @@ export async function sessionSend(text: string): Promise<void> {
   return invoke<void>('session_send', { text });
 }
 
+export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
+
+/** Hot-swap model and/or thinking level; `null` leaves a field unchanged. */
+export async function sessionSetOptions(
+  model: string | null,
+  thinking: ThinkingLevel | null,
+): Promise<void> {
+  return invoke<void>('session_set_options', { model, thinking });
+}
+
+export interface ProviderModel {
+  id: string;
+  name: string | null;
+}
+
+export async function modelsList(provider?: string): Promise<ProviderModel[]> {
+  return invoke<ProviderModel[]>('models_list', { provider: provider ?? null });
+}
+
+export async function providerSetModel(provider: string, model: string): Promise<void> {
+  return invoke<void>('provider_set_model', { provider, model });
+}
+
 export async function sessionCancel(): Promise<void> {
   return invoke<void>('session_cancel');
 }

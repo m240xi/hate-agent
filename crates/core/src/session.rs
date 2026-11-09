@@ -60,6 +60,9 @@ pub struct SessionConfig {
     pub model: String,
     /// Provider adapter name for ledger records (`openai_compat`, …).
     pub provider_name: String,
+    /// Reasoning effort applied to every turn until changed via
+    /// [`Command::SetOptions`].
+    pub thinking: ThinkingLevel,
     /// Hard limits.
     pub limits: Limits,
     /// Token/cost ledger; `None` disables accounting (tests).
@@ -81,6 +84,15 @@ pub enum Command {
         request_id: String,
         /// Serialized decision.
         decision: String,
+    },
+    /// Change per-turn options mid-session: model id and/or thinking
+    /// level. `None` fields keep their current value. Takes effect on
+    /// the *next* turn — an in-flight turn is never mutated.
+    SetOptions {
+        /// New model id, when switching models.
+        model: Option<String>,
+        /// New thinking level, when changing effort.
+        thinking: Option<ThinkingLevel>,
     },
 }
 
@@ -298,6 +310,16 @@ impl Actor {
             Command::AnswerPrompt(_) | Command::RespondPermission { .. } => {
                 warn!("prompt/permission response with nothing pending");
             }
+            Command::SetOptions { model, thinking } => {
+                if let Some(m) = model {
+                    debug!(model = %m, "session model switched");
+                    self.cfg.model = m;
+                }
+                if let Some(t) = thinking {
+                    debug!(thinking = ?t, "session thinking level switched");
+                    self.cfg.thinking = t;
+                }
+            }
         }
     }
 
@@ -332,7 +354,7 @@ impl Actor {
             tools: Vec::new(), // M2 registers the tool surface here.
             max_output_tokens: 8192,
             temperature: None,
-            thinking: ThinkingLevel::Off,
+            thinking: self.cfg.thinking,
         };
 
         let (done_tx, done_rx) = mpsc::channel(1);

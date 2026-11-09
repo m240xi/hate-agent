@@ -5,8 +5,9 @@
 //! its public OAuth client):
 //! - Authorize: `GET https://claude.ai/oauth/authorize` with
 //!   `code=true`, `response_type=code`, the console callback as
-//!   `redirect_uri`, scopes `org:create_api_key user:profile
-//!   user:inference`, and an S256 PKCE challenge.
+//!   `redirect_uri`, Claude Code's current scope set, and an S256 PKCE
+//!   challenge. `state` must be 43 chars (base64url of 32 bytes) or the
+//!   page rejects the request with "Invalid request format".
 //! - The callback page displays a code the user pastes back — often as
 //!   `code#state`; both forms are accepted and `state` is verified.
 //! - Exchange/refresh: `POST https://console.anthropic.com/v1/oauth/token`
@@ -36,8 +37,17 @@ pub const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 /// Where the browser lands after approval; it displays the code to
 /// paste back rather than redirecting to a local server.
 pub const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
-/// Scopes needed for inference plus profile/org visibility.
-pub const SCOPES: &str = "org:create_api_key user:profile user:inference";
+/// Scopes requested at authorize time — matches Claude Code 2.1.x's own
+/// set. The endpoint rejects requests whose scope list diverges from
+/// the client's registered set.
+pub const SCOPES: &str = "org:create_api_key user:profile user:inference \
+user:sessions:claude_code user:mcp_servers user:file_upload";
+
+/// `state` must be `base64url(32 random bytes)` (43 chars) like Claude
+/// Code's own generator: `claude.ai/oauth/authorize` rejects shorter
+/// values with `Invalid request format` even though RFC 6749 allows
+/// them. This is an empirically confirmed server quirk.
+const STATE_BYTES: usize = 32;
 
 const REFRESH_SKEW_SECS: u64 = 60;
 const DEFAULT_TOKEN_TTL_SECS: u64 = 8 * 3600;
@@ -103,16 +113,22 @@ impl ClaudeAuth {
 
     /// Step 1: build the authorize URL + PKCE material. Purely local —
     /// no network until [`Self::complete_login`].
+    ///
+    /// Wire constraints (verified against live rejections):
+    /// - `state` must be 43 chars (see [`STATE_BYTES`]) or the page
+    ///   shows "Authorization failed / Invalid request format".
+    /// - Query values use form encoding (`+` for spaces), matching
+    ///   Claude Code's own URL builder.
     pub fn begin_login(&self) -> ClaudeLogin {
         let verifier = b64url(&rand_bytes(32));
         let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
-        let state = b64url(&rand_bytes(16));
+        let state = b64url(&rand_bytes(STATE_BYTES));
         let url = format!(
             "{AUTHORIZE_URL}?code=true&client_id={CLIENT_ID}&response_type=code\
              &redirect_uri={}&scope={}&code_challenge={challenge}\
              &code_challenge_method=S256&state={state}",
-            urlencoding(REDIRECT_URI),
-            urlencoding(SCOPES),
+            form_encoding(REDIRECT_URI),
+            form_encoding(SCOPES),
         );
         ClaudeLogin {
             authorize_url: url,
@@ -345,9 +361,10 @@ fn b64url(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Minimal percent-encoding for the fixed redirect URI / scope string —
-/// only the characters that actually appear need escaping.
-fn urlencoding(s: &str) -> String {
+/// Form-encoding for query values (RFC 3986 unreserved set kept;
+/// space → `+`, matching `URLSearchParams`/Claude Code). Only the
+/// characters that actually appear need escaping.
+fn form_encoding(s: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -355,6 +372,7 @@ fn urlencoding(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char);
             }
+            b' ' => out.push('+'),
             _ => {
                 let _ = write!(out, "%{b:02X}");
             }
@@ -388,6 +406,14 @@ mod tests {
         let expected = b64url(&Sha256::digest(login.pending.verifier.as_bytes()));
         assert!(url.contains(&format!("code_challenge={expected}")));
         assert!(login.pending.verifier.len() >= 43);
+        // claude.ai rejects shorter states with "Invalid request format".
+        assert_eq!(
+            login.pending.state.len(),
+            43,
+            "state must match Claude Code's 32-byte base64url form"
+        );
+        // Form encoding: scopes join with `+`, not `%20`.
+        assert!(url.contains("scope=org%3Acreate_api_key+user%3Aprofile"));
     }
 
     #[test]

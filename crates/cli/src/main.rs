@@ -57,7 +57,7 @@ enum AuthCommands {
     /// take `--api-key`.
     Login {
         /// Provider to log in to (default: `nous`).
-        #[arg(short, long, default_value = "nous")]
+        #[arg(default_value = "nous")]
         provider: String,
         /// API key for non-OAuth providers (prompted interactively if
         /// omitted and stdin is a terminal — M1 requires the flag or

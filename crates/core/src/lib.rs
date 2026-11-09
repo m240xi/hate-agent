@@ -6,6 +6,7 @@
 
 #![deny(unsafe_code)]
 
+mod checkpoint;
 mod event;
 pub mod persist;
 pub mod provider;
@@ -14,6 +15,7 @@ mod state;
 mod tools;
 mod types;
 
+pub use checkpoint::{CheckpointBundle, restore_checkpoint, write_checkpoint};
 pub use event::{AgentError, Event};
 pub use persist::{PersistCtx, PersistedSession, SessionJournal, SessionMeta};
 pub use provider::{

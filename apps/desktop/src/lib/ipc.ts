@@ -71,6 +71,10 @@ export async function sessionAnswer(text: string): Promise<void> {
   return invoke<void>('session_answer', { text });
 }
 
+export async function sessionRewind(checkpointId: string): Promise<void> {
+  return invoke<void>('session_rewind', { checkpointId });
+}
+
 // Nous Portal device login — returns the code to show; completion
 // arrives on the `auth-event` channel.
 export interface NousLoginInfo {

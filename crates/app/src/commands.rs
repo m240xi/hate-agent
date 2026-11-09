@@ -152,7 +152,14 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
             .clone()
             .or_else(|| ctx.config.workspace_path.clone())
             .and_then(|p| match WorkspaceTools::new(&p) {
-                Ok(t) => Some(std::sync::Arc::new(t)),
+                Ok(t) => {
+                    // Persisted sessions get restorable checkpoints;
+                    // keyless (ephemeral) sessions skip capture.
+                    if let Some(key) = guard.key.as_deref() {
+                        t.enable_checkpoints(checkpoint_root(key));
+                    }
+                    Some(std::sync::Arc::new(t))
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "workspace tools unavailable");
                     None
@@ -185,6 +192,16 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
 
     guard.handle = Some(handle.clone());
     Ok(handle)
+}
+
+/// `<data>/hate-agent/checkpoints/<session-key>` — where per-turn file
+/// snapshots land for rewind. Must match what `enable_checkpoints` got.
+fn checkpoint_root(key: &str) -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("hate-agent")
+        .join("checkpoints")
+        .join(key)
 }
 
 fn ledger_handle() -> Option<std::sync::Arc<Ledger>> {
@@ -237,6 +254,37 @@ pub fn session_answer(state: State<'_, Sessions>, text: String) -> Result<(), St
         h.command(Command::AnswerPrompt(text))
             .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Restore the workspace to a checkpoint's pre-turn file state
+/// (M4 rewind). Exact for `write_file`/`edit_file` mutations; `bash`
+/// side effects are not captured.
+#[tauri::command]
+#[specta::specta]
+pub fn session_rewind(state: State<'_, Sessions>, checkpoint_id: String) -> Result<(), String> {
+    // Ids are uuids we generated — reject anything path-like anyway.
+    if checkpoint_id.is_empty()
+        || checkpoint_id.contains(['/', '\\'])
+        || checkpoint_id.contains("..")
+    {
+        return Err("invalid checkpoint id".to_string());
+    }
+    let guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    let key = guard.key.clone().ok_or("session has no checkpoint store")?;
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let ws = guard
+        .workspace
+        .clone()
+        .or_else(|| ctx.config.workspace_path.clone())
+        .ok_or("no workspace folder")?;
+    let ckpt_dir = checkpoint_root(&key).join(&checkpoint_id);
+    let restored =
+        hate_core::restore_checkpoint(std::path::Path::new(&ckpt_dir), std::path::Path::new(&ws))?;
+    tracing::info!(checkpoint = %checkpoint_id, restored, "workspace rewound");
     Ok(())
 }
 

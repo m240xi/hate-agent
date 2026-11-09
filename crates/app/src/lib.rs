@@ -19,6 +19,7 @@ pub fn run() {
         commands::session_cancel,
         commands::session_answer,
         commands::session_respond_permission,
+        commands::session_rewind,
         commands::session_set_options,
         commands::models_list,
         commands::provider_set_model,

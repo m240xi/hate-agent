@@ -9,14 +9,17 @@
 //! come back as error text the model can read and recover from — they
 //! are never turn failures.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::BufRead;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use hate_context::O200kCounter;
 use serde_json::json;
+use uuid::Uuid;
 
+use crate::checkpoint::CheckpointBundle;
 use crate::provider::ToolSpec;
 use crate::types::{ToolCall, ToolName};
 
@@ -64,10 +67,15 @@ pub struct ToolOutput {
     pub ok: bool,
 }
 
-/// The M2 tool surface, bound to one canonicalized workspace root.
+/// The tool surface, bound to one canonicalized workspace root.
 pub struct WorkspaceTools {
     root: PathBuf,
     counter: O200kCounter,
+    /// Session checkpoint root (`<data>/hate-agent/checkpoints/<key>`);
+    /// `None` disables capture (CLI one-shots, chat sessions).
+    checkpoint_root: Mutex<Option<PathBuf>>,
+    /// This turn's captured originals: rel path → pre-mutation bytes.
+    pending: Mutex<BTreeMap<String, Option<Vec<u8>>>>,
 }
 
 impl WorkspaceTools {
@@ -85,6 +93,59 @@ impl WorkspaceTools {
         Ok(Self {
             root: canon,
             counter: O200kCounter::new().map_err(|e| e.to_string())?,
+            checkpoint_root: Mutex::new(None),
+            pending: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// Enable per-turn file checkpoints under `dir`. Called once at
+    /// session spawn; the actor drains [`Self::drain_checkpoint`] at
+    /// every turn end.
+    pub fn enable_checkpoints(&self, dir: PathBuf) {
+        *self
+            .checkpoint_root
+            .lock()
+            .expect("checkpoint root poisoned") = Some(dir);
+    }
+
+    /// Snapshot a file's pre-mutation bytes — once per path per turn,
+    /// so the FIRST original survives even across several edits.
+    /// No-op when checkpoints are disabled or the path is outside root.
+    fn capture_original(&self, fs_path: &Path) {
+        if self
+            .checkpoint_root
+            .lock()
+            .expect("checkpoint root poisoned")
+            .is_none()
+        {
+            return;
+        }
+        let Ok(rel) = fs_path.strip_prefix(&self.root) else {
+            return;
+        };
+        let key = rel.to_string_lossy().replace('\\', "/");
+        let mut pending = self.pending.lock().expect("checkpoint pending poisoned");
+        if pending.contains_key(&key) {
+            return;
+        }
+        pending.insert(key, std::fs::read(fs_path).ok());
+    }
+
+    /// Drain this turn's captured originals for the actor to persist.
+    /// `None` when checkpoints are off or nothing mutated.
+    pub fn drain_checkpoint(&self) -> Option<CheckpointBundle> {
+        let files = std::mem::take(&mut *self.pending.lock().expect("checkpoint pending poisoned"));
+        if files.is_empty() {
+            return None;
+        }
+        Some(CheckpointBundle {
+            id: Uuid::new_v4().to_string(),
+            root: self
+                .checkpoint_root
+                .lock()
+                .expect("checkpoint root poisoned")
+                .clone()?,
+            files,
         })
     }
 
@@ -494,6 +555,7 @@ impl WorkspaceTools {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let existed = fs_path.exists();
+        self.capture_original(&fs_path);
         std::fs::write(&fs_path, content).map_err(|e| e.to_string())?;
         Ok(format!(
             "{} {path}: {} bytes",
@@ -537,6 +599,7 @@ impl WorkspaceTools {
         } else {
             content.replacen(old, new, 1)
         };
+        self.capture_original(&fs_path);
         std::fs::write(&fs_path, &updated).map_err(|e| e.to_string())?;
         let delta = (new.lines().count() as i128 - old.lines().count() as i128) * matches as i128;
         Ok(format!(
@@ -844,6 +907,50 @@ mod tests {
             json!({"path": "a.txt", "old_string": "zzz", "new_string": "x"}),
         ));
         assert!(!miss.ok);
+    }
+
+    #[test]
+    fn checkpoints_capture_and_restore() {
+        let (dir, t) = tools();
+        let ck = dir.path().join("ckpts");
+        t.enable_checkpoints(ck.clone());
+
+        // Two edits to the same file — the FIRST original must win.
+        t.exec(&call(
+            "edit_file",
+            json!({"path": "a.txt", "old_string": "beta", "new_string": "BETA"}),
+        ));
+        t.exec(&call(
+            "edit_file",
+            json!({"path": "a.txt", "old_string": "gamma", "new_string": "GAMMA"}),
+        ));
+        // A new file captures "didn't exist".
+        t.exec(&call(
+            "write_file",
+            json!({"path": "n.txt", "content": "x"}),
+        ));
+
+        let b = t.drain_checkpoint().expect("mutations captured");
+        assert_eq!(b.files.len(), 2);
+        assert_eq!(
+            b.files.get("a.txt").and_then(|o| o.as_deref()),
+            Some(b"alpha\nbeta\ngamma\n".as_slice())
+        );
+        assert!(b.files.get("n.txt").is_some_and(Option::is_none));
+        assert!(t.drain_checkpoint().is_none(), "drain is one-shot");
+
+        crate::checkpoint::write_checkpoint(&b).unwrap();
+        // Simulate post-turn state (a.txt garbage, n.txt still present),
+        // then rewind — restore must revert a.txt AND delete n.txt.
+        std::fs::write(dir.path().join("a.txt"), "garbage").unwrap();
+        let restored = crate::checkpoint::restore_checkpoint(&ck.join(&b.id), dir.path()).unwrap();
+        assert_eq!(restored, 2);
+        assert!(
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .contains("beta")
+        );
+        assert!(!dir.path().join("n.txt").exists());
     }
 
     #[tokio::test]

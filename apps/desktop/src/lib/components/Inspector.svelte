@@ -109,6 +109,13 @@
             <span class="cp-id mono">{cp.id}</span>
             <span class="cp-label">{cp.label}</span>
             <span class="cp-at mono dim">{cp.at}</span>
+            <button
+              class="cp-rewind"
+              title="Restore workspace files to this checkpoint"
+              onclick={() => session.rewindCheckpoint(cp.id)}
+            >
+              rewind
+            </button>
           </li>
         {/each}
       </ul>
@@ -271,6 +278,19 @@
   .cp-at {
     font-size: 10px;
     flex: none;
+  }
+  .cp-rewind {
+    flex: none;
+    font-size: 10px;
+    padding: 1px 7px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-2);
+    color: var(--fg-2);
+  }
+  .cp-rewind:hover {
+    color: var(--warn);
+    border-color: var(--warn);
   }
   .file {
     display: flex;

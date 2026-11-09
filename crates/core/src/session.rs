@@ -28,8 +28,8 @@ use crate::provider::{ChatRequest, Delta, Message, Provider, ProviderError, Thin
 use crate::state::SessionState;
 use crate::tools::WorkspaceTools;
 use crate::types::{
-    FailureReason, Outcome, PermissionDecision, PermissionRequest, SessionId, TokenUsage, ToolCall,
-    TurnId, TurnOutcome,
+    CheckpointId, FailureReason, Outcome, PermissionDecision, PermissionRequest, SessionId,
+    TokenUsage, ToolCall, TurnId, TurnOutcome,
 };
 use hate_ledger::{Ledger, RecordRequest};
 
@@ -508,9 +508,30 @@ impl Actor {
         }
         self.state = SessionState::Idle;
         self.set_snapshot();
+        // Mutating turns leave a restorable checkpoint before the
+        // session-state write — every outcome, not just success.
+        self.persist_checkpoint();
         // Every turn outcome (completed/failed/cancelled) changes history
         // or counters — this is the "context always survives" write.
         self.persist_now();
+    }
+
+    /// Persist this turn's captured file originals as a checkpoint and
+    /// announce it. No-op when nothing mutated or checkpoints are off.
+    /// Write failures degrade silently — the turn already happened.
+    fn persist_checkpoint(&self) {
+        let Some(tools) = self.cfg.tools.as_ref() else {
+            return;
+        };
+        let Some(bundle) = tools.drain_checkpoint() else {
+            return;
+        };
+        match crate::checkpoint::write_checkpoint(&bundle) {
+            Ok(()) => self.emit(Event::CheckpointCreated {
+                id: CheckpointId(bundle.id),
+            }),
+            Err(e) => warn!(error = %e, "checkpoint write failed"),
+        }
     }
 
     /// Snapshot actor state into the journal. Synchronous and cheap —

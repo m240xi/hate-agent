@@ -316,6 +316,28 @@ class SessionStore {
     }
   }
 
+  /** Rewind the workspace to a checkpoint's pre-turn file state (M4).
+   *  Leaves a transcript note so the rewind is visible in the record. */
+  async rewindCheckpoint(id: string): Promise<void> {
+    if (!inTauri()) return;
+    try {
+      const { sessionRewind } = await import('./ipc');
+      await sessionRewind(id);
+      this.blocks.push({
+        id: nextBlockId++,
+        kind: 'text',
+        text: `⏪ workspace rewound to checkpoint ${id.slice(0, 8)}`,
+        streaming: false,
+      });
+    } catch (e) {
+      this.blocks.push({
+        id: nextBlockId++,
+        kind: 'error',
+        text: `rewind failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }
+
   /** Pick a model from the provider's catalog — persists to config.toml
    *  (CLI shares it) and hot-swaps the live session. */
   async setModel(id: string): Promise<void> {

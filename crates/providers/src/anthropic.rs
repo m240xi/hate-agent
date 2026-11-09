@@ -24,23 +24,28 @@ use hate_core::{TokenUsage, ToolCall, ToolName};
 use crate::sse::{self, SharedCredential, SseFrame};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// Beta flag Anthropic requires on OAuth-subscription tokens
-/// (Pro/Max logins) instead of `x-api-key`.
-const OAUTH_BETA: &str = "oauth-2025-04-20";
-/// Subscription inference is scoped to Claude Code: the endpoint
-/// rejects OAuth requests whose system prompt lacks its identity
-/// line, so it leads the prompt for OAuth credentials only. API-key
-/// traffic keeps the prompt byte-identical (prefix-cache friendly).
+/// Beta flags Anthropic requires on OAuth-subscription tokens
+/// (Pro/Max logins) instead of `x-api-key`: `oauth-2025-04-20` enables
+/// OAuth auth at all; `claude-code-20250219` marks the request as a
+/// Claude Code client — without it the Sonnet/Opus gate answers with a
+/// headerless 429.
+const OAUTH_BETA: &str = "oauth-2025-04-20,claude-code-20250219";
+/// Subscription inference is scoped to Claude Code: the entitlement
+/// gate rejects OAuth requests unless the FIRST system block is
+/// *exactly* this line (not merely a prefix of a larger block — that
+/// yields a headerless 429 that looks like rate limiting).
 const CLAUDE_CODE_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Attach vendor auth headers: subscription OAuth tokens ride as
-/// `Authorization: Bearer` + the oauth beta flag; plain API keys keep
-/// the `x-api-key` header. `key` is whatever [`CredentialSource::bearer`]
-/// returned — the source decides which style applies via `is_oauth`.
+/// `Authorization: Bearer` + the OAuth beta flags + `x-app: cli`;
+/// plain API keys keep the `x-api-key` header. `key` is whatever
+/// [`CredentialSource::bearer`] returned — the source decides which
+/// style applies via `is_oauth`.
 fn apply_auth(rb: reqwest::RequestBuilder, key: &str, oauth: bool) -> reqwest::RequestBuilder {
     if oauth {
         rb.header("authorization", format!("Bearer {key}"))
             .header("anthropic-beta", OAUTH_BETA)
+            .header("x-app", "cli")
     } else {
         rb.header("x-api-key", key)
     }
@@ -201,20 +206,29 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
 
 /// System prompt as a content-block array carrying the first cache
 /// breakpoint — Anthropic only caches block form, not bare strings.
-/// `oauth` prepends the Claude Code identity line the subscription
-/// endpoint requires (see [`CLAUDE_CODE_PREFIX`]).
+/// For OAuth (`oauth`), the Claude Code identity line goes in as its
+/// own FIRST block — the entitlement gate checks that block verbatim
+/// and answers a headerless 429 when it's merely part of a larger
+/// block. The real prompt follows with the cache breakpoint, so the
+/// identity line never pollutes the model-facing instructions.
 fn cached_system(system: Option<&String>, oauth: bool) -> Option<Value> {
     system.map(|s| {
-        let text = if oauth {
-            format!("{CLAUDE_CODE_PREFIX}\n\n{s}")
+        if oauth {
+            json!([
+                {"type": "text", "text": CLAUDE_CODE_PREFIX},
+                {
+                    "type": "text",
+                    "text": s,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ])
         } else {
-            s.clone()
-        };
-        json!([{
-            "type": "text",
-            "text": text,
-            "cache_control": {"type": "ephemeral"},
-        }])
+            json!([{
+                "type": "text",
+                "text": s,
+                "cache_control": {"type": "ephemeral"},
+            }])
+        }
     })
 }
 
@@ -750,14 +764,14 @@ mod tests {
         assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
         // API-key path keeps the prompt verbatim — no Claude Code prefix.
         assert_eq!(sys[0]["text"], "you are helpful");
-        // OAuth path prepends the subscription identity line.
+        // OAuth path: the identity line is its own FIRST block, verbatim
+        // — the entitlement gate rejects it when merged into a larger
+        // block — and the real prompt follows with the cache breakpoint.
         let oauth_sys = cached_system(r.system.as_ref(), true).expect("system present");
-        assert!(
-            oauth_sys[0]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with(CLAUDE_CODE_PREFIX)
-        );
+        assert_eq!(oauth_sys[0]["text"], CLAUDE_CODE_PREFIX);
+        assert!(oauth_sys[0].get("cache_control").is_none());
+        assert_eq!(oauth_sys[1]["text"], "you are helpful");
+        assert_eq!(oauth_sys[1]["cache_control"]["type"], "ephemeral");
 
         // Last tool carries the second breakpoint.
         let tools = wire_tools(&r.tools);

@@ -101,7 +101,7 @@ fn resolve_target(
 }
 
 /// Build (or reuse) the session and forward its events to the frontend
-/// as `core-event` emissions — the store's only input (spec §5).
+/// as `core-event` emissions — the store's only input.
 fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, String> {
     let mut guard = state
         .inner
@@ -305,7 +305,8 @@ pub fn session_compact(state: State<'_, Sessions>) -> Result<(), String> {
     Ok(())
 }
 
-/// Answer a pending `ask_user` prompt (accepted now; M2 wires it).
+/// Answer a pending `ask_user` prompt. Reserved — no tool emits one
+/// yet, so the session just warns.
 #[tauri::command]
 #[specta::specta]
 pub fn session_answer(state: State<'_, Sessions>, text: String) -> Result<(), String> {
@@ -320,8 +321,8 @@ pub fn session_answer(state: State<'_, Sessions>, text: String) -> Result<(), St
     Ok(())
 }
 
-/// Restore the workspace to a checkpoint's pre-turn file state
-/// (M4 rewind). Exact for `write_file`/`edit_file` mutations; `bash`
+/// Restore the workspace to a checkpoint's pre-turn file state.
+/// Exact for `write_file`/`edit_file` mutations; `bash`
 /// side effects are not captured.
 #[tauri::command]
 #[specta::specta]
@@ -351,7 +352,8 @@ pub fn session_rewind(state: State<'_, Sessions>, checkpoint_id: String) -> Resu
     Ok(())
 }
 
-/// Resolve a permission request (accepted now; M3 wires it).
+/// Resolve a pending permission request: `allow`, `allow_session`,
+/// anything else denies.
 #[tauri::command]
 #[specta::specta]
 pub fn session_respond_permission(

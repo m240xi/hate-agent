@@ -10,3 +10,4 @@ apps/desktop/src/bindings.ts
 Thumbs.db
 crates/app/gen
 bench/results/*.tmp
+/target-check

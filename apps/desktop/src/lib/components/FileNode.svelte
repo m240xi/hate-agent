@@ -5,7 +5,7 @@
   import type { FileNode as FileNodeData } from '../types';
 
   // Recursive file tree node with git status dots. Click selects; the
-  // editor surface lands in a later milestone.
+  // editor surface is not built yet.
   interface Props {
     node: FileNodeData;
     depth?: number;

@@ -3,7 +3,7 @@
 //! One entry point so the CLI and the desktop app can't drift apart on
 //! which adapter a provider name maps to. Unknown kinds fall back to
 //! OpenAI-compatible with a warning — that's the spec's "route by
-//! capability, warn on unknown" rule (§14).
+//! capability, warn on unknown" rule.
 
 use std::sync::Arc;
 
@@ -56,7 +56,7 @@ pub struct ProviderSpec {
 }
 
 /// Build a ready-to-stream provider. Every returned provider is wrapped
-/// in [`RetryingProvider`] — retry policy is not optional (spec §14).
+/// in [`RetryingProvider`] — retry policy is not optional.
 ///
 /// Panics never; construction is infallible because adapters defer all
 /// I/O to request time.

@@ -1,6 +1,7 @@
-//! Read-only workspace tools (M2): `read_file`, `list_dir`, `glob`,
-//! `grep`. Every path resolves under a canonicalized workspace root —
-//! `..` escapes and symlink breakouts are rejected before any I/O.
+//! Workspace tools: `read_file`, `list_dir`, `glob`, `grep`, `symbol`
+//! (read-only), `write_file`, `edit_file`, `bash` (gated). Every path
+//! resolves under a canonicalized workspace root — `..` escapes and
+//! symlink breakouts are rejected before any I/O.
 //!
 //! Outputs are *shaped* before re-entering model context: files are
 //! line-numbered and capped, listings and searches are entry-capped, and
@@ -9,17 +10,20 @@
 //! come back as error text the model can read and recover from — they
 //! are never turn failures.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::io::BufRead;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use hate_context::O200kCounter;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::checkpoint::CheckpointBundle;
+use crate::index::{SymbolHit, collect_workspace_symbols};
 use crate::provider::ToolSpec;
 use crate::types::{ToolCall, ToolName};
 
@@ -35,7 +39,22 @@ pub(crate) const FULL_COUNT_CAP: usize = 256 * 1024;
 const MAX_LIST_ENTRIES: usize = 500;
 const MAX_GLOB_MATCHES: usize = 200;
 const MAX_GREP_MATCHES: usize = 100;
+/// Matches shown per file before the rest collapse to a count — one
+/// noisy file must not eat the whole match budget.
+const MAX_GREP_PER_FILE: usize = 20;
+const MAX_GREP_CONTEXT: u64 = 3;
 const MAX_GREP_FILE_BYTES: u64 = 512 * 1024;
+const MAX_SYMBOL_HITS: usize = 30;
+/// A cached symbol scan older than this is rebuilt even without a
+/// known mutation — the user may be editing alongside the agent.
+const SYMBOL_CACHE_TTL: Duration = Duration::from_secs(30);
+/// `bash` output budget after cleaning: a short head for context and a
+/// long tail, where builds and test runners put their verdict.
+const BASH_MAX_LINES: usize = 160;
+const BASH_MAX_BYTES: usize = 12 * 1024;
+/// Tools with no side effects: safe to run concurrently and to
+/// de-duplicate within a turn.
+const READ_ONLY_TOOLS: &[&str] = &["read_file", "list_dir", "glob", "grep", "symbol"];
 /// Directories never descended into during walks.
 pub(crate) const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -78,6 +97,33 @@ pub struct WorkspaceTools {
     pending: Mutex<BTreeMap<String, Option<Vec<u8>>>>,
     /// Project instructions (AGENTS.md etc.) — S3 of prompt assembly.
     instructions: Option<String>,
+    /// Bumped on every mutation the agent makes (write/edit/bash/MCP).
+    /// Read memos and the symbol cache are only valid for the
+    /// generation they were recorded in.
+    generation: AtomicU64,
+    /// This turn's successful read-only calls, keyed by name + args —
+    /// an identical repeat with nothing changed answers with a stub
+    /// instead of re-sending the same tokens.
+    memo: Mutex<HashMap<String, ReadMemo>>,
+    /// Cached definition index for the `symbol` tool.
+    symbols: Mutex<Option<SymbolCache>>,
+}
+
+/// What a memoized read-only call remembers about its first run.
+struct ReadMemo {
+    /// Mutation generation the result was produced in.
+    generation: u64,
+    /// `read_file` only: the file's (mtime, len) — catches edits made
+    /// outside the agent (the user's editor) that no generation sees.
+    stamp: Option<(SystemTime, u64)>,
+    /// Tokens the original result cost — what the stub saves.
+    tokens: u32,
+}
+
+struct SymbolCache {
+    generation: u64,
+    built: Instant,
+    hits: Arc<Vec<SymbolHit>>,
 }
 
 /// Project-instruction files checked in order; first readable match
@@ -111,7 +157,30 @@ impl WorkspaceTools {
             checkpoint_root: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
             instructions: load_instructions(&canon),
+            generation: AtomicU64::new(0),
+            memo: Mutex::new(HashMap::new()),
+            symbols: Mutex::new(None),
         })
+    }
+
+    /// Whether `name` is a side-effect-free workspace tool — the turn
+    /// loop runs batches of these concurrently.
+    pub fn is_read_only(name: &str) -> bool {
+        READ_ONLY_TOOLS.contains(&name)
+    }
+
+    /// Forget this turn's read memos. The turn loop calls this at turn
+    /// start and after every compaction: a stub may only ever point at
+    /// a result that is still verbatim in the model's context.
+    pub fn reset_read_memo(&self) {
+        self.memo.lock().expect("read memo poisoned").clear();
+    }
+
+    /// Record that something outside the file tools may have changed
+    /// the workspace (an MCP tool ran) — invalidates memos and the
+    /// symbol cache.
+    pub fn note_mutation(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Canonicalized workspace root.
@@ -181,7 +250,7 @@ impl WorkspaceTools {
         vec![
             spec(
                 "read_file",
-                "Read a file with line numbers. Args: path (required), offset (1-based start line), limit (max lines, default 400).",
+                "Read a file with line numbers. Page large files with offset (1-based line) and limit (default 400).",
                 json!({
                     "type": "object",
                     "properties": {
@@ -195,7 +264,7 @@ impl WorkspaceTools {
             ),
             spec(
                 "list_dir",
-                "List a directory tree. Args: path (default '.'), depth (levels, default 1, max 3).",
+                "List a directory tree. path defaults to '.', depth to 1 (max 3).",
                 json!({
                     "type": "object",
                     "properties": {
@@ -207,7 +276,7 @@ impl WorkspaceTools {
             ),
             spec(
                 "glob",
-                "Find files by pattern. Args: pattern (required, supports * ** ?), path (dir to search, default '.').",
+                "Find files by name pattern (* ** ?), optionally under path.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -220,21 +289,36 @@ impl WorkspaceTools {
             ),
             spec(
                 "grep",
-                "Search file contents (literal substring). Args: pattern (required), path (default '.'), glob (optional filename filter).",
+                "Search file contents by regex or literal text. Matches are grouped by file as line: text.",
                 json!({
                     "type": "object",
                     "properties": {
-                        "pattern": {"type": "string"},
-                        "path": {"type": "string"},
-                        "glob": {"type": "string"}
+                        "pattern": {"type": "string", "description": "regex; also matched as literal text"},
+                        "path": {"type": "string", "description": "file or dir, default '.'"},
+                        "glob": {"type": "string", "description": "filename filter, e.g. *.rs"},
+                        "ignore_case": {"type": "boolean"},
+                        "context": {"type": "integer", "description": "lines around each match, 0-3"}
                     },
                     "required": ["pattern"],
                     "additionalProperties": false
                 }),
             ),
             spec(
+                "symbol",
+                "Find where a function, type, or constant is defined. Returns path, line, and signature. Cheaper than grep.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "symbol name or part of it"},
+                        "path": {"type": "string", "description": "limit to this dir or file"}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }),
+            ),
+            spec(
                 "write_file",
-                "Create or overwrite a file with content. Args: path (required), content (required). Creates parent dirs. Prefer edit_file for changes to existing files.",
+                "Create or overwrite a file (parent dirs are created). Prefer edit_file for existing files.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -247,7 +331,7 @@ impl WorkspaceTools {
             ),
             spec(
                 "edit_file",
-                "Replace exact text in a file. Args: path, old_string, new_string (all required), replace_all (optional bool). old_string must match uniquely unless replace_all.",
+                "Replace exact text in a file. old_string must match exactly once unless replace_all is true.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -262,12 +346,12 @@ impl WorkspaceTools {
             ),
             spec(
                 "bash",
-                "Run a shell command in the workspace root. Args: command (required), timeout_ms (optional, default 120000). Returns exit code + stdout/stderr. Requires user approval.",
+                "Run a shell command in the workspace root. Long output is clipped to head + tail; filter it yourself.",
                 json!({
                     "type": "object",
                     "properties": {
                         "command": {"type": "string"},
-                        "timeout_ms": {"type": "integer"}
+                        "timeout_ms": {"type": "integer", "description": "default 120000"}
                     },
                     "required": ["command"],
                     "additionalProperties": false
@@ -282,14 +366,70 @@ impl WorkspaceTools {
     /// never fail the turn.
     pub async fn execute(self: &Arc<Self>, call: &ToolCall) -> ToolOutput {
         if call.name.as_str() == "bash" {
-            return self.bash(call).await;
+            let out = self.bash(call).await;
+            // A shell command can change anything — every memo is stale.
+            self.note_mutation();
+            return out;
         }
         let this = Arc::clone(self);
         let call = call.clone();
-        match tokio::task::spawn_blocking(move || this.exec(&call)).await {
+        match tokio::task::spawn_blocking(move || this.exec_memoized(&call)).await {
             Ok(out) => out,
             Err(e) => self.output_for(Err(format!("tool task failed: {e}"))),
         }
+    }
+
+    /// [`Self::exec`] behind the per-turn read memo: an identical
+    /// read-only call whose inputs provably haven't changed returns a
+    /// one-line stub pointing at the earlier result. `full_tokens`
+    /// carries what the repeat would have cost, so the saving shows up
+    /// in the same ledger column as truncation.
+    fn exec_memoized(&self, call: &ToolCall) -> ToolOutput {
+        let name = call.name.as_str();
+        if !Self::is_read_only(name) {
+            return self.exec(call);
+        }
+        let key = format!("{name}\u{0}{}", call.args);
+        let generation = self.generation.load(Ordering::Relaxed);
+        let stamp = (name == "read_file")
+            .then(|| arg_str(call, "path").and_then(|p| self.file_stamp(p)))
+            .flatten();
+
+        if let Some(m) = self.memo.lock().expect("read memo poisoned").get(&key)
+            && m.generation == generation
+            && m.stamp == stamp
+        {
+            let content = format!(
+                "[duplicate call — this exact {name} already ran this turn and nothing has changed since; use that result]"
+            );
+            let preview = content.clone();
+            return ToolOutput {
+                full_tokens: m.tokens,
+                sent_tokens: self.counter.count_sync(&content) as u32,
+                content,
+                preview,
+                ok: true,
+            };
+        }
+
+        let out = self.exec(call);
+        if out.ok {
+            self.memo.lock().expect("read memo poisoned").insert(
+                key,
+                ReadMemo {
+                    generation,
+                    stamp,
+                    tokens: out.sent_tokens,
+                },
+            );
+        }
+        out
+    }
+
+    /// (mtime, len) of a workspace file, `None` when it can't be read.
+    fn file_stamp(&self, rel: &str) -> Option<(SystemTime, u64)> {
+        let meta = std::fs::metadata(self.resolve(rel).ok()?).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
     }
 
     /// Policy gate: `Some((reason, detail))` means the call needs user
@@ -352,17 +492,30 @@ impl WorkspaceTools {
             "list_dir" => self.list_dir(call),
             "glob" => self.glob(call),
             "grep" => self.grep(call),
-            "write_file" => self.write_file(call),
-            "edit_file" => self.edit_file(call),
+            "symbol" => self.symbol(call),
+            "write_file" => self.mutating(|| self.write_file(call)),
+            "edit_file" => self.mutating(|| self.edit_file(call)),
             "bash" => Err("bash runs on the async path".to_string()),
             other => Err(format!("unknown tool {other:?}")),
         };
         self.output_for(result)
     }
 
+    /// Run a file mutation and, when it succeeded, advance the
+    /// generation so stale read memos and symbols are never served.
+    fn mutating(&self, f: impl FnOnce() -> Result<String, String>) -> Result<String, String> {
+        let r = f();
+        if r.is_ok() {
+            self.note_mutation();
+        }
+        r
+    }
+
     fn count_capped(&self, text: &str) -> u32 {
-        let capped: String = text.chars().take(FULL_COUNT_CAP).collect();
-        self.counter.count_sync(&capped) as u32
+        // Slice on a char boundary instead of collecting chars — no
+        // copy, and the cap stays a byte cap like every other one here.
+        let capped = &text[..floor_char_boundary(text, FULL_COUNT_CAP)];
+        self.counter.count_sync(capped) as u32
     }
 
     // ── path safety ──────────────────────────────────────────────────────
@@ -438,7 +591,10 @@ impl WorkspaceTools {
             if bytes > FULL_COUNT_CAP {
                 break; // enough for an exact-ish full count
             }
-            lines.push(format!("{:>6}  {}", i + 1, line));
+            // `N<tab>text`: measured with o200k on real source, the old
+            // right-aligned `{:>6}  ` gutter cost ~40% on top of the raw
+            // file; a bare number + tab costs ~15%.
+            lines.push(format!("{}\t{}", i + 1, line));
         }
         // `total` only counts lines we iterated — if we broke early it
         // undercounts; note continuation honestly when we stopped early.
@@ -516,54 +672,181 @@ impl WorkspaceTools {
 
     fn grep(&self, call: &ToolCall) -> Result<String, String> {
         let pattern = arg_str(call, "pattern").ok_or("grep: missing `pattern`")?;
+        if pattern.is_empty() {
+            return Err("grep: `pattern` must not be empty".to_string());
+        }
         let base = self.resolve(arg_str(call, "path").unwrap_or("."))?;
         let glob_filter = arg_str(call, "glob");
+        let ignore_case = arg_bool(call, "ignore_case");
+        let context = arg_u64(call, "context").unwrap_or(0).min(MAX_GREP_CONTEXT) as usize;
+        let matcher = Matcher::new(pattern, ignore_case);
+
         let mut out = String::new();
         let mut count = 0usize;
         let mut scanned = 0usize;
-        walk(&base, usize::MAX, &self.root, &mut |rel, is_dir, size| {
-            if is_dir || count >= MAX_GREP_MATCHES {
+        let mut scan = |rel: &Path, size: u64| {
+            if count >= MAX_GREP_MATCHES || size > MAX_GREP_FILE_BYTES {
                 return;
             }
-            if size > MAX_GREP_FILE_BYTES {
-                return;
-            }
+            let rel_s = rel.to_string_lossy().replace('\\', "/");
             if let Some(g) = glob_filter {
-                let s = rel.to_string_lossy().replace('\\', "/");
                 let name = rel
                     .file_name()
                     .map(|n| n.to_string_lossy())
                     .unwrap_or_default();
-                if !glob_match(g, &s) && !glob_match(g, &name) {
+                if !glob_match(g, &rel_s) && !glob_match(g, &name) {
                     return;
                 }
             }
             scanned += 1;
-            let full = self.root.join(&rel);
-            let Ok(content) = std::fs::read_to_string(&full) else {
+            let Ok(content) = std::fs::read_to_string(self.root.join(rel)) else {
                 return; // binary or unreadable — skip silently
             };
             if content.contains('\0') {
                 return;
             }
-            let rel_s = rel.to_string_lossy().replace('\\', "/");
-            for (i, line) in content.lines().enumerate() {
-                if count >= MAX_GREP_MATCHES {
-                    break;
+            count += grep_file(
+                &matcher,
+                &rel_s,
+                &content,
+                context,
+                MAX_GREP_MATCHES - count,
+                &mut out,
+            );
+        };
+        if base.is_file() {
+            // A file path searches just that file — no walk needed.
+            let rel = base.strip_prefix(&self.root).unwrap_or(&base).to_path_buf();
+            let size = base.metadata().map_or(0, |m| m.len());
+            scan(&rel, size);
+        } else {
+            walk(&base, usize::MAX, &self.root, &mut |rel, is_dir, size| {
+                if !is_dir {
+                    scan(&rel, size);
                 }
-                if line.contains(pattern) {
-                    count += 1;
-                    let trimmed: String = line.trim().chars().take(200).collect();
-                    let _ = writeln!(out, "{rel_s}:{}: {trimmed}", i + 1);
-                }
-            }
-        });
+            });
+        }
         if out.is_empty() {
             out = format!("(no matches for {pattern:?} in {scanned} files)");
         } else if count >= MAX_GREP_MATCHES {
-            let _ = write!(out, "\n[… truncated at {MAX_GREP_MATCHES} matches]");
+            let _ = write!(
+                out,
+                "[… stopped at {MAX_GREP_MATCHES} matches — narrow the pattern, path, or glob]"
+            );
+        } else {
+            out.truncate(out.trim_end().len());
         }
         Ok(out)
+    }
+
+    /// `symbol` — definition lookup over the heuristic declaration
+    /// index. One call answers "where is X defined" without the model
+    /// grepping and reading its way there.
+    fn symbol(&self, call: &ToolCall) -> Result<String, String> {
+        let query = arg_str(call, "query")
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .ok_or("symbol: missing `query`")?;
+        let scope = match arg_str(call, "path").map(str::trim) {
+            Some(p) if !p.is_empty() && p != "." => {
+                let abs = self.resolve(p)?;
+                let rel = abs.strip_prefix(&self.root).unwrap_or(&abs);
+                Some(rel.to_string_lossy().replace('\\', "/"))
+            }
+            _ => None,
+        };
+        let hits = self.symbol_index();
+        let q_lower = query.to_lowercase();
+
+        // Rank: exact, case-insensitive exact, prefix, substring. Ties
+        // keep index order (path, then line) so output is deterministic.
+        let mut ranked: Vec<(u8, &SymbolHit)> = hits
+            .iter()
+            .filter(|h| {
+                scope.as_deref().is_none_or(|s| {
+                    h.path == s || h.path.strip_prefix(s).is_some_and(|r| r.starts_with('/'))
+                })
+            })
+            .filter_map(|h| {
+                let n = h.name.to_lowercase();
+                let rank = if h.name == query {
+                    0
+                } else if n == q_lower {
+                    1
+                } else if n.starts_with(&q_lower) {
+                    2
+                } else if n.contains(&q_lower) {
+                    3
+                } else {
+                    return None;
+                };
+                Some((rank, h))
+            })
+            .collect();
+        if ranked.is_empty() {
+            return Ok(format!(
+                "(no definition matching {query:?} — try grep for usages or non-declaration sites)"
+            ));
+        }
+        ranked.sort_by_key(|(rank, _)| *rank);
+        let total = ranked.len();
+        ranked.truncate(MAX_SYMBOL_HITS);
+
+        // Group by file (first-appearance order) and attach the source
+        // line, so the model gets the signature without a read.
+        let mut order: Vec<&str> = Vec::new();
+        let mut by_file: HashMap<&str, Vec<u32>> = HashMap::new();
+        for (_, h) in &ranked {
+            by_file
+                .entry(h.path.as_str())
+                .or_insert_with(|| {
+                    order.push(h.path.as_str());
+                    Vec::new()
+                })
+                .push(h.line);
+        }
+        let mut out = String::new();
+        for path in order {
+            let text = std::fs::read_to_string(self.root.join(path)).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            let mut nums = by_file.remove(path).unwrap_or_default();
+            nums.sort_unstable();
+            let _ = writeln!(out, "{path}");
+            for n in nums {
+                let sig = lines.get(n as usize - 1).map_or("", |l| l.trim());
+                let _ = writeln!(out, "  {n}: {}", clip_line(sig, 160));
+            }
+        }
+        if total > MAX_SYMBOL_HITS {
+            let _ = write!(
+                out,
+                "[… {} more definitions — use a more specific query or path]",
+                total - MAX_SYMBOL_HITS
+            );
+        } else {
+            out.truncate(out.trim_end().len());
+        }
+        Ok(out)
+    }
+
+    /// The cached definition index, rebuilt when a mutation happened
+    /// since it was built or it has aged past [`SYMBOL_CACHE_TTL`].
+    fn symbol_index(&self) -> Arc<Vec<SymbolHit>> {
+        let generation = self.generation.load(Ordering::Relaxed);
+        let mut cache = self.symbols.lock().expect("symbol cache poisoned");
+        if let Some(c) = cache.as_ref()
+            && c.generation == generation
+            && c.built.elapsed() < SYMBOL_CACHE_TTL
+        {
+            return Arc::clone(&c.hits);
+        }
+        let hits = Arc::new(collect_workspace_symbols(&self.root));
+        *cache = Some(SymbolCache {
+            generation,
+            built: Instant::now(),
+            hits: Arc::clone(&hits),
+        });
+        hits
     }
 
     fn write_file(&self, call: &ToolCall) -> Result<String, String> {
@@ -661,21 +944,36 @@ impl WorkspaceTools {
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), cmd.output()).await;
 
-        let full = match result {
+        match result {
             Ok(Ok(out)) => {
                 let code = out.status.code().unwrap_or(-1);
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                let mut s = format!("exit code: {code}\n--- stdout ---\n");
-                s.push_str(&cap_str(&stdout, 128 * 1024));
-                s.push_str("\n--- stderr ---\n");
-                s.push_str(&cap_str(&stderr, 128 * 1024));
-                if out.status.success() { Ok(s) } else { Err(s) }
+                let sent = format_command_output(code, &stdout, &stderr);
+                // What an unshaped agent would have sent: the raw
+                // streams. Counted (capped) so the saving is on record.
+                let full_tokens = self
+                    .count_capped(&stdout)
+                    .saturating_add(self.count_capped(&stderr));
+                self.output_shaped(sent, full_tokens, out.status.success())
             }
-            Ok(Err(e)) => Err(format!("bash failed to start: {e}")),
-            Err(_) => Err(format!("bash timed out after {timeout_ms}ms (killed)")),
-        };
-        self.output_for(full)
+            Ok(Err(e)) => self.output_for(Err(format!("bash failed to start: {e}"))),
+            Err(_) => self.output_for(Err(format!("bash timed out after {timeout_ms}ms (killed)"))),
+        }
+    }
+
+    /// [`ToolOutput`] for text that was already shaped by its tool.
+    /// Failures keep the `error: ` prefix every other tool error has.
+    fn output_shaped(&self, sent: String, full_tokens: u32, ok: bool) -> ToolOutput {
+        let content = if ok { sent } else { format!("error: {sent}") };
+        let sent_tokens = self.counter.count_sync(&content) as u32;
+        ToolOutput {
+            preview: content.chars().take(400).collect(),
+            full_tokens: full_tokens.max(sent_tokens),
+            sent_tokens,
+            content,
+            ok,
+        }
     }
 }
 
@@ -695,6 +993,153 @@ fn arg_str<'a>(call: &'a ToolCall, key: &str) -> Option<&'a str> {
 
 fn arg_u64(call: &ToolCall, key: &str) -> Option<u64> {
     call.args.get(key)?.as_u64()
+}
+
+fn arg_bool(call: &ToolCall, key: &str) -> bool {
+    call.args
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// `grep`'s line matcher. The pattern is tried as a regex AND as
+/// literal text: models routinely search for code like `foo(bar)` or
+/// `Vec<u8>` that is either an invalid regex or a valid one meaning
+/// something else, and a silent zero-match there costs a wasted round.
+struct Matcher {
+    regex: Option<regex::Regex>,
+    literal: String,
+    ignore_case: bool,
+}
+
+impl Matcher {
+    fn new(pattern: &str, ignore_case: bool) -> Self {
+        let regex = regex::RegexBuilder::new(pattern)
+            .case_insensitive(ignore_case)
+            .size_limit(1 << 20)
+            .build()
+            .ok();
+        let literal = if ignore_case {
+            pattern.to_lowercase()
+        } else {
+            pattern.to_string()
+        };
+        Self {
+            regex,
+            literal,
+            ignore_case,
+        }
+    }
+
+    fn is_match(&self, line: &str) -> bool {
+        let literal_hit = if self.ignore_case {
+            line.to_lowercase().contains(&self.literal)
+        } else {
+            line.contains(&self.literal)
+        };
+        literal_hit || self.regex.as_ref().is_some_and(|r| r.is_match(line))
+    }
+}
+
+/// Append one file's matches to `out` as a `path` heading followed by
+/// `  line: text` rows (`  line- text` for context rows) — the path is
+/// paid for once per file instead of once per match. Returns how many
+/// matches were counted against the global budget.
+fn grep_file(
+    matcher: &Matcher,
+    rel: &str,
+    content: &str,
+    context: usize,
+    budget: usize,
+    out: &mut String,
+) -> usize {
+    let lines: Vec<&str> = content.lines().collect();
+    let hits: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| matcher.is_match(l))
+        .map(|(i, _)| i)
+        .collect();
+    if hits.is_empty() {
+        return 0;
+    }
+    let shown = hits.len().min(MAX_GREP_PER_FILE).min(budget);
+    let _ = writeln!(out, "{rel}");
+    let mut last_printed: Option<usize> = None;
+    for &i in &hits[..shown] {
+        let from = i.saturating_sub(context);
+        let to = (i + context).min(lines.len() - 1);
+        if context > 0
+            && let Some(last) = last_printed
+            && from > last + 1
+        {
+            out.push_str("  --\n");
+        }
+        for (j, line) in lines.iter().enumerate().take(to + 1).skip(from) {
+            if last_printed.is_some_and(|last| j <= last) {
+                continue;
+            }
+            // A context row that is itself a match prints as a match.
+            let sep = if j == i || hits.binary_search(&j).is_ok() {
+                ':'
+            } else {
+                '-'
+            };
+            let _ = writeln!(out, "  {}{sep} {}", j + 1, clip_line(line.trim(), 200));
+            last_printed = Some(j);
+        }
+    }
+    if hits.len() > shown {
+        let _ = writeln!(out, "  (+{} more matches in this file)", hits.len() - shown);
+    }
+    shown
+}
+
+/// First `max` chars of `line`, with an ellipsis when cut.
+fn clip_line(line: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    if line.len() <= max {
+        return line.into();
+    }
+    match line.char_indices().nth(max) {
+        Some((idx, _)) => format!("{}…", &line[..idx]).into(),
+        None => line.into(),
+    }
+}
+
+/// Shape a finished command for the model: exit code first, then each
+/// non-empty stream cleaned (ANSI, progress redraws, repeats) and
+/// clipped head+tail. Empty streams cost nothing — no empty section
+/// headers.
+fn format_command_output(code: i32, stdout: &str, stderr: &str) -> String {
+    let stdout = crate::shape::clean(stdout);
+    let stderr = crate::shape::clean(stderr);
+    let mut out = format!("exit code: {code}");
+    // Both streams present → split the budget; otherwise one gets it all.
+    let share = if stdout.is_empty() || stderr.is_empty() {
+        1
+    } else {
+        2
+    };
+    if !stdout.is_empty() {
+        out.push('\n');
+        out.push_str(&crate::shape::clip(
+            &stdout,
+            BASH_MAX_LINES / share,
+            BASH_MAX_BYTES / share,
+        ));
+    }
+    if !stderr.is_empty() {
+        out.push_str("\n--- stderr ---\n");
+        out.push_str(&crate::shape::clip(
+            &stderr,
+            BASH_MAX_LINES / share,
+            BASH_MAX_BYTES / share,
+        ));
+    }
+    if stdout.is_empty() && stderr.is_empty() {
+        out.push_str("\n(no output)");
+    }
+    out
 }
 
 /// Lexically resolve `.`/`..` without touching the filesystem, so escape
@@ -797,24 +1242,11 @@ pub(crate) fn shape(text: &str, cap: usize) -> String {
     let head = cap * 7 / 10;
     let tail = cap - head - 64; // room for the marker
     let mut out = String::with_capacity(cap + 128);
-    out.push_str(&text[..floor_char_boundary(text, head)]);
-    let _ = write!(
-        out,
-        "\n\n[… {} bytes omitted …]\n\n",
-        text.len() - head - tail
-    );
-    out.push_str(&text[text.len() - floor_char_boundary_rev(text, tail)..]);
-    out
-}
-
-/// Head-only truncation for command output — stream tails are usually
-/// noise, unlike file contents where the tail matters.
-fn cap_str(s: &str, cap: usize) -> String {
-    if s.len() <= cap {
-        return s.to_string();
-    }
-    let mut out = s[..floor_char_boundary(s, cap)].to_string();
-    let _ = write!(out, "\n[… {} bytes truncated …]", s.len() - cap);
+    let head_end = floor_char_boundary(text, head);
+    let tail_start = floor_char_boundary_rev(text, tail);
+    out.push_str(&text[..head_end]);
+    let _ = write!(out, "\n\n[… {} bytes omitted …]\n\n", tail_start - head_end);
+    out.push_str(&text[tail_start..]);
     out
 }
 
@@ -903,8 +1335,8 @@ mod tests {
         let (_d, t) = tools();
         let out = t.exec(&call("read_file", json!({"path": "a.txt"})));
         assert!(out.ok);
-        assert!(out.content.contains("     1  alpha"));
-        assert!(out.content.contains("     3  gamma"));
+        assert!(out.content.contains("1\talpha"));
+        assert!(out.content.contains("3\tgamma"));
     }
 
     #[test]
@@ -921,7 +1353,254 @@ mod tests {
     fn grep_finds_lines() {
         let (_d, t) = tools();
         let g = t.exec(&call("grep", json!({"pattern": "alpha"})));
-        assert!(g.content.contains("a.txt:1: alpha"));
+        assert_eq!(g.content, "a.txt\n  1: alpha");
+    }
+
+    #[test]
+    fn grep_regex_literal_fallback_case_and_context() {
+        let (dir, t) = tools();
+        std::fs::write(
+            dir.path().join("src/c.rs"),
+            "use std::fmt;\nfn parse(input: Vec<u8>) {}\nfn render() {}\nfn Parse2() {}\n",
+        )
+        .unwrap();
+        // Regex alternation.
+        let g = t.exec(&call("grep", json!({"pattern": "fn (parse|render)\\("})));
+        assert!(
+            g.content.contains("src/c.rs\n  2: fn parse"),
+            "{}",
+            g.content
+        );
+        assert!(g.content.contains("  3: fn render() {}"));
+        // Code that is a broken/misleading regex still matches literally.
+        let g = t.exec(&call("grep", json!({"pattern": "parse(input: Vec<u8>)"})));
+        assert!(g.content.contains("  2: fn parse(input"), "{}", g.content);
+        let g = t.exec(&call("grep", json!({"pattern": "main() {}"})));
+        assert!(
+            g.content.contains("src/b.rs\n  1: fn main() {}"),
+            "{}",
+            g.content
+        );
+        // ignore_case + glob filter + single-file path.
+        let g = t.exec(&call(
+            "grep",
+            json!({"pattern": "PARSE", "ignore_case": true, "path": "src/c.rs"}),
+        ));
+        assert!(
+            g.content.contains("  2:") && g.content.contains("  4:"),
+            "{}",
+            g.content
+        );
+        // Context rows use `-`, matches `:`; path printed once.
+        let g = t.exec(&call(
+            "grep",
+            json!({"pattern": "render", "context": 1, "glob": "*.rs"}),
+        ));
+        assert_eq!(
+            g.content,
+            "src/c.rs\n  2- fn parse(input: Vec<u8>) {}\n  3: fn render() {}\n  4- fn Parse2() {}"
+        );
+        // Misses stay honest and cheap.
+        let g = t.exec(&call("grep", json!({"pattern": "zzz_nope"})));
+        assert!(g.content.starts_with("(no matches"));
+    }
+
+    #[test]
+    fn grep_caps_per_file_and_reports_remainder() {
+        let (dir, t) = tools();
+        let body = "hit\n".repeat(MAX_GREP_PER_FILE + 7);
+        std::fs::write(dir.path().join("many.txt"), body).unwrap();
+        let g = t.exec(&call("grep", json!({"pattern": "hit", "path": "many.txt"})));
+        assert_eq!(g.content.matches(": hit").count(), MAX_GREP_PER_FILE);
+        assert!(
+            g.content.contains("(+7 more matches in this file)"),
+            "{}",
+            g.content
+        );
+    }
+
+    #[test]
+    fn symbol_finds_definitions_with_signature() {
+        let (dir, t) = tools();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub struct Parser;\n\nimpl Parser {\n    pub fn parse_expr(&self, depth: u8) -> u8 { depth }\n}\n// fn parse_comment() is prose\n",
+        )
+        .unwrap();
+        // Prose in a non-source file must never be a definition.
+        std::fs::write(dir.path().join("notes.md"), "class Parser is neat\n").unwrap();
+        let out = t.exec(&call("symbol", json!({"query": "parse_expr"})));
+        assert_eq!(
+            out.content,
+            "src/lib.rs\n  4: pub fn parse_expr(&self, depth: u8) -> u8 { depth }"
+        );
+        // Case-insensitive / partial queries rank below exact but still hit.
+        let out = t.exec(&call("symbol", json!({"query": "parser"})));
+        assert!(
+            out.content.contains("  1: pub struct Parser;"),
+            "{}",
+            out.content
+        );
+        assert!(!out.content.contains("notes.md"));
+        // Scope filter and honest miss.
+        let out = t.exec(&call("symbol", json!({"query": "main", "path": "src"})));
+        assert!(out.content.contains("src/b.rs"), "{}", out.content);
+        let out = t.exec(&call("symbol", json!({"query": "nope_nothing"})));
+        assert!(out.ok && out.content.starts_with("(no definition"));
+    }
+
+    #[test]
+    fn symbol_index_refreshes_after_agent_edits() {
+        let (_d, t) = tools();
+        assert!(
+            t.exec(&call("symbol", json!({"query": "fresh_fn"})))
+                .content
+                .starts_with("(no")
+        );
+        let w = t.exec(&call(
+            "write_file",
+            json!({"path": "src/new.rs", "content": "fn fresh_fn() {}\n"}),
+        ));
+        assert!(w.ok);
+        let out = t.exec(&call("symbol", json!({"query": "fresh_fn"})));
+        assert!(
+            out.content.contains("src/new.rs\n  1: fn fresh_fn() {}"),
+            "{}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn duplicate_reads_collapse_until_something_changes() {
+        let (dir, t) = tools();
+        let read = call("read_file", json!({"path": "a.txt"}));
+        let first = t.exec_memoized(&read);
+        assert!(first.content.contains("1\talpha"));
+
+        // Same call, nothing changed → stub, with the saving on record.
+        let dup = t.exec_memoized(&read);
+        assert!(
+            dup.ok && dup.content.starts_with("[duplicate call"),
+            "{}",
+            dup.content
+        );
+        assert_eq!(dup.full_tokens, first.sent_tokens);
+        assert!(dup.sent_tokens < 40);
+
+        // Different args are a different call.
+        let paged = t.exec_memoized(&call("read_file", json!({"path": "a.txt", "offset": 2})));
+        assert!(paged.content.contains("2\tbeta"));
+
+        // An agent edit invalidates → real content again.
+        let e = t.exec_memoized(&call(
+            "edit_file",
+            json!({"path": "a.txt", "old_string": "beta", "new_string": "BETA"}),
+        ));
+        assert!(e.ok);
+        let after = t.exec_memoized(&read);
+        assert!(after.content.contains("2\tBETA"), "{}", after.content);
+
+        // An edit from OUTSIDE the agent (no generation bump) is caught
+        // by the file stamp.
+        assert!(
+            t.exec_memoized(&read)
+                .content
+                .starts_with("[duplicate call")
+        );
+        std::fs::write(
+            dir.path().join("a.txt"),
+            "changed by the user, longer now\n",
+        )
+        .unwrap();
+        assert!(
+            t.exec_memoized(&read)
+                .content
+                .contains("changed by the user")
+        );
+
+        // A new turn (or compaction) forgets everything.
+        assert!(
+            t.exec_memoized(&read)
+                .content
+                .starts_with("[duplicate call")
+        );
+        t.reset_read_memo();
+        assert!(
+            t.exec_memoized(&read)
+                .content
+                .contains("changed by the user")
+        );
+
+        // Failed calls are never memoized — the retry must really run.
+        let miss = call("read_file", json!({"path": "missing.txt"}));
+        assert!(!t.exec_memoized(&miss).ok);
+        assert!(!t.exec_memoized(&miss).ok);
+    }
+
+    #[test]
+    fn shape_keeps_head_and_tail_within_cap() {
+        // Regression: the tail slice used to start at `len - tail_start`,
+        // which re-sent most of the text (output grew past the cap) and
+        // could split a multibyte char.
+        let text = format!("HEAD{}é{}TAIL", "a".repeat(60_000), "b".repeat(60_000));
+        let out = shape(&text, 10_000);
+        assert!(out.len() <= 10_000 + 64, "len {}", out.len());
+        assert!(out.starts_with("HEAD") && out.ends_with("TAIL"));
+        assert!(out.contains("bytes omitted"));
+        let all_wide = "é".repeat(40_000);
+        assert!(shape(&all_wide, 10_001).len() <= 10_001 + 64);
+    }
+
+    #[test]
+    fn tool_descriptions_fit_the_budget_untruncated() {
+        let (_d, t) = tools();
+        for s in t.specs() {
+            let n = s.description.chars().count();
+            assert!(n <= 120, "{} description is {n} chars", s.name);
+            assert!(
+                s.description.ends_with('.'),
+                "{} description was cut mid-sentence: {:?}",
+                s.name,
+                s.description
+            );
+        }
+    }
+
+    #[test]
+    fn command_output_is_cleaned_and_clipped() {
+        // Colour + progress redraws + repeated warnings + a long middle.
+        let mut stdout = String::from("\u{1b}[32mCompiling\u{1b}[0m foo\n");
+        stdout.push_str("fetch 1%\rfetch 100%\n");
+        for _ in 0..50 {
+            stdout.push_str("warning: unused variable\n");
+        }
+        for i in 0..2000 {
+            let _ = writeln!(stdout, "test case_{i} ... ok");
+        }
+        stdout.push_str("test result: FAILED. 1999 passed; 1 failed\n");
+        let out = format_command_output(101, &stdout, "");
+        assert!(
+            out.starts_with("exit code: 101\nCompiling foo\nfetch 100%\n"),
+            "{out}"
+        );
+        assert!(out.contains("warning: unused variable (×50)"));
+        assert!(out.contains("lines omitted"));
+        assert!(out.ends_with("test result: FAILED. 1999 passed; 1 failed"));
+        assert!(
+            !out.contains("stderr"),
+            "empty stream must not cost a header"
+        );
+        assert!(out.len() <= BASH_MAX_BYTES + 256, "len {}", out.len());
+        assert!(out.lines().count() <= BASH_MAX_LINES + 3);
+
+        assert_eq!(
+            format_command_output(0, "", "\n"),
+            "exit code: 0\n(no output)"
+        );
+        assert_eq!(
+            format_command_output(1, "out\n", "boom\n"),
+            "exit code: 1\nout\n--- stderr ---\nboom"
+        );
     }
 
     #[test]

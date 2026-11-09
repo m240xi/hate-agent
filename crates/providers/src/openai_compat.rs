@@ -356,8 +356,8 @@ impl Provider for OpenAiCompatProvider {
             // o200k approximation over the request's text surface: system
             // prompt + message contents + tool schemas. Chat-template
             // overhead is a few tokens and constant — acceptable for the
-            // compaction thresholds this feeds (spec §11 sanctions o200k
-            // for OpenAI-compatible models).
+            // compaction thresholds this feeds (o200k is the sanctioned
+            // approximation for OpenAI-compatible models).
             let mut text = String::new();
             if let Some(s) = &req.system {
                 text.push_str(s);
@@ -466,10 +466,10 @@ impl Provider for OpenAiCompatProvider {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            vision: false, // model-dependent; per-model map lands with model routing
+            vision: false, // model-dependent; no per-model vision map yet
             tools: true,
             cache: CacheMode::Automatic,
-            thinking: false, // detected per-model later; deltas still handled if emitted
+            thinking: false, // not detected per-model; deltas still handled if emitted
         }
     }
 }

@@ -133,6 +133,42 @@ pub fn build_index(root: &Path) -> io::Result<WorkspaceIndex> {
     })
 }
 
+/// File extensions the agent-facing symbol scan opens. The UI index
+/// scans everything text-like; the agent tool stays on source files so
+/// prose ("class of problems…") never shows up as a definition.
+const SOURCE_EXTS: &[&str] = &[
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt", "kts", "cs", "rb",
+    "php", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "swift", "scala", "lua", "svelte", "vue",
+    "zig", "ex", "exs", "dart", "sh",
+];
+
+/// Definition sites across source files under `root` — no tree, no git
+/// status. Feeds the agent's `symbol` tool, which caches the result and
+/// rebuilds it after mutations. Same caps as [`build_index`].
+pub fn collect_workspace_symbols(root: &Path) -> Vec<SymbolHit> {
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    let mut truncated = false;
+    walk(root, root, &mut entries, &mut truncated);
+
+    let mut symbols = Vec::new();
+    let mut scanned = 0usize;
+    for (rel, is_dir) in &entries {
+        if symbols.len() >= MAX_SYMBOLS || scanned >= MAX_SYMBOL_FILES {
+            break;
+        }
+        let is_source = Path::new(rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| SOURCE_EXTS.contains(&e.to_ascii_lowercase().as_str()));
+        if *is_dir || !is_source {
+            continue;
+        }
+        scanned += 1;
+        collect_symbols(&root.join(rel), rel, &mut symbols);
+    }
+    symbols
+}
+
 // ── walk ──────────────────────────────────────────────────────────────────
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, bool)>, truncated: &mut bool) {

@@ -1,5 +1,5 @@
 //! `hate` — the headless CLI. Same `hate-core` session the desktop app
-//! drives; this binary is what the benchmark harness calls (spec §5).
+//! drives; this binary is what the benchmark harness calls.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -60,7 +60,7 @@ enum AuthCommands {
         #[arg(default_value = "nous")]
         provider: String,
         /// API key for non-OAuth providers (prompted interactively if
-        /// omitted and stdin is a terminal — M1 requires the flag or
+        /// omitted and stdin is a terminal — requires the flag or
         /// `set-key`).
         #[arg(long)]
         api_key: Option<String>,

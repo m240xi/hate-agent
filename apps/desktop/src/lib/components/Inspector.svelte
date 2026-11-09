@@ -106,7 +106,7 @@
       <ul class="cps">
         {#each session.checkpoints as cp}
           <li class="cp">
-            <span class="cp-id mono">{cp.id}</span>
+            <span class="cp-id mono" title={cp.id}>{cp.id.slice(0, 8)}</span>
             <span class="cp-label">{cp.label}</span>
             <span class="cp-at mono dim">{cp.at}</span>
             <button
@@ -149,6 +149,8 @@
     height: 100%;
   }
   .sec {
+    flex: none;
+    min-width: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 8px 10px;
@@ -194,6 +196,10 @@
   }
   .step.active {
     color: var(--fg-0);
+  }
+  .desc {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .marker {
     width: 16px;
@@ -277,7 +283,12 @@
   }
   .cp-at {
     font-size: 10px;
-    flex: none;
+    /* The timestamp gives way before the rewind button does. */
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .cp-rewind {
     flex: none;

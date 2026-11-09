@@ -1,4 +1,4 @@
-//! Token counting. The spec forbids `chars / 4` estimation whenever a real
+//! Token counting. `chars / 4` estimation is forbidden whenever a real
 //! counter exists — every counter here is real: a bundled BPE for
 //! OpenAI-compatible/local models, provider `count_tokens` endpoints for
 //! Anthropic/Gemini (implemented in `hate-providers`, which owns HTTP).
@@ -26,7 +26,7 @@ pub trait TokenCounter: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, CountError>> + Send + 'a>>;
 }
 
-/// `o200k_base` BPE counter — the approximation the spec sanctions for
+/// `o200k_base` BPE counter — the sanctioned approximation for
 /// OpenAI-compatible and local models. The BPE table is loaded once and
 /// shared; encoding is CPU-bound and fast enough to run inline.
 pub struct O200kCounter {

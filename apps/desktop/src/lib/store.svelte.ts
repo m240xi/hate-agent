@@ -25,9 +25,11 @@ import type {
   SymbolHit,
   TokenUsage,
   TranscriptBlock,
+  TurnOutcome,
 } from './types';
 import type { ProviderInfo, ProviderModel, SessionMeta, ThinkingLevel } from './ipc';
 import { isThemeId } from './themes';
+import { copyText, parsePlan, transcriptMarkdown } from './format';
 
 const inTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -89,7 +91,13 @@ interface UiState {
   thinkingLevel: ThinkingLevel;
   checkpoints: CheckpointEntry[];
   changedFiles: ChangedFile[];
+  planMode: boolean;
 }
+
+/** Sent when the user approves a plan — the plan itself is already in
+ *  the conversation, so this stays short. */
+const RUN_PLAN_TEXT =
+  'Approved. Carry out the plan above step by step, then verify the result.';
 
 class SessionStore {
   // ── transcript ──────────────────────────────────────────────────────────
@@ -138,6 +146,15 @@ class SessionStore {
   draft = $state('');
   pendingPermission = $state<PermissionRequest | null>(null);
   awaitingPrompt = $state<string | null>(null);
+  /** Messages typed while a turn was running — sent in order, one per
+   *  completed turn. */
+  queue = $state<string[]>([]);
+
+  // ── plan mode ───────────────────────────────────────────────────────────
+  /** While on, every send is a read-only `/plan` turn. */
+  planMode = $state(false);
+  /** A plan turn finished with steps — the plan bar offers Run/Revise. */
+  planReady = $state(false);
 
   // ── panes ───────────────────────────────────────────────────────────────
   leftCollapsed = $state(false);
@@ -173,6 +190,17 @@ class SessionStore {
   private unlisten: UnlistenFn | null = null;
   private fixtureTimers: ReturnType<typeof setTimeout>[] = [];
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Block index where the current provider request's output begins —
+   *  `tokens_counted` attributes usage to blocks from here on. */
+  private roundStart = 0;
+  /** Usage of a request that produced no text or thinking; lands on the
+   *  first tool card it started. */
+  private pendingToolUsage: TokenUsage | null = null;
+  /** The in-flight turn's user block, for the turn rollup. */
+  private turnBlockId: number | null = null;
+  private turnIsPlan = false;
+  /** The in-flight turn is carrying out an approved plan. */
+  private planExecuting = false;
 
   get running(): boolean {
     return this.sessionState === 'running';
@@ -249,6 +277,9 @@ class SessionStore {
       this.costUsd = 0.0031;
       this.cacheRatio = 0.82;
       this.startFixturePlayback();
+      // Browser dev mode only: lets layout tests and manual poking feed
+      // arbitrary events through the real pipeline. Never set in Tauri.
+      (window as unknown as { __hateSession?: SessionStore }).__hateSession = this;
     }
   }
 
@@ -262,12 +293,27 @@ class SessionStore {
 
   /** Send the composer draft. In Tauri this becomes a `session_send`
    *  invoke; the first send auto-creates the persisted session. */
-  send(): void {
-    const text = this.draft.trim();
-    if (!text || this.running) return;
-    this.draft = '';
+  send(override?: string): void {
+    const text = (override ?? this.draft).trim();
+    if (!text) return;
+    if (override === undefined) this.draft = '';
+    // Busy → queue instead of dropping; drained as turns complete.
+    if (this.sessionState === 'running' || this.sessionState === 'awaiting_permission') {
+      this.queue.push(text);
+      return;
+    }
+    const plan = this.planMode;
+    // Core recognises the `/plan ` prefix and runs a read-only turn;
+    // the transcript keeps the text as the user typed it.
+    const wire = plan ? `/plan ${text}` : text;
+    this.planReady = false;
     const begin = () => {
-      this.blocks.push({ id: nextBlockId++, kind: 'user', text });
+      const id = nextBlockId++;
+      this.blocks.push(plan ? { id, kind: 'user', text, plan: true } : { id, kind: 'user', text });
+      this.turnBlockId = id;
+      this.turnIsPlan = plan;
+      this.roundStart = this.blocks.length;
+      this.pendingToolUsage = null;
       this.sessionState = 'running';
       this.sessionTurns += 1;
       this.sessionBeganAt ??= Date.now();
@@ -280,7 +326,7 @@ class SessionStore {
         return;
       }
       void import('./ipc')
-        .then((m) => m.sessionSend(text))
+        .then((m) => m.sessionSend(wire))
         .catch((err: unknown) => {
           this.sessionState = 'failed';
           this.pushError(String(err));
@@ -328,7 +374,98 @@ class SessionStore {
     }
   }
 
-  /** Rewind the workspace to a checkpoint's pre-turn file state (M4).
+  // ── plan mode ───────────────────────────────────────────────────────────
+
+  /** `/plan` — toggle plan mode. Leaving it dismisses a pending plan bar
+   *  but keeps the steps in the inspector for reference. */
+  togglePlan(): void {
+    this.planMode = !this.planMode;
+    if (!this.planMode) this.planReady = false;
+    this.scheduleUiSave();
+  }
+
+  /** Approve the pending plan: leave plan mode and run it. */
+  runPlan(): void {
+    if (!this.planReady || this.running) return;
+    this.planMode = false;
+    this.planReady = false;
+    this.planExecuting = true;
+    this.plan = this.plan.map((s, i) => ({ ...s, status: i === 0 ? 'active' : 'pending' }));
+    this.send(RUN_PLAN_TEXT);
+  }
+
+  /** Keep planning — hide the bar; the next message revises the plan. */
+  revisePlan(): void {
+    this.planReady = false;
+  }
+
+  /** Drop the plan and leave plan mode. */
+  discardPlan(): void {
+    this.planReady = false;
+    this.planMode = false;
+    this.plan = [];
+    this.scheduleUiSave();
+  }
+
+  // ── transcript actions ──────────────────────────────────────────────────
+
+  removeQueued(index: number): void {
+    this.queue.splice(index, 1);
+  }
+
+  /** Text of the most recent user message (composer ↑ recall, `/retry`). */
+  lastUserText(): string | null {
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      if (b?.kind === 'user' && b.text) return b.text;
+    }
+    return null;
+  }
+
+  private lastUserBlockId(): number | null {
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      if (b?.kind === 'user') return b.id;
+    }
+    return null;
+  }
+
+  /** `/retry` — send the last user message again. */
+  retryLast(): void {
+    const text = this.lastUserText();
+    if (text) this.send(text);
+    else this.note('nothing to retry yet');
+  }
+
+  /** `/copy` — copy the latest assistant reply. */
+  async copyLastReply(): Promise<void> {
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      if (b?.kind === 'text' && !b.local && b.text) {
+        const ok = await copyText(b.text);
+        this.note(ok ? 'copied the last reply' : 'clipboard unavailable');
+        return;
+      }
+    }
+    this.note('no reply to copy yet');
+  }
+
+  /** `/export` — copy the whole transcript as Markdown. */
+  async exportTranscript(): Promise<void> {
+    if (this.blocks.length === 0) {
+      this.note('nothing to export yet');
+      return;
+    }
+    const ok = await copyText(transcriptMarkdown(this.blocks));
+    this.note(ok ? 'transcript copied to the clipboard as Markdown' : 'clipboard unavailable');
+  }
+
+  /** A local, non-model line in the transcript (command feedback). */
+  note(text: string): void {
+    this.blocks.push({ id: nextBlockId++, kind: 'text', text, streaming: false, local: true });
+  }
+
+  /** Rewind the workspace to a checkpoint's pre-turn file state.
    *  Leaves a transcript note so the rewind is visible in the record. */
   async rewindCheckpoint(id: string): Promise<void> {
     if (!inTauri()) return;
@@ -652,6 +789,13 @@ class SessionStore {
     this.pendingPermission = null;
     this.awaitingPrompt = null;
     this.sessionState = 'idle';
+    this.queue = [];
+    this.planMode = false;
+    this.planReady = false;
+    this.planExecuting = false;
+    this.turnBlockId = null;
+    this.pendingToolUsage = null;
+    this.roundStart = 0;
   }
 
   /** Restore the frontend half of a session from its `ui_state` blob. */
@@ -682,6 +826,13 @@ class SessionStore {
       }
       this.checkpoints = s.checkpoints ?? [];
       this.changedFiles = s.changedFiles ?? [];
+      this.planMode = s.planMode ?? false;
+      this.planReady = false;
+      this.planExecuting = false;
+      this.queue = [];
+      this.turnBlockId = null;
+      this.pendingToolUsage = null;
+      this.roundStart = this.blocks.length;
       this.pendingPermission = null;
       this.awaitingPrompt = null;
       this.sessionState = 'idle';
@@ -709,6 +860,7 @@ class SessionStore {
       thinkingLevel: this.thinkingLevel,
       checkpoints: this.checkpoints,
       changedFiles: this.changedFiles,
+      planMode: this.planMode,
     };
     return JSON.stringify(s);
   }
@@ -743,6 +895,10 @@ class SessionStore {
     this.sessionBeganAt = null;
     this.sessionTotals = { input: 0, cached_input: 0, output: 0, thinking: 0 };
     this.ctxUsed = 0;
+    this.roundStart = 0;
+    this.pendingToolUsage = null;
+    this.turnBlockId = null;
+    this.planReady = false;
   }
 
   setMode(mode: AppMode): void {
@@ -819,7 +975,9 @@ class SessionStore {
           kind: 'tool',
           call: e.call,
           expanded: false,
+          ...(this.pendingToolUsage ? { usage: this.pendingToolUsage } : {}),
         });
+        this.pendingToolUsage = null;
         break;
       case 'tool_output': {
         const b = this.findTool(e.call_id);
@@ -844,6 +1002,7 @@ class SessionStore {
         // Per-request prompt size — the live context-window fill.
         this.ctxUsed = e.usage.input;
         this.recomputeDerived();
+        this.attributeUsage(e.usage, e.thinking_est ?? 0);
         break;
       case 'compaction_started':
         // Context was compacted — say so in the record; the model's
@@ -853,6 +1012,7 @@ class SessionStore {
           kind: 'text',
           text: `🗜 context compacted — ${fmtK(e.before)} → ${fmtK(e.after)} tok (${e.reason})`,
           streaming: false,
+          local: true,
         });
         this.ctxUsed = e.after;
         break;
@@ -869,6 +1029,7 @@ class SessionStore {
           kind: 'text',
           text: `📚 learned skill: ${e.title} — ${(e.bytes / 1024).toFixed(1)} KB (Settings → Skills)`,
           streaming: false,
+          local: true,
         });
         break;
       case 'turn_complete':
@@ -883,6 +1044,7 @@ class SessionStore {
         this.sessionState = 'done';
         this.finishStreamingBlocks();
         void this.refreshIndex();
+        this.finishTurn(e.outcome);
         break;
       case 'awaiting_user':
         this.awaitingPrompt = e.prompt;
@@ -898,6 +1060,13 @@ class SessionStore {
         this.pushError(failureText(e.reason));
         this.sessionState = 'failed';
         this.finishStreamingBlocks();
+        if (this.planExecuting) {
+          // Whatever wasn't reached stays visibly unfinished.
+          this.plan = this.plan.map((s) =>
+            s.status === 'done' ? s : { ...s, status: 'failed' },
+          );
+          this.planExecuting = false;
+        }
         break;
       case 'error':
         this.pushError(e.error.message ?? 'unknown error');
@@ -907,6 +1076,79 @@ class SessionStore {
     // UI blob so a crash loses at most ~1s of chrome (message history
     // is journaled by the actor at turn end regardless).
     this.scheduleUiSave();
+  }
+
+  /** Pin one provider request's usage to what it produced: its reply
+   *  text, else its thinking, else (tool-only request) the first tool
+   *  card it starts. Thinking blocks get the reasoning share — exact
+   *  when the provider reports it, a local count otherwise. */
+  private attributeUsage(usage: TokenUsage, thinkingEst: number): void {
+    let textBlock: TranscriptBlock | undefined;
+    let thinkBlock: TranscriptBlock | undefined;
+    for (let i = this.blocks.length - 1; i >= this.roundStart; i--) {
+      const b = this.blocks[i];
+      if (!b || b.usage) continue;
+      if (b.kind === 'text' && b.streaming && !textBlock) textBlock = b;
+      if (b.kind === 'thinking' && !thinkBlock) thinkBlock = b;
+    }
+    if (thinkBlock) {
+      const exact = usage.thinking > 0;
+      const n = exact ? usage.thinking : thinkingEst;
+      if (n > 0) {
+        thinkBlock.thinkingTokens = n;
+        thinkBlock.thinkingEstimated = !exact;
+      }
+    }
+    const owner = textBlock ?? thinkBlock;
+    if (owner) owner.usage = { ...usage };
+    else this.pendingToolUsage = { ...usage };
+    // The request is over: its blocks stop streaming now, so the caret
+    // goes and the usage shows while the tools it called are running.
+    if (textBlock) textBlock.streaming = false;
+    if (thinkBlock) thinkBlock.streaming = false;
+    this.roundStart = this.blocks.length;
+  }
+
+  /** Turn-end bookkeeping: rollup on the user's message, plan capture,
+   *  and the next queued message. */
+  private finishTurn(outcome: TurnOutcome): void {
+    const idx = this.blocks.findIndex((b) => b.id === this.turnBlockId);
+    const userBlock = idx >= 0 ? this.blocks[idx] : undefined;
+    const completed = outcome.outcome === 'Completed';
+    if (userBlock && completed) {
+      userBlock.turn = {
+        usage: { ...outcome.usage },
+        toolCalls: outcome.tool_calls,
+        elapsedMs: outcome.elapsed_ms,
+        costUsd: outcome.cost_usd,
+      };
+    }
+    if (this.turnIsPlan && completed && idx >= 0) {
+      // The plan is the turn's final reply.
+      for (let i = this.blocks.length - 1; i > idx; i--) {
+        const b = this.blocks[i];
+        if (b?.kind === 'text' && b.text) {
+          const steps = parsePlan(b.text);
+          if (steps.length > 0) {
+            this.plan = steps;
+            this.planReady = true;
+          }
+          break;
+        }
+      }
+    }
+    if (this.planExecuting) {
+      if (completed) this.plan = this.plan.map((s) => ({ ...s, status: 'done' }));
+      this.planExecuting = false;
+    }
+    this.turnBlockId = null;
+    this.turnIsPlan = false;
+    // A pending plan needs the user's decision first; a cancelled turn
+    // should not be followed by more automatic sends.
+    if (completed && !this.planReady && this.queue.length > 0) {
+      const next = this.queue.shift();
+      if (next) queueMicrotask(() => this.send(next));
+    }
   }
 
   private recomputeDerived(): void {
@@ -956,6 +1198,10 @@ class SessionStore {
   // ── fixture playback ────────────────────────────────────────────────────
 
   private startFixturePlayback(): void {
+    // Treat the canned transcript as one in-flight turn so usage
+    // attribution and the turn rollup demo exactly like a live session.
+    this.turnBlockId = this.lastUserBlockId();
+    this.roundStart = this.blocks.length;
     let t = 600;
     for (const step of fixtureScript) {
       t += step.delay;

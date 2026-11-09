@@ -38,7 +38,7 @@
     {
       name: '/help',
       hint: 'show shortcuts',
-      run: () => session.blocks.push({ id: Date.now(), kind: 'text', text: HELP_TEXT }),
+      run: () => session.note(HELP_TEXT),
     },
     {
       name: '/model',
@@ -53,9 +53,35 @@
     {
       name: '/status',
       hint: 'session token stats',
-      run: () => session.blocks.push({ id: Date.now(), kind: 'text', text: statusText() }),
+      run: () => session.note(statusText()),
     },
-    { name: '/plan', hint: 'enter plan mode', disabled: 'plan mode not implemented' },
+    {
+      name: '/plan',
+      hint: session.planMode
+        ? 'leave plan mode'
+        : 'plan mode: read-only investigation, then a plan you approve',
+      run: () => session.togglePlan(),
+    },
+    {
+      name: '/new',
+      hint: 'start a new session',
+      run: () => void session.newSession(),
+    },
+    {
+      name: '/retry',
+      hint: 'send the last message again',
+      run: () => session.retryLast(),
+    },
+    {
+      name: '/copy',
+      hint: 'copy the last reply',
+      run: () => void session.copyLastReply(),
+    },
+    {
+      name: '/export',
+      hint: 'copy the transcript as Markdown',
+      run: () => void session.exportTranscript(),
+    },
   ]);
 
   function statusText(): string {
@@ -76,10 +102,15 @@
     '  Shift+Enter  newline',
     '  Esc          cancel running turn',
     '  Shift+Tab    cycle thinking level',
+    '  Up           recall the last message (empty composer)',
     '  /            command palette',
     '  @            attach file reference',
     '',
-    'Every token is attributable: tool cards show full → sent counts.',
+    'Messages sent while a turn runs are queued and sent in order.',
+    '/plan investigates read-only and proposes steps; nothing changes until you run the plan.',
+    '',
+    'Every token is attributable: each reply shows its request usage, your message shows',
+    'the whole turn, and tool cards show full → sent counts.',
   ].join('\n');
 
   let filter = $state('');

@@ -1,5 +1,5 @@
-// Fixture data for the M0 shell — renders the full three-pane layout with
-// realistic content before the agent core is wired in (M1). The store
+// Fixture data for the shell — used by browser dev mode (outside
+// Tauri, no backend) and the /dev/components gallery. The store
 // replays these as events so every component exercises its real render
 // path.
 
@@ -75,13 +75,24 @@ export const fixtureChangedFiles: ChangedFile[] = [
 ];
 
 // A canned transcript the fixture player streams through the real event
-// pipeline, so delta/tool/thinking rendering is exercised before M1.
+// pipeline in browser dev mode, exercising delta/tool/thinking rendering
+// without a backend.
 export const fixtureScript: Array<{ delay: number; event: unknown }> = [
   {
     delay: 300,
     event: {
       type: 'delta',
       text: "I'll trace the retry path first — locating where backoff is computed before touching anything.\n\n",
+    },
+  },
+  // Real event order: a request's usage arrives after its text/thinking
+  // and before the tools it called start.
+  {
+    delay: 200,
+    event: {
+      type: 'tokens_counted',
+      usage: { input: 2140, cached_input: 0, output: 58, thinking: 0 },
+      turn: 3,
     },
   },
   {
@@ -122,6 +133,15 @@ export const fixtureScript: Array<{ delay: number; event: unknown }> = [
     },
   },
   {
+    delay: 200,
+    event: {
+      type: 'tokens_counted',
+      usage: { input: 2380, cached_input: 2140, output: 121, thinking: 0 },
+      turn: 3,
+      thinking_est: 34,
+    },
+  },
+  {
     delay: 600,
     event: {
       type: 'tool_started',
@@ -150,18 +170,18 @@ export const fixtureScript: Array<{ delay: number; event: unknown }> = [
     },
   },
   {
-    delay: 400,
-    event: {
-      type: 'tokens_counted',
-      usage: { input: 18420, cached_input: 15200, output: 312, thinking: 96 },
-      turn: 3,
-    },
-  },
-  {
     delay: 500,
     event: {
       type: 'delta',
-      text: 'Done. `backoff` now adds jittered noise inside the existing cap, and `cargo test -p hate-providers` passes (14 tests). The full output stayed home — only the diff summary reached the transcript.\n\nTwo things worth knowing: the change is inside the retry wrapper so callers are untouched, and the seed injection point is marked for deterministic tests in M8.\n',
+      text: 'Done. `backoff` now adds jittered noise inside the existing cap, and `cargo test -p hate-providers` passes (14 tests). The full output stayed home — only the diff summary reached the transcript.\n\nTwo things worth knowing: the change is inside the retry wrapper so callers are untouched, and the seed injection point is marked for deterministic tests.\n',
+    },
+  },
+  {
+    delay: 200,
+    event: {
+      type: 'tokens_counted',
+      usage: { input: 2710, cached_input: 2380, output: 96, thinking: 0 },
+      turn: 3,
     },
   },
   {
@@ -169,8 +189,8 @@ export const fixtureScript: Array<{ delay: number; event: unknown }> = [
     event: {
       type: 'turn_complete',
       outcome: {
-        outcome: 'completed',
-        usage: { input: 18940, cached_input: 15200, output: 388, thinking: 96 },
+        outcome: 'Completed',
+        usage: { input: 7230, cached_input: 4520, output: 275, thinking: 0 },
         tool_calls: 2,
         elapsed_ms: 41200,
         cost_usd: 0.0031,

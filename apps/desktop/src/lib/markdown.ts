@@ -81,7 +81,11 @@ function renderBlocks(md: string): string {
       }
       i++; // closing fence (or EOF)
       const lang = fence[1] ? ` class="lang-${esc(fence[1])}"` : '';
-      out.push(`<pre><code${lang}>${esc(buf.join('\n'))}</code></pre>`);
+      // The button is inert markup; TranscriptBlock handles the click
+      // by delegation and copies the sibling <code> text.
+      out.push(
+        `<pre><button type="button" class="copy-code" aria-label="Copy code">copy</button><code${lang}>${esc(buf.join('\n'))}</code></pre>`,
+      );
       continue;
     }
 

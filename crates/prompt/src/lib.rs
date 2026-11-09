@@ -4,7 +4,7 @@
 //! immutability is a hard invariant, and this module is the only place the
 //! bytes are allowed to live.
 
-/// Hard token budget for the S0 system prompt (spec §9). Enforced by test
+/// Hard token budget for the S0 system prompt. Enforced by test
 /// with a real tokenizer — never `chars / 4`.
 pub const SYSTEM_PROMPT_TOKEN_BUDGET: u64 = 1400;
 
@@ -35,7 +35,7 @@ pub enum Segment {
 mod tests {
     use super::*;
 
-    /// The budget test the spec demands: S0 must stay under 1,400 tokens
+    /// The budget test: S0 must stay under 1,400 tokens
     /// measured by a real tokenizer, so prompt growth is a reviewed
     /// decision, not an accident.
     #[test]

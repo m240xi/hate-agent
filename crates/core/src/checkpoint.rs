@@ -1,4 +1,4 @@
-//! Filesystem checkpoints (M4): before mutating tools touch disk, the
+//! Filesystem checkpoints: before mutating tools touch disk, the
 //! original bytes of each affected file are captured; at turn end the
 //! actor persists them as a restorable bundle. `restore_checkpoint`
 //! puts a bundle back — rewinding a turn's file changes.

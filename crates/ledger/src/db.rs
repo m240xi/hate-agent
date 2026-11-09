@@ -78,8 +78,8 @@ pub struct PriceEntry {
     pub output: f64,
 }
 
-/// The bundled price table, versioned by [`PRICE_TABLE_DATE`]. Users can
-/// shadow it with their own table later; for now it ships read-only.
+/// The bundled price table, versioned by [`PRICE_TABLE_DATE`]. Ships
+/// read-only.
 ///
 /// Prices are USD per 1M tokens, published list prices as of the table
 /// date. Models not matching any entry record `cost_usd = NULL` — an
@@ -148,7 +148,7 @@ pub const PRICE_TABLE: &[PriceEntry] = &[
 ];
 
 /// Unix-day stamp of [`PRICE_TABLE`]. UI warns "price table stale" after
-/// 60 days (spec §22).
+/// 60 days.
 pub const PRICE_TABLE_DATE: u64 = 20_720; // 2025-11-08
 
 /// Unix epoch seconds now, saturating at 0 on clock weirdness.

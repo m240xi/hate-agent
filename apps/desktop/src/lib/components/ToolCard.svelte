@@ -1,6 +1,7 @@
 <script lang="ts">
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
+  import { usageLabel, usageTitle } from '../format';
   import type { TranscriptBlock } from '../types';
 
   // One-line collapsible tool card. Header shows the essentials
@@ -61,7 +62,7 @@
     aria-expanded={block.expanded}
   >
     <span class="icon"><Icon name={TOOL_ICON[block.call?.name ?? ''] ?? 'terminal'} size={12} /></span>
-    <span class="name">{block.call?.name ?? 'tool'}</span>
+    <span class="name" title={block.call?.name ?? ''}>{block.call?.name ?? 'tool'}</span>
     <span class="summary mono">{summary}</span>
     {#if savings}
       <span class="savings mono" title="full tokens → sent tokens">{savings} tok</span>
@@ -72,6 +73,11 @@
   </button>
   {#if block.expanded}
     <div class="body">
+      {#if block.usage}
+        <div class="req-usage mono" title={usageTitle(block.usage)}>
+          request {usageLabel(block.usage)}
+        </div>
+      {/if}
       {#if block.preview}
         <pre class="preview mono">{block.preview}</pre>
       {:else}
@@ -83,6 +89,9 @@
 
 <style>
   .tool-card {
+    /* Never shrink inside the transcript's flex column — see Transcript. */
+    flex: none;
+    min-width: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--bg-1);
@@ -111,10 +120,16 @@
     font-size: 11.5px;
     font-weight: 600;
     color: var(--fg-0);
-    flex: none;
+    /* Long tool names (MCP) give way before the status and savings do. */
+    flex: 0 1 auto;
+    min-width: 40px;
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .summary {
-    flex: 1;
+    flex: 1 1 0;
     min-width: 0;
     font-size: 11px;
     color: var(--fg-2);
@@ -148,5 +163,11 @@
   }
   .dim {
     color: var(--fg-3);
+  }
+  .req-usage {
+    font-size: 10px;
+    color: var(--fg-3);
+    text-align: right;
+    margin-bottom: 6px;
   }
 </style>

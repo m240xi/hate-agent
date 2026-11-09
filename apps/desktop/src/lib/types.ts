@@ -45,7 +45,7 @@ export type SessionEvent =
   | { type: 'tool_output'; call_id: string; preview: string; tokens: number }
   | { type: 'tool_finished'; call_id: string; ok: boolean; full_tokens: number; sent_tokens: number }
   | { type: 'permission_requested'; request: PermissionRequest }
-  | { type: 'tokens_counted'; usage: TokenUsage; turn: number }
+  | { type: 'tokens_counted'; usage: TokenUsage; turn: number; thinking_est?: number }
   | { type: 'compaction_started'; reason: string; before: number; after: number }
   | { type: 'checkpoint_created'; id: string }
   | { type: 'skill_saved'; name: string; title: string; bytes: number }
@@ -68,6 +68,28 @@ export interface TranscriptBlock {
   sentTokens?: number;
   preview?: string;
   expanded?: boolean;
+  /** Usage of the provider request that produced this block (assistant
+   *  text, thinking, or — for a tool-only request — its first tool card). */
+  usage?: TokenUsage;
+  /** `thinking` blocks: reasoning tokens for this request. */
+  thinkingTokens?: number;
+  /** True when `thinkingTokens` is a local count because the provider
+   *  bills thinking inside output instead of reporting it. */
+  thinkingEstimated?: boolean;
+  /** `user` blocks: whole-turn rollup, filled when the turn completes. */
+  turn?: TurnSummary;
+  /** `user` blocks: this message was sent as a plan-mode turn. */
+  plan?: boolean;
+  /** `text` blocks: written by the app (command feedback, notices),
+   *  not by the model. */
+  local?: boolean;
+}
+
+export interface TurnSummary {
+  usage: TokenUsage;
+  toolCalls: number;
+  elapsedMs: number;
+  costUsd: number | null;
 }
 
 export interface PlanStep {

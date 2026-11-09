@@ -2,7 +2,7 @@
 //!
 //! This crate is the agent's brain and contains zero Tauri dependency. The
 //! desktop app and the headless CLI are both thin adapters over the session
-//! handle (lands in M1).
+//! handle.
 
 #![deny(unsafe_code)]
 
@@ -13,6 +13,7 @@ pub mod mcp;
 pub mod persist;
 pub mod provider;
 mod session;
+mod shape;
 pub mod skills;
 mod state;
 mod tools;

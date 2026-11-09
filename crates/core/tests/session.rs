@@ -1141,3 +1141,246 @@ async fn system_prompt_names_current_model_after_swap() {
     assert!(second.contains("`claude-sonnet-5`, served via the `claude` provider"));
     assert!(!second.contains("deepseek-v4-flash"));
 }
+
+/// Shared setup for tool-loop tests: a workspace session over `Rounds`.
+fn tool_session(
+    dir: &std::path::Path,
+    rounds: Vec<Vec<Delta>>,
+    limits: Limits,
+) -> (Arc<Rounds>, hate_core::SessionHandle) {
+    let provider = Arc::new(Rounds {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(rounds)),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let session = spawn_session(SessionConfig {
+        provider: provider.clone(),
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits,
+        ledger: None,
+        persist: None,
+        tools: Some(Arc::new(hate_core::WorkspaceTools::new(dir).unwrap())),
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        mcp: None,
+        skills: None,
+        auto_skills: false,
+        context_window: 0,
+    });
+    (provider, session)
+}
+
+fn read_call(id: &str, path: &str) -> Delta {
+    Delta::ToolCall(hate_core::ToolCall {
+        id: id.into(),
+        name: hate_core::ToolName::new("read_file"),
+        args: serde_json::json!({"path": path}),
+    })
+}
+
+/// A batch of read-only calls runs concurrently but lands in call
+/// order, and a repeat of an unchanged read later in the same turn is
+/// answered with a stub instead of the file — then really re-read on
+/// the next turn, when the memo is gone.
+#[tokio::test]
+async fn read_batches_keep_order_and_duplicate_reads_cost_a_stub() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "AAA-unique-body\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "BBB-unique-body\n").unwrap();
+
+    let (provider, session) = tool_session(
+        dir.path(),
+        vec![
+            vec![
+                read_call("c1", "a.txt"),
+                read_call("c2", "b.txt"),
+                Delta::Done,
+            ],
+            vec![read_call("c3", "a.txt"), Delta::Done],
+            vec![Delta::Text("done".into()), Delta::Done],
+            // Turn 2: the same read must really run again.
+            vec![read_call("c4", "a.txt"), Delta::Done],
+            vec![Delta::Text("done again".into()), Delta::Done],
+        ],
+        Limits::default(),
+    );
+    let mut rx = session.subscribe();
+
+    session
+        .command(Command::UserMessage("read both".to_string()))
+        .expect("command");
+    let mut finished: Vec<(String, u32, u32)> = Vec::new();
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::ToolFinished {
+                call_id,
+                ok,
+                full_tokens,
+                sent_tokens,
+            } => {
+                assert!(ok);
+                finished.push((call_id, full_tokens, sent_tokens));
+            }
+            Event::TurnComplete { outcome } => {
+                assert_eq!(outcome.tool_calls, 3);
+                break;
+            }
+            Event::Failed { reason } => panic!("turn failed: {reason:?}"),
+            _ => {}
+        }
+    }
+    let ids: Vec<&str> = finished.iter().map(|f| f.0.as_str()).collect();
+    assert_eq!(ids, ["c1", "c2", "c3"], "results recorded in call order");
+    // The duplicate reports what it saved: full = the original's cost.
+    assert_eq!(finished[2].1, finished[0].2);
+
+    drive_turn(&session, &mut rx, "again").await;
+
+    let seen = provider.seen.lock().unwrap();
+    assert_eq!(seen.len(), 5);
+    // Round 2 carries both bodies, a before b.
+    let (a, b) = (
+        seen[1].find("AAA-unique-body").expect("a fed back"),
+        seen[1].find("BBB-unique-body").expect("b fed back"),
+    );
+    assert!(a < b);
+    // Round 3: the repeat read is a stub — the body appears once, not twice.
+    assert!(seen[2].contains("duplicate call"), "{}", seen[2]);
+    assert_eq!(seen[2].matches("AAA-unique-body").count(), 1);
+    // Turn 2's read is real again (two bodies now in history).
+    assert_eq!(seen[4].matches("AAA-unique-body").count(), 2);
+}
+
+/// `max_tool_rounds` is a configured limit: tripping it is an honest
+/// `Failed`, and completed rounds stay in history.
+#[tokio::test]
+async fn tool_round_limit_is_configurable_and_fails_honestly() {
+    let dir = tempfile::tempdir().unwrap();
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(dir.path().join(n), "x\n").unwrap();
+    }
+    let (provider, session) = tool_session(
+        dir.path(),
+        vec![
+            vec![read_call("c1", "a.txt"), Delta::Done],
+            vec![read_call("c2", "b.txt"), Delta::Done],
+            vec![read_call("c3", "c.txt"), Delta::Done],
+        ],
+        Limits {
+            max_tool_rounds: 2,
+            ..Limits::default()
+        },
+    );
+    let mut rx = session.subscribe();
+    session
+        .command(Command::UserMessage("loop".to_string()))
+        .expect("command");
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::Failed { reason } => {
+                let msg = format!("{reason:?}");
+                assert!(msg.contains("exceeded 2 provider rounds"), "{msg}");
+                break;
+            }
+            Event::TurnComplete { .. } => panic!("limit should have tripped"),
+            _ => {}
+        }
+    }
+    assert_eq!(provider.seen.lock().unwrap().len(), 2, "no third request");
+}
+
+/// `/plan <task>` runs a read-only turn: the directive rides in the
+/// user message, reads work, and a mutation is refused in Rust without
+/// ever prompting — then a normal turn can write again.
+#[tokio::test]
+async fn plan_turn_is_read_only_without_prompting() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "plan-me\n").unwrap();
+    let write = Delta::ToolCall(hate_core::ToolCall {
+        id: "w1".into(),
+        name: hate_core::ToolName::new("write_file"),
+        args: serde_json::json!({"path": "new.txt", "content": "x"}),
+    });
+    let (provider, session) = tool_session(
+        dir.path(),
+        vec![
+            vec![read_call("r1", "a.txt"), write.clone(), Delta::Done],
+            vec![
+                Delta::Text("1. edit a.txt\n2. run tests".into()),
+                Delta::Done,
+            ],
+            vec![Delta::Text("hi".into()), Delta::Done],
+            vec![Delta::Text("hi again".into()), Delta::Done],
+        ],
+        Limits::default(),
+    );
+    let mut rx = session.subscribe();
+    session
+        .command(Command::UserMessage("/plan rename the thing".to_string()))
+        .expect("command");
+    let mut results: Vec<(String, bool)> = Vec::new();
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::PermissionRequested { .. } => panic!("plan turns must never prompt"),
+            Event::ToolFinished { call_id, ok, .. } => results.push((call_id, ok)),
+            Event::TurnComplete { .. } => break,
+            Event::Failed { reason } => panic!("turn failed: {reason:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        results,
+        [("r1".to_string(), true), ("w1".to_string(), false)]
+    );
+    assert!(!dir.path().join("new.txt").exists(), "write was blocked");
+
+    // Plan mode lasts exactly one turn: the next, normal message must
+    // not carry the directive anywhere in its request — a lingering
+    // directive makes the model keep planning instead of answering.
+    drive_turn(&session, &mut rx, "hello there").await;
+    drive_turn(&session, &mut rx, "and again").await;
+
+    let seen = provider.seen.lock().unwrap();
+    assert!(seen[0].contains("rename the thing") && seen[0].contains("[plan mode —"));
+    assert!(!seen[0].contains("/plan"), "the command itself is not sent");
+    assert!(seen[1].contains("plan-me"), "reads still feed back");
+    assert!(seen[1].contains("plan mode is read-only"), "{}", seen[1]);
+
+    assert!(
+        !seen[2].contains("[plan mode —"),
+        "directive outlived its turn: {}",
+        seen[2]
+    );
+    assert!(
+        seen[2].contains("rename the thing"),
+        "the task itself stays in history"
+    );
+    assert!(seen[2].contains("hello there") && seen[2].contains("plan mode is off"));
+    // The off-note is said once, not on every later message.
+    assert_eq!(
+        seen[3].matches("plan mode is off").count(),
+        1,
+        "{}",
+        seen[3]
+    );
+    assert!(!seen[3].contains("[plan mode —"));
+}
+
+/// A chat session (no workspace tools) gets a directive that doesn't
+/// name tools it lacks.
+#[tokio::test]
+async fn plan_turn_in_chat_session_names_no_workspace_tools() {
+    let provider = Arc::new(Rounds {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
+            Delta::Text("1. think\n2. answer".into()),
+            Delta::Done,
+        ]])),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let session = session_with(provider.clone());
+    let mut rx = session.subscribe();
+    drive_turn(&session, &mut rx, "/plan organise my week").await;
+    let seen = provider.seen.lock().unwrap();
+    assert!(seen[0].contains("organise my week") && seen[0].contains("[plan mode —"));
+    assert!(!seen[0].contains("read_file"), "{}", seen[0]);
+}

@@ -1,8 +1,8 @@
 //! Retry policy: 3 attempts, exponential backoff + jitter, only on
 //! transient failures (429/5xx/connect). Once *any* delta has been
 //! yielded the stream is committed — retrying mid-response would
-//! duplicate text, so later errors surface immediately (spec §14, §28.13:
-//! retries are bounded, never unbounded).
+//! duplicate text, so later errors surface immediately; retries are
+//! bounded, never unbounded.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +21,7 @@ const BASE_DELAY: Duration = Duration::from_millis(400);
 const MAX_DELAY: Duration = Duration::from_secs(8);
 
 /// Whether an error is worth retrying. Auth, decode, and cancel are
-/// never retried; 429/5xx/network are (spec §14).
+/// never retried; 429/5xx/network are.
 fn retriable(e: &ProviderError) -> bool {
     match e {
         ProviderError::Network(_) => true,

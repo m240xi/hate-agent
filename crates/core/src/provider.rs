@@ -18,7 +18,7 @@ use crate::types::{FailureReason, TokenUsage, ToolCall, ToolName};
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// Why a provider call failed. Every variant carries enough detail to act
-/// on — spec §28.14 forbids silently swallowing provider errors.
+/// on — provider errors are never silently swallowed.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderError {
     /// HTTP error status with a trimmed body snippet.
@@ -122,7 +122,7 @@ pub enum Message {
 pub struct ToolSpec {
     /// Registered tool name.
     pub name: ToolName,
-    /// One-line description (≤120 chars per spec §10).
+    /// One-line description (≤120 chars).
     pub description: String,
     /// JSON Schema for the arguments object.
     pub input_schema: serde_json::Value,
@@ -181,7 +181,7 @@ pub struct ChatRequest {
     pub system: Option<String>,
     /// Ordered conversation (user/assistant/tool turns only).
     pub messages: Vec<Message>,
-    /// Tool schemas to advertise (empty in M1).
+    /// Tool schemas to advertise.
     pub tools: Vec<ToolSpec>,
     /// Upper bound on generated tokens.
     pub max_output_tokens: u32,
@@ -280,7 +280,7 @@ pub trait CredentialSource: Send + Sync {
 ///
 /// Cancellation is *not* a method — callers pass a
 /// [`CancellationToken`] into [`Provider::stream`], which must abort the
-/// in-flight HTTP stream within 250ms (spec §8, §27).
+/// in-flight HTTP stream within 250ms.
 pub trait Provider: Send + Sync {
     /// Stream one chat completion as normalized [`Delta`]s.
     ///

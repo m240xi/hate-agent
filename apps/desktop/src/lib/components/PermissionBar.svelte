@@ -40,6 +40,8 @@
 
 <style>
   .perm-bar {
+    flex: none;
+    min-width: 0;
     margin: 0 16px 8px;
     padding: 10px 12px;
     background: var(--bg-1);
@@ -48,8 +50,10 @@
   }
   .perm-head {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 8px;
+    gap: 2px 8px;
+    min-width: 0;
   }
   .perm-title {
     font-size: 12.5px;
@@ -75,6 +79,7 @@
   }
   .perm-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
   }
   .btn {

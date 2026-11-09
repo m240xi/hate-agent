@@ -53,8 +53,7 @@
     await getCurrentWindow().close();
   }
 
-  // Persist pane sizes per workspace (spec §20); keys land with real
-  // workspace identity in M1 — localStorage is the M0 stand-in.
+  // Persist pane sizes in localStorage (global, not per-workspace).
   $effect(() => {
     localStorage.setItem('hate:pane:left', String(session.leftWidth));
     localStorage.setItem('hate:pane:right', String(session.rightWidth));

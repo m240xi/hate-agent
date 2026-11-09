@@ -40,8 +40,8 @@ pub enum AgentError {
     /// The user cancelled the turn or session.
     #[error("cancelled")]
     Cancelled,
-    /// Anything else — always carries the underlying message (spec §28.14:
-    /// provider errors are never silently swallowed).
+    /// Anything else — always carries the underlying message; provider
+    /// errors are never silently swallowed.
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -96,6 +96,11 @@ pub enum Event {
         usage: TokenUsage,
         /// Turn this usage belongs to.
         turn: TurnId,
+        /// o200k count of the reasoning text streamed in this request;
+        /// `0` when there was none. Display-only: lets the UI label a
+        /// thinking block when the provider bills thinking inside
+        /// `usage.output` instead of reporting it separately.
+        thinking_est: u32,
     },
     /// Context compaction began.
     CompactionStarted {

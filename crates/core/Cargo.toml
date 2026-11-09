@@ -16,6 +16,7 @@ hate-context = { path = "../context" }
 hate-ledger = { path = "../ledger" }
 hate-prompt = { path = "../prompt" }
 http = "1"
+regex = "1"
 rmcp = { version = "~3.8.0", default-features = false, features = [
     "client",
     "transport-child-process",

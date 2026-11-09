@@ -5,6 +5,7 @@
   import FilePicker from './FilePicker.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import ThinkingMenu from './ThinkingMenu.svelte';
+  import PlanBar from './PlanBar.svelte';
 
   // Bottom composer: Enter sends, Shift+Enter newline, Esc cancels,
   // `/` opens the command palette, `@` opens file fuzzy-find,
@@ -34,9 +35,20 @@
       session.cycleThinking();
       return;
     }
+    // ↑ on an empty composer recalls the last message for editing.
+    if (e.key === 'ArrowUp' && session.draft.length === 0) {
+      const last = session.lastUserText();
+      if (last) {
+        e.preventDefault();
+        session.draft = last;
+        queueMicrotask(autoGrow);
+      }
+      return;
+    }
     // `/` at position 0 opens the palette; `@` anywhere opens file picker.
     // The trigger char is consumed — pickers own their own input.
     if (e.key === '/' && session.draft.length === 0) {
+      e.preventDefault();
       paletteOpen = true;
       return;
     }
@@ -47,7 +59,21 @@
   }
 </script>
 
+<PlanBar />
 <div class="composer-wrap">
+  {#if session.queue.length > 0}
+    <ul class="queue" aria-label="Queued messages">
+      {#each session.queue as q, i}
+        <li class="queued rise">
+          <span class="q-tag">queued</span>
+          <span class="q-text">{q}</span>
+          <button class="q-x" onclick={() => session.removeQueued(i)} aria-label="Remove queued message">
+            <Icon name="x" size={10} />
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
   {#if session.awaitingPrompt}
     <div class="prompt-bar rise" role="alert">
       <span class="prompt-text">{session.awaitingPrompt}</span>
@@ -63,13 +89,17 @@
     </div>
   {/if}
 
-  <div class="composer" class:busy={session.running}>
+  <div class="composer" class:busy={session.running} class:planning={session.planMode}>
     <textarea
       bind:this={ta}
       bind:value={session.draft}
       oninput={autoGrow}
       onkeydown={onKeydown}
-      placeholder={session.running ? 'running… (Esc to cancel)' : 'Ask hate-agent…'}
+      placeholder={session.running
+        ? 'running… type to queue the next message (Esc to cancel)'
+        : session.planMode
+          ? 'Describe what to plan — nothing is changed until you approve…'
+          : 'Ask hate-agent…'}
       rows="1"
       aria-label="Message composer"
       disabled={session.sessionState === 'awaiting_permission'}
@@ -80,12 +110,26 @@
         <kbd>/</kbd> commands · <kbd>@</kbd> files · <kbd>⇧tab</kbd> think
       </span>
       <span class="spacer"></span>
+      <button
+        class="plan-toggle"
+        class:on={session.planMode}
+        onclick={() => session.togglePlan()}
+        aria-pressed={session.planMode}
+        title="Plan mode: read-only investigation, then a plan you approve (/plan)"
+      >
+        plan
+      </button>
       <ModelPicker />
       <ThinkingMenu />
       {#if session.running}
         <button class="send cancel" onclick={() => session.cancel()} aria-label="Cancel turn" title="Cancel (Esc)">
           <Icon name="x" size={13} />
         </button>
+        {#if session.draft.trim()}
+          <button class="send" onclick={() => session.send()} aria-label="Queue message" title="Queue (Enter)">
+            <Icon name="plus" size={13} />
+          </button>
+        {/if}
       {:else}
         <button
           class="send"
@@ -112,11 +156,23 @@
   .composer-wrap {
     padding: 8px 16px 12px;
     background: var(--bg-0);
+    /* Sized by its content, never squeezed by the transcript above. */
+    flex: none;
+    min-width: 0;
+    container-type: inline-size;
+  }
+  /* The shortcut hint is the first thing to go when the column is
+     narrow — the controls beside it must stay whole. */
+  @container (max-width: 560px) {
+    .hint {
+      display: none;
+    }
   }
   .prompt-bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
+    gap: 6px 10px;
     margin-bottom: 8px;
     padding: 8px 10px;
     background: var(--bg-2);
@@ -126,8 +182,9 @@
   .prompt-text {
     color: var(--warn);
     font-size: 12px;
-    flex: 1;
+    flex: 1 1 200px;
     min-width: 0;
+    overflow-wrap: anywhere;
   }
   .prompt-bar input {
     width: 200px;
@@ -146,6 +203,72 @@
   }
   .composer:focus-within {
     border-color: var(--accent-dim);
+  }
+  .composer.planning {
+    border-style: dashed;
+    border-color: var(--accent-dim);
+  }
+  .plan-toggle {
+    padding: 2px 8px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    flex: none;
+  }
+  .plan-toggle:hover {
+    color: var(--fg-1);
+  }
+  .plan-toggle.on {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+  }
+  .queue {
+    list-style: none;
+    margin: 0 0 6px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    /* A long queue scrolls instead of pushing the composer off screen. */
+    max-height: 96px;
+    overflow-y: auto;
+  }
+  .queued {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    background: var(--bg-1);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    font-size: 12px;
+    flex: none;
+    min-width: 0;
+  }
+  .q-tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--fg-3);
+    flex: none;
+  }
+  .q-text {
+    flex: 1;
+    min-width: 0;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .q-x {
+    display: inline-flex;
+    color: var(--fg-3);
+    flex: none;
+  }
+  .q-x:hover {
+    color: var(--err);
   }
   .composer textarea {
     display: block;
@@ -166,12 +289,25 @@
     gap: 10px;
     padding: 4px 8px 6px 12px;
   }
+  /* The model picker gives way (its label ellipsizes) before anything
+     is pushed out of the composer. */
+  .composer-meta > :global(.pop:not(.pop-left)) {
+    flex: 0 1 auto;
+    min-width: 56px;
+    max-width: 240px;
+  }
+  .composer-meta > :global(.pop:not(.pop-left) .pop-trigger) {
+    min-width: 0;
+    max-width: 100%;
+  }
   .hint {
     font-size: 10.5px;
     color: var(--fg-3);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    flex: 0 1 auto;
+    min-width: 0;
   }
   kbd {
     font-family: var(--font-mono);

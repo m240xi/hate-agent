@@ -1557,6 +1557,7 @@ dependencies = [
  "hate-ledger",
  "hate-prompt",
  "http",
+ "regex",
  "rmcp",
  "serde",
  "serde_json",

@@ -4,8 +4,8 @@ import App from './App.svelte';
 import DevComponents from './lib/components/DevComponents.svelte';
 
 // `/dev/components` renders the component gallery (both themes, fixture
-// data) — the "storybook-lite" required by the spec so the UI stays
-// reviewable without a designer.
+// data) — the "storybook-lite" that keeps the UI reviewable without a
+// designer.
 const target = document.getElementById('app');
 if (!target) throw new Error('#app element missing');
 

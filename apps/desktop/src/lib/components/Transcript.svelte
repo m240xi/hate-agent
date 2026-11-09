@@ -85,6 +85,16 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    overflow-x: hidden;
+  }
+  /* Blocks in a scrolling flex column must never shrink: a child with
+     `overflow: hidden` (tool cards) has no minimum height, so once the
+     transcript is taller than the window flexbox squashes it to a
+     sliver instead of letting the column scroll. They may get narrower
+     than their content, though — long lines wrap or scroll inside. */
+  .transcript > :global(*) {
+    flex-shrink: 0;
+    min-width: 0;
   }
   .earlier {
     align-self: center;

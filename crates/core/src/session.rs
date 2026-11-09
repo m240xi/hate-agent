@@ -1,13 +1,13 @@
 //! The session actor: owns conversation state, runs turns, emits events.
 //!
-//! Architecture (spec §5/§8): one actor task per session. Commands arrive
+//! Architecture: one actor task per session. Commands arrive
 //! on an mpsc channel; a user message spawns a *turn task* that streams
 //! from the provider while the actor stays responsive to `Cancel`.
 //! Cancellation is `CancellationToken`-based so an in-flight HTTP stream
 //! dies within the 250ms budget — the actor never awaits the stream
 //! inline.
 //!
-//! M2+: the turn task owns the tool-call loop — read tools run freely,
+//! The turn task owns the tool-call loop — read tools run freely,
 //! mutations and shell are policy-gated through [`PermissionHub`], which
 //! routes user decisions from the actor's command channel back into the
 //! waiting tool loop.
@@ -41,15 +41,21 @@ use hate_ledger::{Ledger, RecordRequest};
 /// Tauri forwarding task ~40s of slack before a slow consumer drops events.
 const EVENT_BUFFER: usize = 2048;
 
-/// Hard limits for one task (spec §8). All configurable, sane defaults.
+/// Hard limits for one task. All configurable, sane defaults.
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// Max user-message turns per session before `Failed`.
     pub max_turns: u32,
     /// Max wall-clock for a whole task (first message → last reply).
     pub max_wall_clock: Duration,
-    /// Max USD spend per task; `None` = unlimited.
+    /// Max USD spend per task; `None` = unlimited. Checked before every
+    /// billed provider round, not just between user messages — one
+    /// runaway tool loop is exactly what a cost cap is for.
     pub max_cost_usd: Option<f64>,
+    /// Max provider rounds (model request → tool batch) inside one turn.
+    pub max_tool_rounds: u32,
+    /// Max tool calls executed inside one turn.
+    pub max_tool_calls: u32,
 }
 
 impl Default for Limits {
@@ -58,6 +64,11 @@ impl Default for Limits {
             max_turns: 40,
             max_wall_clock: Duration::from_mins(20),
             max_cost_usd: None,
+            // Read → edit → check → fix on a real task routinely takes
+            // 20+ rounds; a cap that trips mid-task throws away every
+            // token already spent on it.
+            max_tool_rounds: 40,
+            max_tool_calls: 120,
         }
     }
 }
@@ -79,7 +90,7 @@ pub struct SessionConfig {
     pub ledger: Option<Arc<Ledger>>,
     /// Session persistence; `None` = ephemeral (CLI one-shots, tests).
     pub persist: Option<PersistCtx>,
-    /// Workspace tool surface (M2 read tools, M3 mutations + bash).
+    /// Workspace tool surface (read tools, mutations + bash).
     /// `None` = no filesystem tools — chat sessions and sessions
     /// without a workspace stay workspace-tool-free.
     pub tools: Option<Arc<WorkspaceTools>>,
@@ -110,9 +121,11 @@ pub enum Command {
     UserMessage(String),
     /// Cancel the in-flight turn (no-op when idle).
     Cancel,
-    /// Answer a pending `ask_user` prompt (M2+; accepted now, ignored).
+    /// Answer a pending `ask_user` prompt. Reserved — no tool emits
+    /// one yet, so the actor warns and drops it.
     AnswerPrompt(String),
-    /// Resolve a permission request (M3+; accepted now, ignored).
+    /// Resolve a pending permission request (`allow` /
+    /// `allow_session` / deny).
     RespondPermission {
         /// Correlates to the pending request id.
         request_id: String,
@@ -262,6 +275,16 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
             Some(r) => (r.messages.clone(), TurnId(r.turn), r.usage, r.cost_usd),
             None => (Vec::new(), TurnId(0), TokenUsage::default(), 0.0),
         };
+    // Sessions saved before plan directives were turn-scoped still carry
+    // one in history, where it keeps later turns "planning" — drop it.
+    let mut history = history;
+    for m in &mut history {
+        if let Message::User { content } = m
+            && let Some(at) = content.find(LEGACY_PLAN_DIRECTIVE)
+        {
+            content.truncate(at);
+        }
+    }
     let snapshot = Arc::new(std::sync::RwLock::new(SessionSnapshot {
         state: "idle".to_string(),
         turn: turn.0,
@@ -293,6 +316,8 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
         cost_usd,
         signals,
         reflection_attempted: false,
+        plan_directive: None,
+        plan_just_ended: false,
         snapshot: snapshot.clone(),
     };
     tokio::spawn(actor.run());
@@ -333,6 +358,12 @@ struct Actor {
     signals: Vec<String>,
     /// One auto-reflection attempt per session, ever.
     reflection_attempted: bool,
+    /// The directive appended to the in-flight plan turn's user
+    /// message; `Some` only while that turn runs.
+    plan_directive: Option<&'static str>,
+    /// The previous turn was a plan turn — the next normal message
+    /// carries a one-line "plan mode is off" note.
+    plan_just_ended: bool,
     snapshot: Arc<std::sync::RwLock<SessionSnapshot>>,
 }
 
@@ -391,7 +422,8 @@ impl Actor {
                     self.cancel.cancel();
                 }
             }
-            // M2 ask_user prompt; still accepted-and-ignored.
+            // Reserved: no tool emits ask_user prompts yet — warn on a
+            // stray answer rather than drop it silently.
             Command::AnswerPrompt(_) => {
                 warn!("prompt response with nothing pending");
             }
@@ -528,6 +560,32 @@ impl Actor {
         self.state = SessionState::AwaitingModel;
         self.cancel = CancellationToken::new();
         self.turn_started = Instant::now();
+        // `/plan <task>` makes this a plan turn: read-only tools are
+        // enforced in Rust and the model is asked for a numbered plan.
+        // The directive rides in the user message (S5), never the
+        // system prompt or tool block, so the cached prefix stays
+        // byte-identical — entering plan mode costs zero cache misses.
+        let (text, plan_mode) = match parse_plan_command(&text) {
+            Some(task) => {
+                // Only name tools this session actually has — a chat
+                // session told to use `read_file` burns rounds on
+                // "unknown tool" errors.
+                let directive = if self.cfg.tools.is_some() {
+                    PLAN_DIRECTIVE_WORKSPACE
+                } else {
+                    PLAN_DIRECTIVE_CHAT
+                };
+                self.plan_directive = Some(directive);
+                (format!("{task}\n\n{directive}"), true)
+            }
+            // First normal turn after planning: say so once. The plan
+            // turn's refused calls are still in history, and a model
+            // that only sees those keeps acting read-only.
+            None if std::mem::take(&mut self.plan_just_ended) => {
+                (format!("{text}\n\n{PLAN_OFF_NOTE}"), false)
+            }
+            None => (text, false),
+        };
         self.pending_user = Some(text.clone());
         self.set_snapshot();
 
@@ -550,6 +608,8 @@ impl Actor {
         let permissions = self.cfg.permissions.clone();
         let ledger = self.cfg.ledger.clone();
         let context_window = self.cfg.context_window;
+        let limits = self.cfg.limits.clone();
+        let cost_before = self.cost_usd;
         let session_id = self.session_id;
         let turn_id = self.turn;
         let started = self.turn_started;
@@ -574,6 +634,9 @@ impl Actor {
                 turn_id,
                 started,
                 context_window,
+                limits,
+                cost_before,
+                plan_mode,
             )
             .await;
         });
@@ -669,6 +732,16 @@ impl Actor {
                 };
                 self.emit(Event::TurnComplete { outcome });
             }
+        }
+        // A plan directive governs exactly one turn. Left in history it
+        // reads as a standing instruction — later turns keep "planning"
+        // and never act — so it is removed the moment its turn ends,
+        // whatever the outcome. This rewrites one earlier message and
+        // costs one prompt-cache miss on the next request; correctness
+        // of every following turn is worth that.
+        if let Some(directive) = self.plan_directive.take() {
+            strip_plan_directive(&mut self.history, directive);
+            self.plan_just_ended = true;
         }
         self.state = SessionState::Idle;
         self.set_snapshot();
@@ -1073,10 +1146,19 @@ async fn run_turn(
     turn_id: TurnId,
     started: Instant,
     context_window: u64,
+    limits: Limits,
+    cost_before: f64,
+    plan_mode: bool,
 ) {
     // A model that never stops calling tools must not loop forever.
-    const MAX_TOOL_ROUNDS: u32 = 12;
-    const MAX_TOOL_CALLS: u32 = 48;
+    let max_tool_rounds = limits.max_tool_rounds;
+    let max_tool_calls = limits.max_tool_calls;
+
+    // Read memos are per-turn: a "duplicate call" stub may only point
+    // at a result from this turn, which is never decayed.
+    if let Some(t) = tools.as_ref() {
+        t.reset_read_memo();
+    }
 
     let mut specs = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
     if let Some(hub) = mcp.as_ref() {
@@ -1099,11 +1181,27 @@ async fn run_turn(
                 .await;
             return;
         }
-        if round >= MAX_TOOL_ROUNDS {
+        if round >= max_tool_rounds {
             let _ = done_tx
                 .send(TurnReport::Failed {
                     error: ProviderError::Stream(format!(
-                        "tool loop exceeded {MAX_TOOL_ROUNDS} provider rounds"
+                        "tool loop exceeded {max_tool_rounds} provider rounds"
+                    )),
+                    convo: convo.clone(),
+                })
+                .await;
+            return;
+        }
+        // Cost cap, enforced before the next billed request rather than
+        // only when the user speaks again.
+        if let Some(cap) = limits.max_cost_usd
+            && cost_before + total_cost.unwrap_or(0.0) >= cap
+        {
+            let _ = done_tx
+                .send(TurnReport::Failed {
+                    error: ProviderError::Stream(format!(
+                        "limit exceeded: max_cost_usd = {cap:.2} (spent {:.2})",
+                        cost_before + total_cost.unwrap_or(0.0)
                     )),
                     convo: convo.clone(),
                 })
@@ -1120,6 +1218,10 @@ async fn run_turn(
             &specs,
             context_window,
         ) {
+            // The results earlier stubs pointed at may be gone now.
+            if let Some(t) = tools.as_ref() {
+                t.reset_read_memo();
+            }
             let _ = events.send(Event::CompactionStarted {
                 reason,
                 before,
@@ -1145,6 +1247,7 @@ async fn run_turn(
         tokio::pin!(stream);
 
         let mut text = String::new();
+        let mut thinking_text = String::new();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut usage = TokenUsage::default();
 
@@ -1179,6 +1282,7 @@ async fn run_turn(
                             emit(Event::Delta { text: t });
                         }
                         Some(Ok(Delta::Thinking(t))) => {
+                            thinking_text.push_str(&t);
                             emit(Event::ThinkingDelta { text: t });
                         }
                         Some(Ok(Delta::ToolCall(call))) => {
@@ -1186,7 +1290,17 @@ async fn run_turn(
                         }
                         Some(Ok(Delta::Usage(u))) => {
                             usage = u;
-                            emit(Event::TokensCounted { usage, turn: turn_id });
+                            let thinking_est = if thinking_text.is_empty() {
+                                0
+                            } else {
+                                O200kCounter::new()
+                                    .map_or(0, |c| c.count_sync(&thinking_text) as u32)
+                            };
+                            emit(Event::TokensCounted {
+                                usage,
+                                turn: turn_id,
+                                thinking_est,
+                            });
                         }
                         Some(Ok(Delta::Done)) => break,
                         // Channel closed without Done: cancelled streams
@@ -1286,16 +1400,36 @@ async fn run_turn(
             return;
         }
 
-        if tool_calls_done > MAX_TOOL_CALLS {
+        if tool_calls_done > max_tool_calls {
             let _ = done_tx
                 .send(TurnReport::Failed {
                     error: ProviderError::Stream(format!(
-                        "tool call limit exceeded ({MAX_TOOL_CALLS})"
+                        "tool call limit exceeded ({max_tool_calls})"
                     )),
                     convo: convo.clone(),
                 })
                 .await;
             return;
+        }
+
+        // Fast path: a batch made only of side-effect-free workspace
+        // reads runs concurrently. Nothing in it is gated or mutating,
+        // so order can't matter; results are still recorded in call
+        // order so the transcript and the provider see a stable shape.
+        if calls.len() > 1
+            && let Some(t) = tools.as_ref()
+            && calls
+                .iter()
+                .all(|c| WorkspaceTools::is_read_only(c.name.as_str()))
+        {
+            for call in &calls {
+                emit(Event::ToolStarted { call: call.clone() });
+            }
+            let outs = futures_util::future::join_all(calls.iter().map(|c| t.execute(c))).await;
+            for (call, out) in calls.into_iter().zip(outs) {
+                record_tool_result(&events, &mut convo, &call, out);
+            }
+            continue;
         }
 
         // The assistant round is already recorded above; run every call
@@ -1307,6 +1441,20 @@ async fn run_turn(
             // store, everything else to the workspace tools. A call for
             // a backend this session lacks becomes an honest tool
             // error, not a turn failure.
+            // Plan turns are read-only by construction, not by trust:
+            // anything that could change state is answered with an
+            // error the model can read, and no permission prompt shows.
+            if plan_mode && !plan_allows(call.name.as_str()) {
+                let out = error_backend(mcp.as_ref(), tools.as_ref(), skills.as_ref()).tool_error(
+                    format!(
+                        "plan mode is read-only — `{}` is blocked this turn. Finish the plan; \
+                         the user approves it before anything changes.",
+                        call.name.as_str()
+                    ),
+                );
+                record_tool_result(&events, &mut convo, &call, out);
+                continue;
+            }
             let backend = if call.name.as_str().starts_with(MCP_PREFIX) {
                 mcp.as_ref().map(ToolBackend::Mcp)
             } else if matches!(call.name.as_str(), "skill_view" | "skill_save") {
@@ -1358,25 +1506,101 @@ async fn run_turn(
                     });
                 }
             }
-            emit(Event::ToolOutput {
-                call_id: call.id.clone(),
-                preview: out.preview,
-                tokens: out.sent_tokens,
-            });
-            emit(Event::ToolFinished {
-                call_id: call.id.clone(),
-                ok: out.ok,
-                full_tokens: out.full_tokens,
-                sent_tokens: out.sent_tokens,
-            });
-            convo.push(Message::Tool {
-                call_id: call.id.clone(),
-                name: call.name.as_str().to_string(),
-                content: out.content,
-            });
+            // An MCP tool can touch the workspace behind the file
+            // tools' back — stale read memos and symbols must go.
+            if call.name.as_str().starts_with(MCP_PREFIX)
+                && let Some(t) = tools.as_ref()
+            {
+                t.note_mutation();
+            }
+            record_tool_result(&events, &mut convo, &call, out);
         }
         // Next iteration streams the follow-up request with results in.
     }
+}
+
+/// Appended to the user's task on a plan turn in a workspace session,
+/// and removed from history when that turn ends.
+const PLAN_DIRECTIVE_WORKSPACE: &str = "[plan mode — this message only] Do not change anything yet. \
+Investigate with read-only tools only (read_file, list_dir, glob, grep, symbol) — edits, shell \
+commands, and other tools are blocked for this message. Then reply with a short numbered plan: one \
+concrete step per line (which files, what changes, how it will be verified). Stop after the plan \
+and wait for approval.";
+
+/// Plan directive for sessions without workspace tools (chat).
+const PLAN_DIRECTIVE_CHAT: &str = "[plan mode — this message only] Do not act yet and do not call \
+tools that change anything. Reply with a short numbered plan: one concrete step per line. Stop \
+after the plan and wait for approval.";
+
+/// Start of the directive older builds left in history permanently
+/// (leading blank line included) — everything from here to the end of
+/// that user message was the directive.
+const LEGACY_PLAN_DIRECTIVE: &str = "\n\n[plan mode] Do not change anything yet.";
+
+/// Appended once to the first normal message after a plan turn.
+const PLAN_OFF_NOTE: &str = "[plan mode is off — respond to this message normally; edits and \
+commands are allowed again]";
+
+/// Remove `directive` from the user message it was appended to. Scans
+/// from the newest message: the plan turn's user message is the last
+/// one carrying it, even after a mid-turn compaction reshuffled history.
+fn strip_plan_directive(history: &mut [Message], directive: &str) {
+    for m in history.iter_mut().rev() {
+        if let Message::User { content } = m
+            && let Some(task) = content.strip_suffix(directive)
+        {
+            let keep = task.trim_end().len();
+            content.truncate(keep);
+            return;
+        }
+    }
+}
+
+/// `/plan <task>` → `Some(task)`. Bare `/plan` plans the conversation's
+/// current goal. Anything else (including `/planet`) is a normal message.
+fn parse_plan_command(text: &str) -> Option<&str> {
+    let rest = text.trim_start().strip_prefix("/plan")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let task = rest.trim();
+    Some(if task.is_empty() {
+        "Plan the next step of the task we've been discussing."
+    } else {
+        task
+    })
+}
+
+/// Tools a plan turn may run: the side-effect-free workspace reads
+/// plus `skill_view`. MCP tools are opaque, so they are out.
+fn plan_allows(name: &str) -> bool {
+    WorkspaceTools::is_read_only(name) || name == "skill_view"
+}
+
+/// Announce one finished tool call and append its result to the
+/// conversation — the single place a `tool_result` enters history.
+fn record_tool_result(
+    events: &broadcast::Sender<Event>,
+    convo: &mut Vec<Message>,
+    call: &ToolCall,
+    out: ToolOutput,
+) {
+    let _ = events.send(Event::ToolOutput {
+        call_id: call.id.clone(),
+        preview: out.preview,
+        tokens: out.sent_tokens,
+    });
+    let _ = events.send(Event::ToolFinished {
+        call_id: call.id.clone(),
+        ok: out.ok,
+        full_tokens: out.full_tokens,
+        sent_tokens: out.sent_tokens,
+    });
+    convo.push(Message::Tool {
+        call_id: call.id.clone(),
+        name: call.name.as_str().to_string(),
+        content: out.content,
+    });
 }
 
 // ── context compaction ────────────────────────────────────────────────────
@@ -1408,6 +1632,36 @@ fn estimate_tokens(system: &str, tools: &[crate::provider::ToolSpec], messages: 
         push_message_text(m, &mut text);
     }
     counter.count_sync(&text)
+}
+
+/// Upper bound on the serialized prompt size in bytes — same fields
+/// [`estimate_tokens`] feeds the tokenizer, without building the text.
+/// Uses raw (undecayed) tool output, which only makes the bound looser.
+fn prompt_bytes(system: &str, tools: &[crate::provider::ToolSpec], messages: &[Message]) -> usize {
+    let tool_bytes = serde_json::to_string(tools).map_or(0, |s| s.len());
+    let msg_bytes: usize = messages
+        .iter()
+        .map(|m| match m {
+            Message::User { content } => content.len() + 8,
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
+                content.len()
+                    + 16
+                    + tool_calls
+                        .iter()
+                        .map(|c| {
+                            c.name.as_str().len()
+                                + serde_json::to_string(&c.args).map_or(0, |s| s.len())
+                                + 1
+                        })
+                        .sum::<usize>()
+            }
+            Message::Tool { name, content, .. } => name.len() + content.len() + 8,
+        })
+        .sum();
+    system.len() + tool_bytes + msg_bytes
 }
 
 fn push_message_text(m: &Message, out: &mut String) {
@@ -1448,6 +1702,13 @@ fn maybe_compact(
     window: u64,
 ) -> Option<(u64, u64, CompactionReason)> {
     if window == 0 || convo.len() < COMPACT_TAIL + 4 {
+        return None;
+    }
+    // Sound early-out, not an estimate: a BPE token is at least one
+    // byte, so a prompt with fewer bytes than the soft threshold has
+    // tokens cannot be over it. This skips the full-history clone and
+    // tokenizer pass on every round until the context is actually big.
+    if (prompt_bytes(system, tools, convo) as f64) < COMPACT_SOFT * window as f64 {
         return None;
     }
     // Estimate what actually goes on the wire: stale tool outputs are
@@ -1669,6 +1930,37 @@ mod tests {
         }
         v.push(assistant("final answer pending"));
         v
+    }
+
+    #[test]
+    fn plan_command_parses_only_the_exact_prefix() {
+        assert_eq!(parse_plan_command("/plan add a cache"), Some("add a cache"));
+        assert_eq!(
+            parse_plan_command("  /plan\nmulti\nline"),
+            Some("multi\nline")
+        );
+        assert!(parse_plan_command("/plan").is_some_and(|t| t.starts_with("Plan the next")));
+        assert_eq!(parse_plan_command("/planet earth"), None);
+        assert_eq!(parse_plan_command("please /plan this"), None);
+        assert!(plan_allows("grep") && plan_allows("symbol") && plan_allows("skill_view"));
+        assert!(!plan_allows("bash") && !plan_allows("edit_file") && !plan_allows("mcp__x__y"));
+        assert!(!plan_allows("skill_save"));
+    }
+
+    #[test]
+    fn plan_directive_is_stripped_from_the_turn_that_carried_it() {
+        let d = PLAN_DIRECTIVE_WORKSPACE;
+        let mut h = vec![
+            user("older message"),
+            user(&format!("rename the thing\n\n{d}")),
+            assistant("1. do it"),
+        ];
+        strip_plan_directive(&mut h, d);
+        assert!(matches!(&h[1], Message::User { content } if content == "rename the thing"));
+        assert!(matches!(&h[0], Message::User { content } if content == "older message"));
+        // Nothing to strip is a no-op, not a panic.
+        strip_plan_directive(&mut h, d);
+        assert_eq!(h.len(), 3);
     }
 
     #[test]

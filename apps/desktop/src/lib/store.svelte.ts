@@ -165,6 +165,7 @@ class SessionStore {
   updateState = $state<'downloading' | 'installing' | 'error' | null>(null);
   updateDownloaded = $state(0);
   updateTotal = $state<number | null>(null);
+  whatsNew = $state<{ version: string; notes: string | null } | null>(null);
 
   mode = $state<AppMode>('home');
   theme = $state<string>('auto');
@@ -242,6 +243,7 @@ class SessionStore {
         }
       });
       void this.checkForUpdate();
+      void this.checkWhatsNew();
       void import('./ipc')
         .then((m) => m.presenceSetMode(this.mode))
         .catch(() => {});
@@ -269,6 +271,31 @@ class SessionStore {
     this.fixtureTimers = [];
   }
 
+  async checkWhatsNew(): Promise<void> {
+    const m = await import('./ipc');
+    const info = await m.appInfo().catch(() => null);
+    if (!info) return;
+    const prev = localStorage.getItem('hate:lastVersion');
+    localStorage.setItem('hate:lastVersion', info.version);
+    if (!prev || prev === info.version) return;
+    let notes: string | null = null;
+    try {
+      const raw = localStorage.getItem('hate:pendingUpdate');
+      if (raw) {
+        const p = JSON.parse(raw) as { version?: string; notes?: string | null };
+        if (p.version === info.version && p.notes) notes = p.notes;
+      }
+    } catch {
+      // malformed leftover; show the modal without notes
+    }
+    localStorage.removeItem('hate:pendingUpdate');
+    this.whatsNew = { version: info.version, notes };
+  }
+
+  dismissWhatsNew(): void {
+    this.whatsNew = null;
+  }
+
   async checkForUpdate(): Promise<void> {
     try {
       const m = await import('./ipc');
@@ -279,6 +306,15 @@ class SessionStore {
   }
 
   async installUpdate(): Promise<void> {
+    if (this.updateAvailable) {
+      localStorage.setItem(
+        'hate:pendingUpdate',
+        JSON.stringify({
+          version: this.updateAvailable.version,
+          notes: this.updateAvailable.notes,
+        }),
+      );
+    }
     this.updateState = 'installing';
     try {
       const m = await import('./ipc');

@@ -23,10 +23,10 @@ pub struct AppInfo {
 
 #[tauri::command]
 #[specta::specta]
-pub fn app_info() -> AppInfo {
+pub fn app_info(app: AppHandle) -> AppInfo {
     let data_dir = dirs::data_dir().map_or_else(std::env::temp_dir, |p| p.join("hate-agent"));
     AppInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: app.package_info().version.to_string(),
         data_dir: data_dir.display().to_string(),
         platform: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),

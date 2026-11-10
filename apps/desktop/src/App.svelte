@@ -16,6 +16,7 @@
   import ModeSwitch from './lib/components/ModeSwitch.svelte';
   import SessionBrowser from './lib/components/SessionBrowser.svelte';
   import Icon from './lib/components/Icon.svelte';
+  import { renderMarkdown } from './lib/markdown';
 
   let inTauri = $state(false);
 
@@ -174,6 +175,47 @@
     </div>
   {/if}
 
+  {#if session.whatsNew}
+    <div
+      class="wn-scrim"
+      role="presentation"
+      onclick={() => session.dismissWhatsNew()}
+      onkeydown={(e) => {
+        if (e.key === 'Escape') session.dismissWhatsNew();
+      }}
+    >
+      <div
+        class="wn-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label="What's new"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => {
+          if (e.key === 'Escape') session.dismissWhatsNew();
+        }}
+      >
+        <div class="wn-head">
+          <span class="wn-title mono">what's new in v{session.whatsNew.version}</span>
+          <button
+            class="wn-x"
+            onclick={() => session.dismissWhatsNew()}
+            aria-label="Close">✕</button>
+        </div>
+        {#if session.whatsNew.notes}
+          <div class="wn-body md">{@html renderMarkdown(session.whatsNew.notes)}</div>
+        {:else}
+          <p class="wn-body muted">Updated to v{session.whatsNew.version}.</p>
+        {/if}
+        <div class="wn-foot">
+          <button class="update-btn mono" onclick={() => session.dismissWhatsNew()}>
+            got it
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <div class="body">
     {#key session.mode}
       <div class="mode-view" in:fade={{ duration: 140 }}>
@@ -292,6 +334,97 @@
     background: var(--bg-1);
     border-bottom: 1px solid var(--border);
     border-left: 2px solid var(--accent);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+      0 0 22px -6px color-mix(in srgb, var(--accent) 65%, transparent);
+    animation: update-glow 3.4s ease-in-out infinite;
+  }
+  @keyframes update-glow {
+    0%,
+    100% {
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
+        0 0 14px -6px color-mix(in srgb, var(--accent) 45%, transparent);
+    }
+    50% {
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent),
+        0 0 26px -4px color-mix(in srgb, var(--accent) 75%, transparent);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .updatebar {
+      animation: none;
+    }
+  }
+  .wn-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--bg-0) 72%, transparent);
+    backdrop-filter: blur(2px);
+  }
+  .wn-card {
+    width: min(520px, calc(100vw - 64px));
+    max-height: min(70vh, 560px);
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-1);
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+    border-radius: 8px;
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
+      0 0 40px -8px color-mix(in srgb, var(--accent) 55%, transparent),
+      0 18px 40px -20px #000;
+  }
+  .wn-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .wn-title {
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+  }
+  .wn-x {
+    color: var(--fg-2);
+    font-size: 12px;
+    padding: 2px 6px;
+  }
+  .wn-x:hover {
+    color: var(--fg-0);
+  }
+  .wn-body {
+    padding: 14px;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--fg-1);
+  }
+  .wn-body :global(ul) {
+    margin: 6px 0;
+    padding-left: 18px;
+  }
+  .wn-body :global(li) {
+    margin: 3px 0;
+  }
+  .wn-body :global(code) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg-3);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .wn-foot {
+    display: flex;
+    justify-content: flex-end;
+    padding: 10px 14px 14px;
   }
   .updatebar .dim {
     color: var(--fg-2);

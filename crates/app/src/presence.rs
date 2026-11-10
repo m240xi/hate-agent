@@ -37,7 +37,7 @@ impl Presence {
         let (tx, rx) = mpsc::channel(16);
         let last_state = Arc::new(std::sync::Mutex::new("Idle".to_string()));
         let enabled_flag = Arc::new(std::sync::atomic::AtomicBool::new(enabled));
-        tokio::spawn(run(
+        tauri::async_runtime::spawn(run(
             rx,
             start_ms,
             Arc::clone(&last_state),
@@ -300,6 +300,13 @@ async fn connect() -> std::io::Result<Conn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_works_without_an_ambient_runtime() {
+        let presence = Presence::start(false);
+        presence.set_mode("In Chat");
+        presence.set_enabled(false);
+    }
 
     #[test]
     fn frames_roundtrip_and_split() {

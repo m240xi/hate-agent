@@ -228,7 +228,10 @@ async fn send_activity<W: AsyncWrite + Unpin>(
             "details": "hate-agent",
             "state": a.state,
             "timestamps": { "start": start_ms },
-            "assets": { "large_image": "logo", "large_text": "hate-agent" },
+            "assets": {
+                "large_image": "https://i.pinimg.com/736x/85/58/42/8558427d815793b8b964c7e19292c90a.jpg",
+                "large_text": "hate-agent",
+            },
             "instance": true,
         });
     } else {
@@ -376,6 +379,12 @@ mod tests {
             let first: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(first["cmd"], "SET_ACTIVITY");
             assert_eq!(first["args"]["activity"]["details"], "hate-agent");
+            assert!(
+                first["args"]["activity"]["assets"]["large_image"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("https://")
+            );
             assert!(
                 first["args"]["activity"]["timestamps"]["start"]
                     .as_u64()

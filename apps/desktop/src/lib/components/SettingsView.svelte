@@ -501,16 +501,6 @@
           {/each}
         </div>
       </div>
-      <div class="card">
-        <label class="skill-toggle">
-          <input
-            type="checkbox"
-            checked={discordOn}
-            onchange={(e) => setDiscordPresence(e.currentTarget.checked)}
-          />
-          <span>Show hate-agent on your Discord profile (Rich Presence, with time elapsed)</span>
-        </label>
-      </div>
     </section>
 
     <section class="group">
@@ -1062,6 +1052,18 @@
             <dt>Platform</dt><dd class="mono">{appInfo.platform} · {appInfo.arch}</dd>
             <dt>Data</dt><dd class="mono about-path" title={appInfo.data_dir}>{appInfo.data_dir}</dd>
           </dl>
+          <label class="pref-row">
+            <span class="pref-text">
+              <span class="pref-name">Discord Rich Presence</span>
+              <span class="pref-hint">show hate-agent as your active activity, with time elapsed</span>
+            </span>
+            <input
+              class="switch"
+              type="checkbox"
+              checked={discordOn}
+              onchange={(e) => setDiscordPresence(e.currentTarget.checked)}
+            />
+          </label>
         {:else}
           <p class="muted">App info unavailable outside the desktop app.</p>
         {/if}
@@ -1492,6 +1494,69 @@
     font-family: var(--font-mono);
     font-size: 13px;
     color: var(--fg-3);
+  }
+  .pref-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 14px -16px -14px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 var(--radius) var(--radius);
+    cursor: pointer;
+    transition: background var(--motion);
+  }
+  .pref-row:hover {
+    background: var(--bg-2);
+  }
+  .pref-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .pref-name {
+    font-size: 13px;
+    color: var(--fg-0);
+  }
+  .pref-hint {
+    font-size: 11px;
+    color: var(--fg-2);
+  }
+  .switch {
+    appearance: none;
+    flex: none;
+    width: 34px;
+    height: 19px;
+    border-radius: 10px;
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    position: relative;
+    cursor: pointer;
+    transition:
+      background var(--motion),
+      border-color var(--motion);
+  }
+  .switch::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--fg-2);
+    transition:
+      transform var(--motion),
+      background var(--motion);
+  }
+  .switch:checked {
+    background: color-mix(in srgb, var(--accent) 28%, var(--bg-3));
+    border-color: var(--accent);
+  }
+  .switch:checked::after {
+    transform: translateX(15px);
+    background: var(--accent);
   }
   .about-grid {
     display: grid;

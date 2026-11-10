@@ -4,6 +4,7 @@
   import { session } from './lib/store.svelte';
   import Pane from './lib/components/Pane.svelte';
   import FileTree from './lib/components/FileTree.svelte';
+  import FileViewer from './lib/components/FileViewer.svelte';
   import Transcript from './lib/components/Transcript.svelte';
   import Composer from './lib/components/Composer.svelte';
   import PermissionBar from './lib/components/PermissionBar.svelte';
@@ -50,6 +51,14 @@
     await getCurrentWindow().close();
   }
 
+  function onWindowKeydown(e: KeyboardEvent): void {
+    if (e.key !== 'Escape' || !session.viewer) return;
+    const el = e.target as HTMLElement | null;
+    if (el?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    e.preventDefault();
+    session.closeViewer();
+  }
+
   $effect(() => {
     localStorage.setItem('hate:pane:left', String(session.leftWidth));
     localStorage.setItem('hate:pane:right', String(session.rightWidth));
@@ -74,9 +83,12 @@
     const m = session.mode;
     untrack(() => {
       if (m === 'chat' || m === 'code') void session.enterMode(m);
+      if (m !== 'code') session.closeViewer();
     });
   });
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="shell">
   <header class="topbar" role="presentation" onmousedown={onTopbarDown}>
@@ -184,7 +196,9 @@
           </Pane>
 
           <main class="center">
-            {#if session.pickerMode === 'code' || session.sessionBusy}
+            {#if session.viewer}
+              <FileViewer />
+            {:else if session.pickerMode === 'code' || session.sessionBusy}
               {#if session.sessionBusy}
                 <div class="center-busy"><p>opening session…</p></div>
               {:else}

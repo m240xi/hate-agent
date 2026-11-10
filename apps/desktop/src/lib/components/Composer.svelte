@@ -60,7 +60,12 @@
       {#each session.queue as q, i}
         <li class="queued rise">
           <span class="q-tag">queued</span>
-          <span class="q-text">{q}</span>
+          <span class="q-text">{q.text}</span>
+          {#if q.pins.length > 0}
+            <span class="q-pins mono" title={q.pins.map((p) => p.path).join('\n')}>
+              +{q.pins.length} file{q.pins.length === 1 ? '' : 's'}
+            </span>
+          {/if}
           <button class="q-x" onclick={() => session.removeQueued(i)} aria-label="Remove queued message">
             <Icon name="x" size={10} />
           </button>
@@ -84,6 +89,26 @@
   {/if}
 
   <div class="composer" class:busy={session.running} class:planning={session.planMode}>
+    {#if session.pinned.length > 0}
+      <ul class="pins" aria-label="Attached files">
+        {#each session.pinned as p (p.path)}
+          <li class="pin-chip">
+            <Icon name="file" size={10} />
+            <span class="pin-path mono" title={p.path}>
+              {p.path}{#if p.start} · {p.start}{#if p.end && p.end !== p.start}-{p.end}{/if}{/if}
+            </span>
+            <button
+              class="pin-x"
+              onclick={() => session.unpin(p.path)}
+              aria-label={`Detach ${p.path}`}
+              title="Remove from this message"
+            >
+              <Icon name="x" size={9} />
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
     <textarea
       bind:this={ta}
       bind:value={session.draft}
@@ -251,6 +276,45 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .q-pins {
+    flex: none;
+    font-size: 10px;
+    color: var(--accent);
+  }
+  .pins {
+    list-style: none;
+    margin: 0;
+    padding: 6px 8px 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .pin-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 240px;
+    padding: 2px 5px 2px 6px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg-2);
+  }
+  .pin-path {
+    font-size: 10.5px;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pin-x {
+    display: inline-flex;
+    color: var(--fg-3);
+    flex: none;
+  }
+  .pin-x:hover {
+    color: var(--err);
   }
   .q-x {
     display: inline-flex;

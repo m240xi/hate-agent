@@ -11,8 +11,8 @@ export async function appInfo(): Promise<AppInfo> {
   return invoke<AppInfo>('app_info');
 }
 
-export async function sessionSend(text: string): Promise<void> {
-  return invoke<void>('session_send', { text });
+export async function sessionSend(text: string, pins?: PinRef[]): Promise<void> {
+  return invoke<void>('session_send', { text, pins: pins?.length ? pins : null });
 }
 
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
@@ -212,6 +212,32 @@ export async function workspaceIndex(path: string): Promise<WorkspaceIndex> {
   return invoke<WorkspaceIndex>('workspace_index', { path });
 }
 
+export interface PinRef {
+  path: string;
+  start?: number | null;
+  end?: number | null;
+}
+
+export async function workspaceRead(
+  path: string,
+  offset?: number,
+  limit?: number,
+): Promise<import('./types').FileView> {
+  return invoke<import('./types').FileView>('workspace_read', {
+    path,
+    offset: offset ?? null,
+    limit: limit ?? null,
+  });
+}
+
+export async function workspaceChanges(): Promise<import('./types').ChangedFile[]> {
+  return invoke<import('./types').ChangedFile[]>('workspace_changes');
+}
+
+export async function workspaceDiff(path: string): Promise<import('./types').FileDiff> {
+  return invoke<import('./types').FileDiff>('workspace_diff', { path });
+}
+
 export interface SessionMeta {
   id: string;
   mode: 'chat' | 'code';
@@ -274,6 +300,18 @@ export async function mcpRefresh(): Promise<McpServerInfo[]> {
 
 export async function mcpSave(servers: McpServerConfig[]): Promise<McpServerInfo[]> {
   return invoke<McpServerInfo[]>('mcp_save', { servers });
+}
+
+export async function presenceSetMode(mode: string): Promise<void> {
+  return invoke('presence_set_mode', { mode });
+}
+
+export async function presenceGet(): Promise<boolean> {
+  return invoke<boolean>('presence_get');
+}
+
+export async function presenceSet(enabled: boolean): Promise<void> {
+  return invoke('presence_set', { enabled });
 }
 
 export interface UpdateInfo {

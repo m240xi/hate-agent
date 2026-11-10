@@ -32,6 +32,8 @@ pub struct Config {
     pub workspace_path: Option<String>,
     #[serde(default = "default_true")]
     pub auto_skills: bool,
+    #[serde(default = "default_true")]
+    pub discord_presence: bool,
 }
 
 impl Default for Config {
@@ -41,6 +43,7 @@ impl Default for Config {
             providers: BTreeMap::new(),
             workspace_path: None,
             auto_skills: true,
+            discord_presence: true,
         }
     }
 }

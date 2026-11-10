@@ -3,6 +3,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
+  import Popover from './Popover.svelte';
   import type {
     AppInfo,
     ClaudeLoginInfo,
@@ -18,6 +19,7 @@
   let presets = $state<ProviderPreset[]>([]);
   let skills = $state<SkillInfo[]>([]);
   let skillAuto = $state(true);
+  let discordOn = $state(true);
   let skillOpen = $state<string | null>(null);
   let skillBodies = $state<Record<string, string>>({});
   let appInfo = $state<AppInfo | null>(null);
@@ -47,6 +49,7 @@
     presets = await m.providerPresets().catch(() => []);
     skills = await m.skillsList().catch(() => []);
     skillAuto = await m.skillsAutoGet().catch(() => true);
+    discordOn = await m.presenceGet().catch(() => true);
     appInfo = await m.appInfo().catch(() => null);
     await loadMcp();
     void session.refreshModels();
@@ -184,6 +187,12 @@
     });
     skillOpen = null;
     await refresh();
+  }
+
+  async function setDiscordPresence(enabled: boolean): Promise<void> {
+    discordOn = enabled;
+    const m = await import('../ipc');
+    await m.presenceSet(enabled).catch(() => {});
   }
 
   async function setAutoSkills(enabled: boolean): Promise<void> {
@@ -361,6 +370,31 @@
     showMcpAdd = false;
   }
 
+  function addContext7(): void {
+    if (mcpRows.some((r) => r.name.toLowerCase() === 'context7')) {
+      mcpError = 'context7 is already configured';
+      return;
+    }
+    mcpRows = [
+      ...mcpRows,
+      {
+        name: 'context7',
+        kind: 'http',
+        enabled: true,
+        state: 'new',
+        tools: 0,
+        info: '',
+        command: null,
+        args: [],
+        env: {},
+        url: 'https://mcp.context7.com/mcp',
+        headers: {},
+      },
+    ];
+    mcpError = null;
+    queueMcpSave();
+  }
+
   function removeMcpRow(i: number): void {
     mcpRows = mcpRows.filter((_, j) => j !== i);
     if (mcpOpen === i) mcpOpen = null;
@@ -466,6 +500,16 @@
             </button>
           {/each}
         </div>
+      </div>
+      <div class="card">
+        <label class="skill-toggle">
+          <input
+            type="checkbox"
+            checked={discordOn}
+            onchange={(e) => setDiscordPresence(e.currentTarget.checked)}
+          />
+          <span>Show hate-agent on your Discord profile (Rich Presence, with time elapsed)</span>
+        </label>
       </div>
     </section>
 
@@ -943,9 +987,59 @@
           </div>
         </div>
       {:else}
-        <button class="btn ghost mcp-add-btn" onclick={() => (showMcpAdd = true)}>
-          <Icon name="plus" size={13} /> Add MCP server
-        </button>
+        <div class="mcp-add-row">
+          <button class="btn ghost mcp-add-btn" onclick={() => (showMcpAdd = true)}>
+            <Icon name="plus" size={13} /> Add MCP server
+          </button>
+          <button
+            class="btn ghost mcp-add-btn"
+            onclick={addContext7}
+            title="Add the Context7 docs server"
+          >
+            <Icon name="bolt" size={13} /> Add Context7 docs
+          </button>
+          <Popover align="right" width="420px">
+            {#snippet trigger()}
+              <Icon name="info" size={12} /> docs info
+            {/snippet}
+            {#snippet panel({ close })}
+              <div class="ctx7">
+                <div class="ctx7-head">
+                  <Icon name="bolt" size={13} />
+                  <span class="ctx7-title">Context7 docs</span>
+                  <span class="mcp-spacer"></span>
+                  <button class="icon-btn" onclick={close} aria-label="Close">
+                    <Icon name="x" size={11} />
+                  </button>
+                </div>
+                <p class="ctx7-lede">
+                  Current, version-specific documentation for ~163k libraries, fetched while
+                  the agent works instead of guessed from its training cut-off.
+                </p>
+                <div class="ctx7-tool">
+                  <code class="mono">resolve-library-id</code>
+                  <span>
+                    turns a name into a Context7 id (<span class="mono">Next.js</span> →
+                    <span class="mono">/vercel/next.js</span>). Runs first, every time.
+                  </span>
+                </div>
+                <div class="ctx7-tool">
+                  <code class="mono">query-docs</code>
+                  <span>
+                    returns that library's current docs and real code examples for one
+                    question.
+                  </span>
+                </div>
+                <p class="ctx7-ask">
+                  Both are read-only, so they never stop to ask permission — which also means
+                  the agent decides on its own whether to use them. Say it explicitly:
+                  <em>“check the current Next.js docs for route handlers”</em> or
+                  <em>“use context7 to look up the Prisma upsert API”</em>.
+                </p>
+              </div>
+            {/snippet}
+          </Popover>
+        </div>
       {/if}
 
       {#if mcpDirty || mcpError || mcpBusy}
@@ -1542,6 +1636,74 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+  }
+  .mcp-add-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .mcp-add-row .mcp-add-btn {
+    margin-top: 10px;
+  }
+  .mcp-add-row :global(.pop) {
+    margin-top: 10px;
+  }
+  .ctx7 {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px 14px;
+  }
+  .ctx7-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--accent);
+  }
+  .ctx7-title {
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+    color: var(--fg-0);
+  }
+  .ctx7-lede {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--fg-2);
+  }
+  .ctx7-tool {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding-left: 9px;
+    border-left: 2px solid var(--border);
+  }
+  .ctx7-tool code {
+    font-size: 11px;
+    color: var(--accent);
+  }
+  .ctx7-tool span {
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--fg-2);
+  }
+  .ctx7-tool span :global(.mono) {
+    color: var(--fg-1);
+  }
+  .ctx7-ask {
+    margin: 0;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--fg-2);
+  }
+  .ctx7-ask em {
+    color: var(--fg-0);
+    font-style: normal;
+    white-space: nowrap;
   }
   .mcp-foot {
     display: flex;

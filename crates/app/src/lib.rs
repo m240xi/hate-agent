@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod commands;
+mod presence;
 mod sessions_db;
 
 use tauri::Manager;
@@ -39,6 +40,9 @@ pub fn run() {
         commands::workspace_set,
         commands::workspace_pick,
         commands::workspace_index,
+        commands::workspace_read,
+        commands::workspace_changes,
+        commands::workspace_diff,
         commands::mcp_list,
         commands::mcp_refresh,
         commands::mcp_save,
@@ -49,6 +53,9 @@ pub fn run() {
         commands::session_save_ui,
         commands::update_check,
         commands::update_install,
+        commands::presence_set_mode,
+        commands::presence_get,
+        commands::presence_set,
     ]);
 
     #[cfg(debug_assertions)]
@@ -70,6 +77,10 @@ pub fn run() {
             app.manage(commands::Sessions::default());
             app.manage(commands::AuthState::default());
             app.manage(commands::UpdateState::default());
+            let discord_on =
+                hate_auth::AuthContext::load().map_or(true, |c| c.config.discord_presence);
+            let presence = presence::Presence::start(discord_on);
+            app.manage(commands::PresenceState(presence));
             let mcp = commands::McpState::load();
             if !mcp.pending.is_empty() {
                 let hub = mcp.hub.clone();

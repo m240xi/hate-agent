@@ -12,6 +12,7 @@ pub mod skills;
 mod state;
 mod tools;
 mod types;
+pub mod view;
 
 pub use checkpoint::{CheckpointBundle, restore_checkpoint, write_checkpoint};
 pub use event::{AgentError, Event};
@@ -33,3 +34,4 @@ pub use types::{
     CheckpointId, CompactionReason, FailureReason, Outcome, PermissionDecision, PermissionRequest,
     Plan, RequestId, SessionId, Step, TokenUsage, ToolCall, ToolName, TurnId, TurnOutcome,
 };
+pub use view::{ChangedFile, FileDiff, FileView};

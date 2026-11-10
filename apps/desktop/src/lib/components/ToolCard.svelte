@@ -39,6 +39,24 @@
   const statusIcon = $derived(
     block.ok === undefined ? 'clock' : block.ok ? 'check' : 'alert',
   );
+
+  const linkPath = $derived.by(() => {
+    const args = block.call?.args as Record<string, unknown> | undefined;
+    const p = typeof args?.path === 'string' ? args.path : typeof args?.file === 'string' ? args.file : '';
+    if (!p || p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p) || p.includes('..')) return '';
+    return p;
+  });
+
+  function toggle(): void {
+    block.expanded = !block.expanded;
+  }
+
+  function onHeadKey(e: KeyboardEvent): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle();
+    }
+  }
   const statusColor = $derived(
     block.ok === undefined ? 'var(--fg-3)' : block.ok ? 'var(--ok)' : 'var(--err)',
   );
@@ -53,9 +71,13 @@
 </script>
 
 <div class="tool-card rise" class:expanded={block.expanded}>
-  <button
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+  <div
     class="head"
-    onclick={() => (block.expanded = !block.expanded)}
+    role="button"
+    tabindex="0"
+    onclick={toggle}
+    onkeydown={onHeadKey}
     aria-expanded={block.expanded}
   >
     <span class="icon"><Icon name={TOOL_ICON[block.call?.name ?? ''] ?? 'terminal'} size={12} /></span>
@@ -64,10 +86,23 @@
     {#if savings}
       <span class="savings mono" title="full tokens → sent tokens">{savings} tok</span>
     {/if}
+    {#if linkPath}
+      <button
+        class="open-file"
+        onclick={(e) => {
+          e.stopPropagation();
+          void session.openFile(linkPath);
+        }}
+        title={`Open ${linkPath}`}
+        aria-label={`Open ${linkPath}`}
+      >
+        <Icon name="file" size={11} />
+      </button>
+    {/if}
     <span class="status" style:color={statusColor}>
       <Icon name={statusIcon} size={12} />
     </span>
-  </button>
+  </div>
   {#if block.expanded}
     <div class="body">
       {#if block.usage}
@@ -102,9 +137,29 @@
     padding: 0 8px;
     text-align: left;
     color: var(--fg-1);
+    cursor: pointer;
   }
   .head:hover {
     background: var(--bg-2);
+  }
+  .open-file {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: var(--radius);
+    color: var(--fg-3);
+    flex: none;
+    opacity: 0;
+  }
+  .head:hover .open-file,
+  .open-file:focus-visible {
+    opacity: 1;
+  }
+  .open-file:hover {
+    background: var(--bg-3);
+    color: var(--fg-0);
   }
   .icon {
     color: var(--fg-2);

@@ -119,14 +119,23 @@
   </section>
 
   <section class="sec">
-    <h3 class="sec-title"><Icon name="diff" size={11} /> Changed files</h3>
+    <h3 class="sec-title">
+      <Icon name="diff" size={11} /> Changed files
+      <span class="spacer"></span>
+      <button class="sec-btn" onclick={() => void session.refreshChanges()} title="Refresh from git">
+        <Icon name="clock" size={10} />
+      </button>
+    </h3>
     {#if session.changedFiles.length === 0}
       <p class="dim">No changes yet.</p>
     {:else}
       <ul class="files">
         {#each session.changedFiles as f}
           <li class="file">
-            <span class="fpath mono" title={f.path}>{f.path}</span>
+            <button class="fpath mono" title={`${f.path} — click to review the diff`} onclick={() => void session.openDiff(f.path)}>
+              {#if f.status}<span class="fstatus" data-s={f.status}>{f.status}</span>{/if}
+              {f.path}
+            </button>
             <span class="fstat mono"><span class="add">+{f.added}</span> <span class="del">-{f.removed}</span></span>
           </li>
         {/each}
@@ -162,6 +171,22 @@
     letter-spacing: 0.05em;
     text-transform: uppercase;
     color: var(--fg-3);
+  }
+  .spacer {
+    flex: 1;
+  }
+  .sec-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: var(--radius);
+    color: var(--fg-3);
+  }
+  .sec-btn:hover {
+    background: var(--bg-3);
+    color: var(--fg-0);
   }
   .dim {
     color: var(--fg-3);
@@ -307,10 +332,30 @@
   .fpath {
     flex: 1;
     min-width: 0;
+    text-align: left;
     color: var(--fg-1);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .fpath:hover {
+    color: var(--accent);
+  }
+  .fstatus {
+    display: inline-block;
+    width: 12px;
+    margin-right: 4px;
+    color: var(--fg-3);
+    font-size: 10px;
+  }
+  .fstatus[data-s='M'] {
+    color: var(--warn);
+  }
+  .fstatus[data-s='A'] {
+    color: var(--ok);
+  }
+  .fstatus[data-s='D'] {
+    color: var(--err);
   }
   .fstat {
     flex: none;

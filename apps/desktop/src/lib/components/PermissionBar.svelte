@@ -4,6 +4,13 @@
 
   const req = $derived(session.pendingPermission);
 
+  const openPath = $derived.by(() => {
+    const args = req?.call.args as Record<string, unknown> | undefined;
+    const p = typeof args?.path === 'string' ? args.path : '';
+    if (!p || p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p) || p.includes('..')) return '';
+    return p;
+  });
+
   const detail = $derived.by(() => {
     if (!req) return '';
     const args = req.call.args as Record<string, unknown>;
@@ -24,6 +31,11 @@
       <Icon name="alert" size={13} />
       <span class="perm-title">{req.call.name} needs approval</span>
       <span class="perm-reason">{req.reason}</span>
+      {#if openPath}
+        <button class="perm-open mono" onclick={() => void session.openFile(openPath)} title={`Open ${openPath}`}>
+          view file
+        </button>
+      {/if}
     </div>
     <pre class="perm-detail mono">{detail}</pre>
     <div class="perm-actions">
@@ -61,6 +73,16 @@
   .perm-reason {
     font-size: 11px;
     color: var(--fg-3);
+  }
+  .perm-open {
+    font-size: 10.5px;
+    color: var(--accent);
+    border-bottom: 1px dotted var(--accent-dim);
+    margin-left: auto;
+  }
+  .perm-open:hover {
+    color: var(--fg-0);
+    border-bottom-color: var(--fg-0);
   }
   .perm-detail {
     margin: 8px 0;

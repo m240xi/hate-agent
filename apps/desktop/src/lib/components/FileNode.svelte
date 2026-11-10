@@ -14,6 +14,7 @@
   let openOverride = $state<boolean | null>(null);
   const open = $derived(openOverride ?? depth < 2);
   const selected = $derived(session.selectedPath === node.path);
+  const pinned = $derived(session.isPinned(node.path));
 
   const STATUS_COLOR: Record<string, string> = {
     M: 'var(--warn)',
@@ -41,23 +42,36 @@
       {/each}
     {/if}
   {:else}
-    <button
-      class="row file"
-      class:selected
-      onclick={() => (session.selectedPath = node.path)}
-      title={node.path}
-    >
-      <span class="twisty"></span>
-      <Icon name="file" size={13} />
-      <span class="name">{node.name}</span>
-      {#if node.status}
-        <span
-          class="dot"
-          style:background={STATUS_COLOR[node.status] ?? 'var(--fg-3)'}
-          title={node.status === 'M' ? 'modified' : node.status === 'A' ? 'added' : node.status === 'D' ? 'deleted' : 'untracked'}
-        ></span>
-      {/if}
-    </button>
+    <div class="leaf">
+      <button
+        class="row file"
+        class:selected
+        class:pinned
+        onclick={() => session.openFile(node.path)}
+        title={node.path}
+      >
+        <span class="twisty"></span>
+        <Icon name="file" size={13} />
+        <span class="name">{node.name}</span>
+        {#if node.status}
+          <span
+            class="dot"
+            style:background={STATUS_COLOR[node.status] ?? 'var(--fg-3)'}
+            title={node.status === 'M' ? 'modified' : node.status === 'A' ? 'added' : node.status === 'D' ? 'deleted' : 'untracked'}
+          ></span>
+        {/if}
+      </button>
+      <button
+        class="pin"
+        class:on={pinned}
+        onclick={() => session.togglePin(node.path)}
+        aria-pressed={pinned}
+        aria-label={pinned ? `Detach ${node.name}` : `Attach ${node.name} to the next message`}
+        title={pinned ? 'Attached to next message — click to remove' : 'Attach to next message'}
+      >
+        <Icon name={pinned ? 'check' : 'plus'} size={11} />
+      </button>
+    </div>
   {/if}
 </div>
 
@@ -81,9 +95,15 @@
     background: var(--bg-2);
     color: var(--fg-0);
   }
+  .row.file {
+    padding-right: 26px;
+  }
   .row.selected {
     background: var(--bg-3);
     color: var(--fg-0);
+  }
+  .row.pinned .name {
+    color: var(--accent);
   }
   .twisty {
     display: inline-flex;
@@ -102,5 +122,35 @@
     border-radius: 50%;
     margin-left: auto;
     flex: none;
+  }
+  .leaf {
+    position: relative;
+    display: flex;
+  }
+  .pin {
+    position: absolute;
+    right: 4px;
+    top: 3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: var(--radius);
+    color: var(--fg-3);
+    opacity: 0;
+    transition: opacity var(--motion);
+  }
+  .leaf:hover .pin,
+  .pin:focus-visible {
+    opacity: 1;
+  }
+  .pin:hover {
+    background: var(--bg-3);
+    color: var(--fg-0);
+  }
+  .pin.on {
+    opacity: 1;
+    color: var(--accent);
   }
 </style>

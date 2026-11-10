@@ -67,6 +67,7 @@ export interface TranscriptBlock {
   turn?: TurnSummary;
   plan?: boolean;
   local?: boolean;
+  pins?: PinRef[];
 }
 
 export interface TurnSummary {
@@ -91,6 +92,32 @@ export interface ChangedFile {
   path: string;
   added: number;
   removed: number;
+  status?: 'M' | 'A' | 'D' | '?';
+}
+
+export interface PinRef {
+  path: string;
+  start?: number | null;
+  end?: number | null;
+}
+
+export interface FileView {
+  path: string;
+  lines: string[];
+  start: number;
+  total_lines: number;
+  truncated: boolean;
+  binary: boolean;
+  too_large: boolean;
+}
+
+export interface FileDiff {
+  path: string;
+  unified: string;
+  added: number;
+  removed: number;
+  tracked: boolean;
+  truncated: boolean;
 }
 
 export interface FileNode {

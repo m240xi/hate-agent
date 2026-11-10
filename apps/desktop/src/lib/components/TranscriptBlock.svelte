@@ -1,6 +1,7 @@
 <script lang="ts">
   import { session } from '../store.svelte';
   import ToolCard from './ToolCard.svelte';
+  import Icon from './Icon.svelte';
   import { renderMarkdown } from '../markdown';
   import { copyText, fmtTok, turnLabel, usageLabel, usageTitle } from '../format';
   import type { TranscriptBlock } from '../types';
@@ -38,6 +39,16 @@
   <div class="user-msg rise">
     <div class="user-tag">you{#if block.plan}<span class="plan-tag">plan</span>{/if}</div>
     <div class="user-text">{block.text}</div>
+    {#if block.pins && block.pins.length > 0}
+      <ul class="user-pins" aria-label="Attached files">
+        {#each block.pins as p (p.path)}
+          <li class="user-pin mono" title={p.path}>
+            <Icon name="file" size={9} />
+            {p.path}{#if p.start} · {p.start}{#if p.end && p.end !== p.start}-{p.end}{/if}{/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
     {#if block.turn}
       <div class="usage mono" title={`whole turn\n${usageTitle(block.turn.usage)}`}>
         {turnLabel(block.turn)}
@@ -122,6 +133,29 @@
     white-space: pre-wrap;
     word-break: break-word;
     color: var(--fg-0);
+  }
+  .user-pins {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .user-pin {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    padding: 1px 6px;
+    font-size: 10px;
+    color: var(--fg-2);
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .plan-tag {
     margin-left: 6px;

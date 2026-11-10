@@ -19,7 +19,7 @@
   });
 
   function pick(hit: SymbolHit): void {
-    session.selectedPath = hit.path;
+    void session.openFile(hit.path, hit.line);
     query = '';
   }
 </script>

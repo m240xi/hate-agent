@@ -14,8 +14,11 @@ import type {
   ChangedFile,
   CheckpointEntry,
   FailureReason,
+  FileDiff,
   FileNode,
+  FileView,
   PermissionRequest,
+  PinRef,
   PlanStep,
   SessionEvent,
   SymbolHit,
@@ -88,6 +91,21 @@ interface UiState {
 const RUN_PLAN_TEXT =
   'Approved. Carry out the plan above step by step, then verify the result.';
 
+export interface ViewerState {
+  kind: 'file' | 'diff';
+  path: string;
+  line: number | null;
+  view: FileView | null;
+  diff: FileDiff | null;
+  loading: boolean;
+  error: string | null;
+}
+
+export interface QueuedMessage {
+  text: string;
+  pins: PinRef[];
+}
+
 class SessionStore {
   blocks = $state<TranscriptBlock[]>([]);
 
@@ -95,6 +113,8 @@ class SessionStore {
   symbols = $state<SymbolHit[]>([]);
   indexTruncated = $state(false);
   selectedPath = $state<string | null>(null);
+  viewer = $state<ViewerState | null>(null);
+  pinned = $state<PinRef[]>([]);
 
   plan = $state<PlanStep[]>([]);
   usage = $state<TokenUsage>({ input: 0, cached_input: 0, output: 0, thinking: 0 });
@@ -123,7 +143,7 @@ class SessionStore {
   draft = $state('');
   pendingPermission = $state<PermissionRequest | null>(null);
   awaitingPrompt = $state<string | null>(null);
-  queue = $state<string[]>([]);
+  queue = $state<QueuedMessage[]>([]);
 
   planMode = $state(false);
   planReady = $state(false);
@@ -222,6 +242,9 @@ class SessionStore {
         }
       });
       void this.checkForUpdate();
+      void import('./ipc')
+        .then((m) => m.presenceSetMode(this.mode))
+        .catch(() => {});
     } else {
       this.blocks = [...fixtureInitialBlocks];
       this.tree = fixtureTree;
@@ -266,12 +289,16 @@ class SessionStore {
     }
   }
 
-  send(override?: string): void {
+  send(override?: string, pinsOverride?: PinRef[]): void {
     const text = (override ?? this.draft).trim();
     if (!text) return;
-    if (override === undefined) this.draft = '';
+    const pins = pinsOverride ?? this.collectPins(text);
+    if (override === undefined) {
+      this.draft = '';
+      this.pinned = [];
+    }
     if (this.sessionState === 'running' || this.sessionState === 'awaiting_permission') {
-      this.queue.push(text);
+      this.queue.push({ text, pins });
       return;
     }
     const plan = this.planMode;
@@ -279,7 +306,11 @@ class SessionStore {
     this.planReady = false;
     const begin = () => {
       const id = nextBlockId++;
-      this.blocks.push(plan ? { id, kind: 'user', text, plan: true } : { id, kind: 'user', text });
+      this.blocks.push(
+        plan
+          ? { id, kind: 'user', text, plan: true, ...(pins.length ? { pins } : {}) }
+          : { id, kind: 'user', text, ...(pins.length ? { pins } : {}) },
+      );
       this.turnBlockId = id;
       this.turnIsPlan = plan;
       this.roundStart = this.blocks.length;
@@ -294,7 +325,7 @@ class SessionStore {
         return;
       }
       void import('./ipc')
-        .then((m) => m.sessionSend(wire))
+        .then((m) => m.sessionSend(wire, pins))
         .catch((err: unknown) => {
           this.sessionState = 'failed';
           this.pushError(String(err));
@@ -310,6 +341,135 @@ class SessionStore {
         });
     } else {
       begin();
+    }
+  }
+
+  private collectPins(text: string): PinRef[] {
+    const pins = [...this.pinned];
+    if (this.tree.length === 0) return pins;
+    const known = this.flatPaths();
+    for (const token of text.match(/@([^\s@]+)/g) ?? []) {
+      const path = token.slice(1).replace(/[.,;:]+$/, '');
+      if (!known.has(path)) continue;
+      if (!pins.some((p) => p.path === path)) pins.push({ path, start: null, end: null });
+    }
+    return pins;
+  }
+
+  private flatPaths(): Set<string> {
+    const out = new Set<string>();
+    const walk = (nodes: FileNode[]): void => {
+      for (const n of nodes) {
+        if (n.kind === 'file') out.add(n.path);
+        if (n.children) walk(n.children);
+      }
+    };
+    walk(this.tree);
+    return out;
+  }
+
+  isPinned(path: string): boolean {
+    return this.pinned.some((p) => p.path === path);
+  }
+
+  pinFile(path: string, start?: number | null, end?: number | null): void {
+    const next: PinRef = { path, start: start ?? null, end: end ?? null };
+    const i = this.pinned.findIndex((p) => p.path === path);
+    if (i >= 0) this.pinned.splice(i, 1, next);
+    else this.pinned.push(next);
+  }
+
+  togglePin(path: string): void {
+    if (this.isPinned(path)) this.unpin(path);
+    else this.pinFile(path);
+  }
+
+  unpin(path: string): void {
+    this.pinned = this.pinned.filter((p) => p.path !== path);
+  }
+
+  async openFile(path: string, line: number | null = null): Promise<void> {
+    this.selectedPath = path;
+    this.viewer = { kind: 'file', path, line, view: null, diff: null, loading: true, error: null };
+    if (!inTauri()) {
+      this.viewer.loading = false;
+      this.viewer.error = 'file preview needs the desktop app';
+      return;
+    }
+    const m = await import('./ipc');
+    try {
+      const offset = line && line > 300 ? Math.max(1, line - 50) : 1;
+      const view = await m.workspaceRead(path, offset, 400);
+      const v = this.viewer;
+      if (!v || v.kind !== 'file' || v.path !== path) return;
+      this.viewer = { ...v, view, loading: false };
+    } catch (e) {
+      const v = this.viewer;
+      if (!v || v.kind !== 'file' || v.path !== path) return;
+      this.viewer = { ...v, loading: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  async openDiff(path: string): Promise<void> {
+    this.selectedPath = path;
+    this.viewer = { kind: 'diff', path, line: null, view: null, diff: null, loading: true, error: null };
+    if (!inTauri()) {
+      this.viewer.loading = false;
+      this.viewer.error = 'diffs need the desktop app';
+      return;
+    }
+    const m = await import('./ipc');
+    try {
+      const diff = await m.workspaceDiff(path);
+      const v = this.viewer;
+      if (!v || v.kind !== 'diff' || v.path !== path) return;
+      this.viewer = { ...v, diff, loading: false };
+    } catch (e) {
+      const v = this.viewer;
+      if (!v || v.kind !== 'diff' || v.path !== path) return;
+      this.viewer = { ...v, loading: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  closeViewer(): void {
+    this.viewer = null;
+  }
+
+  async loadMoreLines(): Promise<void> {
+    const v = this.viewer;
+    if (!v || v.kind !== 'file' || !v.view || !inTauri()) return;
+    const shown = v.view.start + v.view.lines.length;
+    const m = await import('./ipc');
+    try {
+      const next = await m.workspaceRead(v.path, shown, 400);
+      const cur = this.viewer;
+      if (!cur || cur.kind !== 'file' || cur.path !== v.path || !cur.view) return;
+      this.viewer = {
+        ...cur,
+        view: {
+          ...cur.view,
+          lines: [...cur.view.lines, ...next.lines],
+          truncated: next.truncated,
+          total_lines: next.total_lines,
+        },
+      };
+    } catch {
+    }
+  }
+
+  async refreshViewer(): Promise<void> {
+    const v = this.viewer;
+    if (!v) return;
+    if (v.kind === 'file') await this.openFile(v.path, v.line);
+    else await this.openDiff(v.path);
+  }
+
+  async refreshChanges(): Promise<void> {
+    if (!inTauri() || !this.workspacePath) return;
+    const m = await import('./ipc');
+    try {
+      this.changedFiles = await m.workspaceChanges();
+    } catch {
     }
   }
 
@@ -390,8 +550,18 @@ class SessionStore {
 
   retryLast(): void {
     const text = this.lastUserText();
-    if (text) this.send(text);
-    else this.note('nothing to retry yet');
+    if (!text) {
+      this.note('nothing to retry yet');
+      return;
+    }
+    let last: TranscriptBlock | undefined;
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      if (this.blocks[i]?.kind === 'user') {
+        last = this.blocks[i];
+        break;
+      }
+    }
+    this.send(text, last?.pins ?? []);
   }
 
   async copyLastReply(): Promise<void> {
@@ -683,6 +853,8 @@ class SessionStore {
     this.usage = { input: 0, cached_input: 0, output: 0, thinking: 0 };
     this.checkpoints = [];
     this.changedFiles = [];
+    this.viewer = null;
+    this.pinned = [];
     this.sessionTurns = 0;
     this.sessionBeganAt = null;
     this.sessionTotals = { input: 0, cached_input: 0, output: 0, thinking: 0 };
@@ -703,6 +875,7 @@ class SessionStore {
   }
 
   private applyUiState(raw: string | null): void {
+    this.viewer = null;
     if (!raw) {
       this.resetConversation();
       return;
@@ -803,6 +976,11 @@ class SessionStore {
   setMode(mode: AppMode): void {
     this.mode = mode;
     localStorage.setItem('hate:mode', mode);
+    if (inTauri()) {
+      void import('./ipc')
+        .then((m) => m.presenceSetMode(mode))
+        .catch(() => {});
+    }
   }
 
   setTheme(theme: string): void {
@@ -826,6 +1004,8 @@ class SessionStore {
     const p = await m.workspacePick().catch(() => null);
     if (p) {
       this.workspacePath = p;
+      this.closeViewer();
+      this.pinned = [];
       await m.workspaceSet(p).catch(() => {});
       void this.refreshIndex();
     }
@@ -846,6 +1026,7 @@ class SessionStore {
       this.tree = idx.tree;
       this.symbols = idx.symbols;
       this.indexTruncated = idx.truncated;
+      void this.refreshChanges();
     } catch {
     }
   }
@@ -1014,9 +1195,13 @@ class SessionStore {
     }
     this.turnBlockId = null;
     this.turnIsPlan = false;
+    if (completed) {
+      void this.refreshChanges();
+      if (this.viewer) void this.refreshViewer();
+    }
     if (completed && !this.planReady && this.queue.length > 0) {
       const next = this.queue.shift();
-      if (next) queueMicrotask(() => this.send(next));
+      if (next) queueMicrotask(() => this.send(next.text, next.pins));
     }
   }
 

@@ -9,7 +9,32 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then range="${prev}..HEAD"; else range="HEAD"; fi
+          git log $range --no-merges --pretty=format:'- %s' | head -40 > notes.md
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "hate-agent $GITHUB_REF_NAME" --notes-file notes.md
+          fi
+          echo "id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .id)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: create-release
+    if: ${{ !cancelled() && needs.create-release.result != 'failure' }}
     strategy:
       fail-fast: false
       matrix:
@@ -25,8 +50,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -52,19 +75,6 @@ jobs:
         with:
           key: ${{ matrix.args }}
 
-      - name: Build changelog
-        id: changelog
-        shell: bash
-        run: |
-          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
-          if [ -n "$prev" ]; then range="${prev}..HEAD"; else range="HEAD"; fi
-          {
-            echo "body<<CHANGELOG_EOF"
-            git log $range --no-merges --pretty=format:'- %s' | head -40
-            echo ""
-            echo "CHANGELOG_EOF"
-          } >> "$GITHUB_OUTPUT"
-
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -72,9 +82,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/app
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('hate-agent {0}', github.ref_name) || '' }}
-          releaseBody: ${{ steps.changelog.outputs.body }}
-          releaseDraft: false
-          prerelease: false
           args: ${{ matrix.args }}

@@ -37,6 +37,11 @@ impl SessionDb {
             CREATE INDEX IF NOT EXISTS idx_sessions_mode ON sessions(mode, updated_at DESC);",
         )
         .map_err(|e| format!("sessions schema: {e}"))?;
+        // Manual titles (from renaming) survive the per-turn title refresh.
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN title_manual INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(Self { path })
     }
 
@@ -140,6 +145,20 @@ impl SessionDb {
         Ok(())
     }
 
+    pub fn rename(&self, key: &str, title: &str) -> Result<(), String> {
+        let title: String = title.trim().chars().take(120).collect();
+        if title.is_empty() {
+            return Err("a session title can't be empty".to_string());
+        }
+        self.conn()?
+            .execute(
+                "UPDATE sessions SET title = ?1, title_manual = 1, updated_at = ?2 WHERE id = ?3",
+                params![title, Self::now(), key],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn delete(&self, key: &str) -> Result<(), String> {
         self.conn()?
             .execute("DELETE FROM sessions WHERE id = ?1", params![key])
@@ -190,8 +209,9 @@ impl SessionJournal for SqliteJournal {
             let conn = self.db.conn()?;
             let updated = conn
                 .execute(
-                    "UPDATE sessions SET mode=?1, title=?2, provider=?3, model=?4,
-                    workspace=?5, updated_at=?6, data=?7 WHERE id=?8",
+                    "UPDATE sessions SET mode=?1,
+                    title=CASE WHEN title_manual = 1 THEN title ELSE ?2 END,
+                    provider=?3, model=?4, workspace=?5, updated_at=?6, data=?7 WHERE id=?8",
                     params![
                         snap.mode,
                         title,

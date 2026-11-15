@@ -34,6 +34,18 @@ pub struct Config {
     pub auto_skills: bool,
     #[serde(default = "default_true")]
     pub discord_presence: bool,
+    /// Soft spending ceiling per session, in USD. `None` means no ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_session_usd: Option<f64>,
+    /// Soft spending ceiling per day, in USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_day_usd: Option<f64>,
+    /// Play a short chime when a turn finishes while the window is unfocused.
+    #[serde(default)]
+    pub sound_on_done: bool,
+    /// Flash the taskbar / raise a notification when a turn finishes unfocused.
+    #[serde(default = "default_true")]
+    pub notify_on_done: bool,
 }
 
 impl Default for Config {
@@ -44,6 +56,10 @@ impl Default for Config {
             workspace_path: None,
             auto_skills: true,
             discord_presence: true,
+            budget_session_usd: None,
+            budget_day_usd: None,
+            sound_on_done: false,
+            notify_on_done: true,
         }
     }
 }

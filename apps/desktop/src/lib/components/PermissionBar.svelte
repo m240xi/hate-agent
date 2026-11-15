@@ -39,11 +39,11 @@
     </div>
     <pre class="perm-detail mono">{detail}</pre>
     <div class="perm-actions">
-      <button class="btn primary" onclick={() => session.respondPermission('allow')}>Run</button>
-      <button class="btn" onclick={() => session.respondPermission('allow_session')}>
+      <button class="btn primary sm" onclick={() => session.respondPermission('allow')}>Run</button>
+      <button class="btn sm" onclick={() => session.respondPermission('allow_session')}>
         Run &amp; remember
       </button>
-      <button class="btn danger" onclick={() => session.respondPermission('deny')}>Deny</button>
+      <button class="btn danger sm" onclick={() => session.respondPermission('deny')}>Deny</button>
     </div>
   </div>
 {/if}
@@ -101,32 +101,5 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-  }
-  .btn {
-    padding: 4px 12px;
-    font-size: 12px;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    background: var(--bg-2);
-    color: var(--fg-1);
-  }
-  .btn:hover {
-    background: var(--bg-3);
-    color: var(--fg-0);
-  }
-  .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-fg);
-    font-weight: 600;
-  }
-  .btn.primary:hover {
-    filter: brightness(1.08);
-  }
-  .btn.danger {
-    color: var(--err);
-  }
-  .btn.danger:hover {
-    border-color: var(--err);
   }
 </style>

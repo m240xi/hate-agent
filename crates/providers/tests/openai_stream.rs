@@ -28,9 +28,7 @@ fn req() -> ChatRequest {
     ChatRequest {
         model: "test-model".to_string(),
         system: Some("sys".to_string()),
-        messages: vec![Message::User {
-            content: "hi".to_string(),
-        }],
+        messages: vec![Message::user("hi".to_string())],
         tools: Vec::new(),
         max_output_tokens: 128,
         temperature: None,

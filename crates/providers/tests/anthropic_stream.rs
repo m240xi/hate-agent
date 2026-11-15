@@ -24,9 +24,7 @@ fn req() -> ChatRequest {
         model: "claude-test".to_string(),
         system: Some("sys".to_string()),
         messages: vec![
-            Message::User {
-                content: "hi".to_string(),
-            },
+            Message::user("hi".to_string()),
             Message::Assistant {
                 content: "hello".to_string(),
                 tool_calls: vec![],
@@ -36,9 +34,7 @@ fn req() -> ChatRequest {
                 name: "read".to_string(),
                 content: "file body".to_string(),
             },
-            Message::User {
-                content: "next".to_string(),
-            },
+            Message::user("next".to_string()),
         ],
         tools: Vec::new(),
         max_output_tokens: 128,

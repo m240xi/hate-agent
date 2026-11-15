@@ -135,10 +135,28 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
                     }));
                 }
             }
-            Message::User { content } => {
+            Message::User { content, images } => {
                 flush_results(&mut out, &mut pending_results);
-                if !content.trim().is_empty() {
-                    out.push(json!({"role": "user", "content": content}));
+                if images.is_empty() {
+                    if !content.trim().is_empty() {
+                        out.push(json!({"role": "user", "content": content}));
+                    }
+                } else {
+                    let mut blocks: Vec<Value> = Vec::new();
+                    if !content.trim().is_empty() {
+                        blocks.push(json!({"type": "text", "text": content}));
+                    }
+                    for img in images {
+                        blocks.push(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img.mime,
+                                "data": img.data,
+                            }
+                        }));
+                    }
+                    out.push(json!({"role": "user", "content": blocks}));
                 }
             }
             Message::Assistant {
@@ -698,9 +716,7 @@ mod tests {
     fn breakpoints_cover_system_tools_and_last_message() {
         let r = req(
             vec![
-                Message::User {
-                    content: "hi".to_string(),
-                },
+                Message::user("hi".to_string()),
                 Message::Assistant {
                     content: String::new(),
                     tool_calls: vec![ToolCall {
@@ -743,13 +759,28 @@ mod tests {
     }
 
     #[test]
-    fn bare_user_string_becomes_cached_block() {
+    fn user_images_use_anthropic_image_blocks() {
         let r = req(
-            vec![Message::User {
-                content: "hello".to_string(),
-            }],
+            vec![Message::user_with_images(
+                "what is this",
+                vec![hate_core::ImagePart {
+                    mime: "image/png".into(),
+                    data: "YWJj".into(),
+                }],
+            )],
             vec![],
         );
+        let wire = wire_messages(&r);
+        let content = wire[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "YWJj");
+    }
+
+    #[test]
+    fn bare_user_string_becomes_cached_block() {
+        let r = req(vec![Message::user("hello".to_string())], vec![]);
         let msgs = wire_messages(&r);
         assert!(msgs[0]["content"].is_array());
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
@@ -760,9 +791,7 @@ mod tests {
     fn foreign_history_is_wire_safe() {
         let foreign = "functions.bash:0";
         let messages = vec![
-            Message::User {
-                content: "run it".to_string(),
-            },
+            Message::user("run it".to_string()),
             Message::Assistant {
                 content: String::new(),
                 tool_calls: vec![ToolCall {
@@ -780,12 +809,8 @@ mod tests {
                 content: "  ".to_string(),
                 tool_calls: Vec::new(),
             },
-            Message::User {
-                content: String::new(),
-            },
-            Message::User {
-                content: "next".to_string(),
-            },
+            Message::user(String::new()),
+            Message::user("next".to_string()),
         ];
 
         let msgs = wire_messages(&req(messages.clone(), vec![bash_spec()]));

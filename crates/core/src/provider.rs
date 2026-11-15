@@ -56,11 +56,20 @@ pub enum Delta {
     Done,
 }
 
+/// A base64 image the model can see. `data` excludes the `data:` prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagePart {
+    pub mime: String,
+    pub data: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     User {
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImagePart>,
     },
     Assistant {
         content: String,
@@ -72,6 +81,22 @@ pub enum Message {
         name: String,
         content: String,
     },
+}
+
+impl Message {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::User {
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImagePart>) -> Self {
+        Self::User {
+            content: content.into(),
+            images,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

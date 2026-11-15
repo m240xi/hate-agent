@@ -39,6 +39,11 @@ pub enum Event {
         preview: String,
         tokens: u32,
     },
+    Image {
+        /// A local path or an inline data URI supplied by the provider.
+        source: String,
+        call_id: Option<String>,
+    },
     ToolFinished {
         call_id: String,
         ok: bool,
@@ -77,6 +82,10 @@ pub enum Event {
     },
     AwaitingUser {
         prompt: String,
+    },
+    ContextUsage {
+        used: u64,
+        size: u64,
     },
     Done {
         outcome: Outcome,

@@ -2,6 +2,7 @@
   import { session } from '../store.svelte';
   import ToolCard from './ToolCard.svelte';
   import Icon from './Icon.svelte';
+  import ImagePreview from './ImagePreview.svelte';
   import { renderMarkdown } from '../markdown';
   import { copyText, fmtTok, turnLabel, usageLabel, usageTitle } from '../format';
   import type { TranscriptBlock } from '../types';
@@ -14,6 +15,29 @@
 
   let thinkingOpen = $state(false);
   let copied = $state(false);
+  let editing = $state(false);
+  let editText = $state('');
+  let editBusy = $state(false);
+  let editArea = $state<HTMLTextAreaElement | null>(null);
+
+  function startEdit(): void {
+    editText = block.text ?? '';
+    editing = true;
+    setTimeout(() => {
+      editArea?.focus();
+      editArea?.setSelectionRange(editText.length, editText.length);
+    }, 0);
+  }
+
+  async function submitEdit(branch: boolean): Promise<void> {
+    if (editBusy) return;
+    const text = editText.trim();
+    if (!text) return;
+    editBusy = true;
+    editing = false;
+    await session.editUserMessage(block.id, text, branch);
+    editBusy = false;
+  }
 
   function flashCopied(): void {
     copied = true;
@@ -38,7 +62,49 @@
 {#if block.kind === 'user'}
   <div class="user-msg rise">
     <div class="user-tag">you{#if block.plan}<span class="plan-tag">plan</span>{/if}</div>
-    <div class="user-text">{block.text}</div>
+    {#if block.images && block.images.length > 0}
+      <div class="user-images">
+        {#each block.images as source (source)}
+          <ImagePreview {source} thumb />
+        {/each}
+      </div>
+    {/if}
+    {#if editing}
+      <div class="user-edit">
+        <textarea
+          class="input"
+          bind:this={editArea}
+          bind:value={editText}
+          rows="3"
+          onkeydown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              editing = false;
+            } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              void submitEdit(false);
+            }
+          }}
+        ></textarea>
+        <div class="edit-actions">
+          <span class="edit-hint mono">⏎⏎ edit · ⌘⏎ edit · esc cancel</span>
+          <span class="spacer"></span>
+          <button class="btn ghost sm" onclick={() => (editing = false)}>Cancel</button>
+          <button
+            class="btn sm"
+            onclick={() => void submitEdit(true)}
+            title="Keep this conversation and continue the edit in a new branch"
+          >
+            Branch
+          </button>
+          <button class="btn primary sm" onclick={() => void submitEdit(false)}>
+            Edit &amp; resend
+          </button>
+        </div>
+      </div>
+    {:else}
+      <div class="user-text">{block.text}</div>
+    {/if}
     {#if block.pins && block.pins.length > 0}
       <ul class="user-pins" aria-label="Attached files">
         {#each block.pins as p (p.path)}
@@ -49,11 +115,19 @@
         {/each}
       </ul>
     {/if}
-    {#if block.turn}
+    <div class="user-foot">
+      {#if block.turn}
       <div class="usage mono" title={`whole turn\n${usageTitle(block.turn.usage)}`}>
         {turnLabel(block.turn)}
       </div>
-    {/if}
+      {/if}
+      {#if !editing}
+        <button class="edit-btn" onclick={startEdit} title="Edit and resend from here">
+          <Icon name="edit" size={10} />
+          edit
+        </button>
+      {/if}
+    </div>
   </div>
 {:else if block.kind === 'text'}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -133,6 +207,54 @@
     white-space: pre-wrap;
     word-break: break-word;
     color: var(--fg-0);
+  }
+  .user-images {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 6px;
+    margin: 4px 0;
+  }
+  .user-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .edit-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--fg-3);
+    opacity: 0;
+    transition: opacity var(--motion);
+  }
+  .user-msg:hover .edit-btn,
+  .edit-btn:focus-visible {
+    opacity: 1;
+  }
+  .edit-btn:hover {
+    color: var(--fg-1);
+  }
+  .user-edit {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .user-edit textarea {
+    width: 100%;
+    resize: vertical;
+    min-height: 62px;
+    line-height: 1.55;
+    font-size: 13px;
+  }
+  .edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .edit-hint {
+    font-size: 9.5px;
+    color: var(--fg-3);
   }
   .user-pins {
     list-style: none;

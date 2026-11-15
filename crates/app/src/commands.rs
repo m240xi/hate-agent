@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::antigravity;
 use crate::sessions_db::{SessionDb, SqliteJournal, StoredSession};
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -49,6 +50,18 @@ struct SessionSlot {
     model: Option<String>,
     thinking: Option<ThinkingLevel>,
     context_window: u64,
+    acp: bool,
+}
+
+fn provider_entry(
+    ctx: &AuthContext,
+    name: Option<&str>,
+) -> Option<(String, hate_auth::ProviderConfig)> {
+    let mut config = ctx.config.clone();
+    config.ensure_default_provider();
+    config
+        .resolve_provider(name)
+        .map(|(n, p)| (n.to_string(), p.clone()))
 }
 
 fn resolve_target(
@@ -90,6 +103,12 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         .clone()
         .or_else(|| guard.restore.as_ref().map(|r| r.provider.clone()))
         .filter(|p| !p.is_empty());
+    if let Some((name, pconf)) = provider_entry(&ctx, provider_override.as_deref())
+        && pconf.kind == antigravity::KIND
+    {
+        let handle = spawn_antigravity(&mut guard, app, &ctx, name, pconf.model)?;
+        return Ok(forward_events(&mut guard, app, handle, true));
+    }
     let (name, configured_model, provider) = resolve_target(&ctx, provider_override.as_deref())?;
 
     let (model, thinking) = match guard.restore.as_ref() {
@@ -155,7 +174,15 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         permissions: std::sync::Arc::new(PermissionHub::default()),
         context_window: guard.context_window,
     });
+    Ok(forward_events(&mut guard, app, handle, false))
+}
 
+fn forward_events(
+    guard: &mut SessionSlot,
+    app: &AppHandle,
+    handle: SessionHandle,
+    acp: bool,
+) -> SessionHandle {
     let mut rx = handle.subscribe();
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -163,9 +190,57 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
             let _ = app2.emit("core-event", &ev);
         }
     });
-
     guard.handle = Some(handle.clone());
-    Ok(handle)
+    guard.acp = acp;
+    handle
+}
+
+fn spawn_antigravity(
+    guard: &mut SessionSlot,
+    app: &AppHandle,
+    ctx: &AuthContext,
+    name: String,
+    configured_model: String,
+) -> Result<SessionHandle, String> {
+    let model = guard
+        .model
+        .clone()
+        .or_else(|| {
+            guard
+                .restore
+                .as_ref()
+                .filter(|r| r.provider == name)
+                .map(|r| r.model.clone())
+        })
+        .unwrap_or(configured_model);
+    let cwd = if guard.mode == "code" {
+        guard
+            .workspace
+            .clone()
+            .or_else(|| ctx.config.workspace_path.clone())
+            .map_or_else(hate_acp::runtime::scratch_dir, std::path::PathBuf::from)
+    } else {
+        hate_acp::runtime::scratch_dir()
+    };
+    let persist = match guard.key.clone() {
+        Some(key) => Some(PersistCtx {
+            key,
+            mode: guard.mode.clone(),
+            workspace: guard.workspace.clone(),
+            journal: std::sync::Arc::new(SqliteJournal::new()?),
+            restore: guard.restore.take(),
+        }),
+        None => None,
+    };
+    let mcp = hate_acp::mcp_servers(&app.state::<McpState>().hub.configs());
+    Ok(hate_acp::spawn_acp_session(hate_acp::AcpSessionConfig {
+        installed: hate_acp::runtime::installed(),
+        cwd,
+        model,
+        provider_name: name,
+        mcp_servers: mcp,
+        persist,
+    }))
 }
 
 pub struct McpState {
@@ -218,6 +293,7 @@ pub async fn session_send(
     app: AppHandle,
     text: String,
     pins: Option<Vec<PinRef>>,
+    images: Option<Vec<ImageAttachment>>,
 ) -> Result<(), String> {
     let handle = ensure_session(&state, &app)?;
     let wire = match pins.as_deref() {
@@ -227,9 +303,28 @@ pub async fn session_send(
         }
         _ => text,
     };
+    let parts = prepare_images(images.unwrap_or_default())?;
     handle
-        .command(Command::UserMessage(wire))
+        .command(Command::user_with_images(wire, parts))
         .map_err(|e| e.to_string())
+}
+
+/// An image the user attached in the composer.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ImageAttachment {
+    pub mime: String,
+    pub data: String,
+}
+
+const MAX_ATTACHMENTS: usize = 4;
+
+fn prepare_images(list: Vec<ImageAttachment>) -> Result<Vec<hate_core::ImagePart>, String> {
+    if list.len() > MAX_ATTACHMENTS {
+        return Err(format!("attach at most {MAX_ATTACHMENTS} images"));
+    }
+    list.iter()
+        .map(|a| crate::images::attachment(&a.mime, &a.data))
+        .collect()
 }
 
 #[tauri::command]
@@ -361,6 +456,32 @@ pub fn session_set_provider(
     model: Option<String>,
 ) -> Result<(), String> {
     let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let (target, target_conf) = provider_entry(&ctx, Some(&provider))
+        .ok_or_else(|| format!("unknown provider {provider:?}"))?;
+    {
+        let mut slot = state
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        if target_conf.kind == antigravity::KIND || slot.acp {
+            if slot.handle.as_ref().is_some_and(|h| h.snapshot().running) {
+                return Err("wait for the current reply to finish before switching".to_string());
+            }
+            slot.provider = Some(target.clone());
+            slot.model = Some(model.unwrap_or(target_conf.model));
+            if slot.handle.take().is_some()
+                && let Some(key) = slot.key.clone()
+            {
+                use hate_core::SessionJournal as _;
+                slot.restore = SqliteJournal::new()?.load(&key);
+            }
+            slot.acp = false;
+            drop(slot);
+            let mut config = ctx.config.clone();
+            config.default_provider = Some(target);
+            return config.save().map_err(|e| e.to_string());
+        }
+    }
     let (name, configured_model, adapter) = resolve_target(&ctx, Some(&provider))?;
     let model = model.unwrap_or(configured_model);
     let mut slot = state
@@ -517,7 +638,15 @@ pub fn providers_list() -> Result<Vec<ProviderInfo>, String> {
     let default = config.default_provider.clone();
     let mut out = Vec::new();
     for (name, p) in &config.providers {
-        let status = ctx.status(name).map_err(|e| e.to_string())?;
+        let mut status = ctx.status(name).map_err(|e| e.to_string())?;
+        if p.kind == antigravity::KIND {
+            status.kind = if antigravity::load_cache().signed_in {
+                "oauth"
+            } else {
+                "none"
+            };
+            status.expires_at = None;
+        }
         out.push(ProviderInfo {
             name: name.clone(),
             kind: p.kind.clone(),
@@ -551,26 +680,70 @@ pub struct ProviderModel {
 #[specta::specta]
 pub async fn models_list(provider: Option<String>) -> Result<Vec<ProviderModel>, String> {
     let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    if provider_entry(&ctx, provider.as_deref()).is_some_and(|(_, p)| p.kind == antigravity::KIND) {
+        return Ok(antigravity::models()
+            .into_iter()
+            .map(|m| ProviderModel {
+                id: m.value,
+                name: Some(m.name),
+                context_tokens: None,
+                price_in_mtok: None,
+                price_out_mtok: None,
+                price_cache_mtok: None,
+                reasoning_efforts: Vec::new(),
+                default_effort: None,
+                supports_tools: Some(true),
+                supports_vision: None,
+            })
+            .collect());
+    }
     let (_name, _model, provider) = resolve_target(&ctx, provider.as_deref())?;
     let models = provider.list_models().await.map_err(|e| e.to_string())?;
-    Ok(models
-        .into_iter()
-        .map(|m| {
-            let meta = m.meta.unwrap_or_default();
-            ProviderModel {
-                id: m.id,
-                name: m.name,
-                context_tokens: meta.context_tokens,
-                price_in_mtok: meta.price_in_mtok,
-                price_out_mtok: meta.price_out_mtok,
-                price_cache_mtok: meta.price_cache_mtok,
-                reasoning_efforts: meta.reasoning_efforts,
-                default_effort: meta.default_effort,
-                supports_tools: meta.supports_tools,
-                supports_vision: meta.supports_vision,
-            }
-        })
-        .collect())
+    Ok(models.into_iter().map(provider_model).collect())
+}
+
+fn provider_model(m: hate_core::ModelInfo) -> ProviderModel {
+    let meta = m.meta.unwrap_or_default();
+    ProviderModel {
+        id: m.id,
+        name: m.name,
+        context_tokens: meta.context_tokens,
+        price_in_mtok: meta.price_in_mtok,
+        price_out_mtok: meta.price_out_mtok,
+        price_cache_mtok: meta.price_cache_mtok,
+        reasoning_efforts: meta.reasoning_efforts,
+        default_effort: meta.default_effort,
+        supports_tools: meta.supports_tools,
+        supports_vision: meta.supports_vision,
+    }
+}
+
+/// List a provider's models before it is added to the config.
+///
+/// Lets the add-provider sheet verify a key and offer a real model list in one
+/// step, instead of making the user add the provider first and then hunt for it
+/// in the list above.
+#[tauri::command]
+#[specta::specta]
+pub async fn provider_preview_models(
+    kind: String,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<Vec<ProviderModel>, String> {
+    let key = api_key.unwrap_or_default();
+    let trimmed = key.trim();
+    let credential: hate_providers::SharedCredential = if trimmed.is_empty() {
+        std::sync::Arc::new(hate_auth::ApiKeySource::new("unused"))
+    } else {
+        std::sync::Arc::new(hate_auth::ApiKeySource::new(trimmed))
+    };
+    let provider = build(ProviderSpec {
+        kind: ProviderKind::parse(&kind),
+        base_url: base_url.trim().trim_end_matches('/').to_string(),
+        credential,
+    });
+    let models = provider.list_models().await.map_err(|e| e.to_string())?;
+    Ok(models.into_iter().map(provider_model).collect())
 }
 
 #[tauri::command]
@@ -590,6 +763,8 @@ pub fn provider_set_model(provider: String, model: String) -> Result<(), String>
 pub struct ProviderPreset {
     pub name: String,
     pub label: String,
+    /// Grouping key for the "add a provider" UI: first-party, router, hosted, local.
+    pub group: String,
     pub kind: String,
     pub base_url: String,
     pub model: String,
@@ -599,125 +774,20 @@ pub struct ProviderPreset {
 }
 
 fn preset_catalog() -> Vec<ProviderPreset> {
-    let p = |name: &str,
-             label: &str,
-             kind: &str,
-             base_url: &str,
-             model: &str,
-             auth: &str,
-             env_hint: Option<&str>,
-             key_url: Option<&str>| ProviderPreset {
-        name: name.to_string(),
-        label: label.to_string(),
-        kind: kind.to_string(),
-        base_url: base_url.to_string(),
-        model: model.to_string(),
-        auth: auth.to_string(),
-        env_hint: env_hint.map(str::to_string),
-        key_url: key_url.map(str::to_string),
-    };
-    vec![
-        p(
-            "nous",
-            "Nous Portal",
-            "openai_compat",
-            hate_auth::DEFAULT_INFERENCE_URL,
-            "moonshotai/kimi-k3",
-            "oauth",
-            Some("NOUS_API_KEY"),
-            Some("https://portal.nousresearch.com"),
-        ),
-        p(
-            "claude",
-            "Claude",
-            "anthropic",
-            "https://api.anthropic.com",
-            "claude-sonnet-4-5",
-            "oauth",
-            Some("ANTHROPIC_API_KEY"),
-            Some("https://console.anthropic.com/settings/keys"),
-        ),
-        p(
-            "openai",
-            "OpenAI",
-            "openai_compat",
-            "https://api.openai.com/v1",
-            "gpt-5",
-            "api_key",
-            Some("OPENAI_API_KEY"),
-            Some("https://platform.openai.com/api-keys"),
-        ),
-        p(
-            "openrouter",
-            "OpenRouter",
-            "openai_compat",
-            "https://openrouter.ai/api/v1",
-            "anthropic/claude-sonnet-4.5",
-            "api_key",
-            Some("OPENROUTER_API_KEY"),
-            Some("https://openrouter.ai/keys"),
-        ),
-        p(
-            "deepseek",
-            "DeepSeek",
-            "openai_compat",
-            "https://api.deepseek.com/v1",
-            "deepseek-chat",
-            "api_key",
-            Some("DEEPSEEK_API_KEY"),
-            Some("https://platform.deepseek.com/api_keys"),
-        ),
-        p(
-            "xai",
-            "xAI",
-            "openai_compat",
-            "https://api.x.ai/v1",
-            "grok-4",
-            "api_key",
-            Some("XAI_API_KEY"),
-            Some("https://console.x.ai"),
-        ),
-        p(
-            "gemini",
-            "Gemini",
-            "openai_compat",
-            "https://generativelanguage.googleapis.com/v1beta/openai/",
-            "gemini-2.5-pro",
-            "api_key",
-            Some("GEMINI_API_KEY"),
-            Some("https://aistudio.google.com/apikey"),
-        ),
-        p(
-            "groq",
-            "Groq",
-            "openai_compat",
-            "https://api.groq.com/openai/v1",
-            "llama-3.3-70b-versatile",
-            "api_key",
-            Some("GROQ_API_KEY"),
-            Some("https://console.groq.com/keys"),
-        ),
-        p(
-            "mistral",
-            "Mistral",
-            "openai_compat",
-            "https://api.mistral.ai/v1",
-            "mistral-large-latest",
-            "api_key",
-            Some("MISTRAL_API_KEY"),
-            Some("https://console.mistral.ai/api-keys"),
-        ),
-        p(
-            "ollama",
-            "Ollama",
-            "openai_compat",
-            "http://localhost:11434/v1",
-            "llama3.1",
-            "none",
-            None,
-            None,
-        ),
-    ]
+    hate_auth::presets::PRESETS
+        .iter()
+        .map(|p| ProviderPreset {
+            name: p.name.to_string(),
+            label: p.label.to_string(),
+            group: p.group.to_string(),
+            kind: p.kind.to_string(),
+            base_url: p.base_url.to_string(),
+            model: p.model.to_string(),
+            auth: p.auth.to_string(),
+            env_hint: p.env.map(str::to_string),
+            key_url: p.keys.map(str::to_string),
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -735,7 +805,11 @@ pub fn provider_upsert(
     model: String,
 ) -> Result<(), String> {
     let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
-    let kind = ProviderKind::parse(&kind).name().to_string();
+    let kind = if kind == antigravity::KIND {
+        kind
+    } else {
+        ProviderKind::parse(&kind).name().to_string()
+    };
     ctx.config.providers.insert(
         name,
         hate_auth::ProviderConfig {
@@ -920,6 +994,309 @@ pub fn presence_set(state: State<'_, PresenceState>, enabled: bool) -> Result<()
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct Prefs {
+    pub budget_session_usd: Option<f64>,
+    pub budget_day_usd: Option<f64>,
+    pub sound_on_done: bool,
+    pub notify_on_done: bool,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn prefs_get() -> Result<Prefs, String> {
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    Ok(Prefs {
+        budget_session_usd: ctx.config.budget_session_usd,
+        budget_day_usd: ctx.config.budget_day_usd,
+        sound_on_done: ctx.config.sound_on_done,
+        notify_on_done: ctx.config.notify_on_done,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn prefs_set(
+    budget_session_usd: Option<f64>,
+    budget_day_usd: Option<f64>,
+    sound_on_done: bool,
+    notify_on_done: bool,
+) -> Result<(), String> {
+    let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let sane = |v: Option<f64>| v.filter(|n| n.is_finite() && *n > 0.0);
+    ctx.config.budget_session_usd = sane(budget_session_usd);
+    ctx.config.budget_day_usd = sane(budget_day_usd);
+    ctx.config.sound_on_done = sound_on_done;
+    ctx.config.notify_on_done = notify_on_done;
+    ctx.config.save().map_err(|e| e.to_string())
+}
+
+/// Wire shape for usage counters.
+///
+/// The bridge types forbid 64-bit integers, so these counters cross as
+/// `f64` — exact far past any real session.
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct UsageTotalsInfo {
+    pub requests: u32,
+    pub input_tokens: f64,
+    pub cached_input_tokens: f64,
+    pub output_tokens: f64,
+    pub thinking_tokens: f64,
+    pub latency_ms: f64,
+    pub cost_usd: f64,
+}
+
+#[expect(clippy::cast_precision_loss)]
+impl From<hate_ledger::UsageTotals> for UsageTotalsInfo {
+    fn from(t: hate_ledger::UsageTotals) -> Self {
+        Self {
+            requests: u32::try_from(t.requests).unwrap_or(u32::MAX),
+            input_tokens: t.input_tokens as f64,
+            cached_input_tokens: t.cached_input_tokens as f64,
+            output_tokens: t.output_tokens as f64,
+            thinking_tokens: t.thinking_tokens as f64,
+            latency_ms: t.latency_ms as f64,
+            cost_usd: t.cost_usd,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct ModelUsageInfo {
+    pub model: String,
+    pub provider: String,
+    pub totals: UsageTotalsInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct DayUsageInfo {
+    pub day: u32,
+    pub totals: UsageTotalsInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct SessionUsageInfo {
+    pub session_id: String,
+    pub title: String,
+    pub model: String,
+    pub started_at: u32,
+    pub totals: UsageTotalsInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct UsageOverview {
+    pub totals: UsageTotalsInfo,
+    pub by_model: Vec<ModelUsageInfo>,
+    pub by_day: Vec<DayUsageInfo>,
+    pub sessions: Vec<SessionUsageInfo>,
+    pub priced: bool,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn usage_overview(days: u32) -> Result<UsageOverview, String> {
+    let Some(ledger) = ledger_handle() else {
+        return Err("usage history unavailable".to_string());
+    };
+    let days = days.clamp(1, 365);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let since = now.saturating_sub(u64::from(days) * 86_400);
+    let report = ledger.usage_since(since, 12).map_err(|e| e.to_string())?;
+    let (totals, by_model, by_day, sessions) = (
+        report.totals,
+        report.by_model,
+        report.by_day,
+        report.sessions,
+    );
+
+    let titles: std::collections::HashMap<String, String> = db()?
+        .list(None)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| (m.id, m.title))
+        .collect();
+
+    Ok(UsageOverview {
+        totals: totals.into(),
+        by_model: by_model
+            .into_iter()
+            .map(|m| ModelUsageInfo {
+                model: m.model,
+                provider: m.provider,
+                totals: m.totals.into(),
+            })
+            .collect(),
+        by_day: by_day
+            .into_iter()
+            .map(|d| DayUsageInfo {
+                day: u32::try_from(d.day).unwrap_or(u32::MAX),
+                totals: d.totals.into(),
+            })
+            .collect(),
+        sessions: sessions
+            .into_iter()
+            .map(|s| SessionUsageInfo {
+                title: titles
+                    .get(&s.session_id)
+                    .filter(|t| !t.trim().is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| s.session_id.clone()),
+                session_id: s.session_id,
+                model: s.model,
+                started_at: u32::try_from(s.started_at).unwrap_or(u32::MAX),
+                totals: s.totals.into(),
+            })
+            .collect(),
+        priced: !hate_ledger::price_table_stale(),
+    })
+}
+
+/// Write an exported transcript wherever the user points the save dialog.
+#[tauri::command]
+#[specta::specta]
+pub async fn export_save(
+    app: AppHandle,
+    format: String,
+    content: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    const MAX_BYTES: usize = 24 * 1024 * 1024;
+    if content.len() > MAX_BYTES {
+        return Err("that transcript is too large to export".to_string());
+    }
+    let (ext, label, kind) = match format.as_str() {
+        "md" | "markdown" => ("md", "Markdown", "Markdown"),
+        "html" => ("html", "HTML", "HTML"),
+        "json" => ("json", "JSON", "JSON"),
+        other => return Err(format!("unknown export format {other:?}")),
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let name = format!("hate-agent-{stamp}.{ext}");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title(format!("Export transcript as {label}"))
+        .set_file_name(name)
+        .add_filter(kind, &[ext])
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(picked) = rx
+        .await
+        .map_err(|_| "Save dialog closed unexpectedly".to_string())?
+    else {
+        return Ok(None);
+    };
+    let dest = picked
+        .into_path()
+        .map_err(|_| "That location isn't supported".to_string())?;
+    let display = dest.display().to_string();
+    tauri::async_runtime::spawn_blocking(move || std::fs::write(&dest, content.as_bytes()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("Couldn't write the file: {e}"))?;
+    Ok(Some(display))
+}
+
+/// Drop everything from the `user_index`-th user message onwards.
+///
+/// The index counts user messages in the saved history, which is how the UI
+/// maps a transcript bubble back onto wire messages.
+fn truncate_to_user_index(
+    messages: &mut Vec<hate_core::provider::Message>,
+    user_index: u32,
+) -> Result<(), String> {
+    let mut seen = 0u32;
+    let mut cut = None;
+    for (i, m) in messages.iter().enumerate() {
+        if matches!(m, hate_core::provider::Message::User { .. }) {
+            if seen == user_index {
+                cut = Some(i);
+                break;
+            }
+            seen += 1;
+        }
+    }
+    let cut = cut.ok_or_else(|| "that message isn't in the saved history".to_string())?;
+    messages.truncate(cut);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct RewindResult {
+    pub session_id: String,
+    pub branched: bool,
+}
+
+/// Drop the conversation back to just before the Nth user message, optionally
+/// into a new session (a branch) so the original stays intact.
+#[tauri::command]
+#[specta::specta]
+pub fn session_rewind_message(
+    state: State<'_, Sessions>,
+    user_index: u32,
+    branch: bool,
+    title: Option<String>,
+) -> Result<RewindResult, String> {
+    use hate_core::SessionJournal as _;
+
+    ensure_idle(&state)?;
+
+    let mut guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    let key = guard
+        .key
+        .clone()
+        .ok_or_else(|| "no session is open".to_string())?;
+    let journal = SqliteJournal::new()?;
+    let mut persisted = journal
+        .load(&key)
+        .ok_or_else(|| "this session has no saved history yet".to_string())?;
+
+    truncate_to_user_index(&mut persisted.messages, user_index)?;
+    persisted.turn = u32::try_from(
+        persisted
+            .messages
+            .iter()
+            .filter(|m| matches!(m, hate_core::provider::Message::User { .. }))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+
+    if branch {
+        let new_key = uuid::Uuid::new_v4().to_string();
+        db()?.create(&new_key, &persisted.mode)?;
+        persisted.key.clone_from(&new_key);
+        persisted.title = title.unwrap_or_else(|| "branch".to_string());
+        persisted.cost_usd = 0.0;
+        persisted.usage = hate_core::TokenUsage::default();
+        journal.save(&persisted);
+        guard.key = Some(new_key.clone());
+        guard.restore = Some(persisted);
+        guard.handle = None;
+        Ok(RewindResult {
+            session_id: new_key,
+            branched: true,
+        })
+    } else {
+        journal.save(&persisted);
+        guard.restore = Some(persisted);
+        guard.handle = None;
+        Ok(RewindResult {
+            session_id: key,
+            branched: false,
+        })
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn workspace_get() -> Result<Option<String>, String> {
@@ -1003,6 +1380,7 @@ fn ensure_idle(state: &Sessions) -> Result<(), String> {
 
 fn prime_slot(guard: &mut SessionSlot, stored: Option<StoredSession>) {
     guard.handle = None;
+    guard.acp = false;
     guard.restore = None;
     guard.model = None;
     guard.thinking = None;
@@ -1104,6 +1482,19 @@ pub fn session_delete(state: State<'_, Sessions>, id: String) -> Result<(), Stri
         prime_slot(&mut guard, None);
     }
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn session_rename(id: String, title: String) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("a session title can't be empty".to_string());
+    }
+    if title.chars().count() > 200 {
+        return Err("session titles are limited to 200 characters".to_string());
+    }
+    db()?.rename(&id, title)
 }
 
 #[tauri::command]
@@ -1262,6 +1653,96 @@ pub fn workspace_read(
     let root = workspace_root(&state)?;
     hate_core::view::read_view(&root, &path, offset.unwrap_or(1), limit.unwrap_or(0))
         .map(FileViewOut::from)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn image_read(state: State<'_, Sessions>, path: String) -> Result<String, String> {
+    let roots = image_roots(&state);
+    tauri::async_runtime::spawn_blocking(move || crate::images::read_image(&path, &roots))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Ask the user where to keep a generated image, then write it there.
+#[tauri::command]
+#[specta::specta]
+pub async fn image_save(
+    app: AppHandle,
+    state: State<'_, Sessions>,
+    source: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let roots = image_roots(&state);
+    let load_source = source.clone();
+    let image =
+        tauri::async_runtime::spawn_blocking(move || crate::images::load(&load_source, &roots))
+            .await
+            .map_err(|e| e.to_string())??;
+    let name = crate::images::default_name(&source, image.extension());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Save image")
+        .set_file_name(name)
+        .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"])
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(picked) = rx
+        .await
+        .map_err(|_| "Save dialog closed unexpectedly".to_string())?
+    else {
+        return Ok(None);
+    };
+    let dest = picked
+        .into_path()
+        .map_err(|_| "That location isn't supported".to_string())?;
+    let display = dest.display().to_string();
+    tauri::async_runtime::spawn_blocking(move || crate::images::write_to(&image, &dest))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(Some(display))
+}
+
+/// Reveal an existing generated image in the OS file manager.
+#[tauri::command]
+#[specta::specta]
+pub fn image_reveal(state: State<'_, Sessions>, path: String) -> Result<(), String> {
+    let roots = image_roots(&state);
+    let file = crate::images::locate(&path, &roots)?;
+    let dir = file
+        .parent()
+        .ok_or("Image has no parent folder")?
+        .to_path_buf();
+
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", file.display()));
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(&file);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(&dir);
+        c
+    };
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Couldn't open the file manager: {e}"))
+}
+
+fn image_roots(state: &Sessions) -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(root) = workspace_root(state) {
+        roots.push(root);
+    }
+    roots.push(hate_acp::runtime::agent_home());
+    roots.push(hate_acp::runtime::scratch_dir());
+    roots
 }
 
 #[tauri::command]
@@ -1569,4 +2050,123 @@ pub async fn update_install(app: AppHandle, state: State<'_, UpdateState>) -> Re
         .await
         .map_err(|e| e.to_string())?;
     app.restart();
+}
+
+#[cfg(test)]
+mod rewind_tests {
+    use hate_core::provider::Message;
+
+    use super::truncate_to_user_index;
+
+    fn convo() -> Vec<Message> {
+        vec![
+            Message::user("first"),
+            Message::Assistant {
+                content: "a1".into(),
+                tool_calls: Vec::new(),
+            },
+            Message::user("second"),
+            Message::Assistant {
+                content: "a2".into(),
+                tool_calls: Vec::new(),
+            },
+            Message::user("third"),
+        ]
+    }
+
+    #[test]
+    fn keeps_everything_before_the_chosen_message() {
+        let mut msgs = convo();
+        truncate_to_user_index(&mut msgs, 1).expect("rewind");
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(&msgs[0], Message::User { content, .. } if content == "first"));
+    }
+
+    #[test]
+    fn drops_the_target_message_too() {
+        let mut msgs = convo();
+        truncate_to_user_index(&mut msgs, 2).expect("rewind");
+        assert_eq!(msgs.len(), 4);
+    }
+
+    #[test]
+    fn rejects_an_index_past_the_end() {
+        let mut msgs = convo();
+        assert!(truncate_to_user_index(&mut msgs, 9).is_err());
+        assert_eq!(msgs.len(), 5, "a failed rewind must not mutate");
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::preset_catalog;
+
+    const PRESETS: &[hate_auth::presets::Preset] = hate_auth::presets::PRESETS;
+
+    #[test]
+    fn presets_are_unique_and_well_formed() {
+        assert!(PRESETS.len() >= 25, "catalog shrank to {}", PRESETS.len());
+
+        let mut names: Vec<&str> = PRESETS.iter().map(|p| p.name).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "duplicate provider name in catalog");
+
+        for p in PRESETS {
+            assert!(!p.label.trim().is_empty(), "{} has no label", p.name);
+            assert!(
+                matches!(p.group, "first-party" | "router" | "hosted" | "local"),
+                "{} is in unknown group {}",
+                p.name,
+                p.group
+            );
+            if p.auth == "agent" {
+                continue; // the ACP agent configures itself
+            }
+            assert!(
+                p.base_url.starts_with("http"),
+                "{} has a bad base URL",
+                p.name
+            );
+            assert!(
+                !p.base_url.ends_with('/'),
+                "{} base URL must not end with a slash (the adapter appends the path)",
+                p.name
+            );
+            match p.auth {
+                "api_key" => {
+                    assert!(
+                        !p.model.trim().is_empty(),
+                        "{} has no default model",
+                        p.name
+                    );
+                    assert!(p.keys.is_some(), "{} has no key page", p.name);
+                    assert_eq!(
+                        p.env,
+                        hate_auth::env_vars_for(p.name).first().copied(),
+                        "{} advertises an env hint the auth crate doesn't read",
+                        p.name
+                    );
+                }
+                "none" => assert_eq!(p.group, "local", "{} should be a local provider", p.name),
+                "oauth" => {}
+                other => panic!("{} has unknown auth kind {other}", p.name),
+            }
+        }
+    }
+
+    #[test]
+    fn every_preset_reaches_the_frontend_catalog() {
+        let presets = preset_catalog();
+        assert_eq!(presets.len(), PRESETS.len());
+        assert!(
+            presets
+                .iter()
+                .all(|p| !p.env_hint.as_deref().unwrap_or("").is_empty()
+                    || p.auth == "none"
+                    || p.auth == "agent"),
+            "a keyed preset is missing its env hint"
+        );
+    }
 }

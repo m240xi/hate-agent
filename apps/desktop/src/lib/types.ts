@@ -36,6 +36,7 @@ export type FailureReason =
 export type SessionEvent =
   | { type: 'delta'; text: string }
   | { type: 'thinking_delta'; text: string }
+  | { type: 'image'; source: string; call_id: string | null }
   | { type: 'tool_started'; call: ToolCall }
   | { type: 'tool_output'; call_id: string; preview: string; tokens: number }
   | { type: 'tool_finished'; call_id: string; ok: boolean; full_tokens: number; sent_tokens: number }
@@ -48,11 +49,13 @@ export type SessionEvent =
   | { type: 'failed'; reason: FailureReason }
   | { type: 'error'; error: { kind?: string; message?: string } }
   | { type: 'awaiting_user'; prompt: string }
+  | { type: 'context_usage'; used: number; size: number }
   | { type: 'done'; outcome: string };
 
 export interface TranscriptBlock {
   id: number;
-  kind: 'user' | 'text' | 'thinking' | 'tool' | 'error';
+  kind: 'user' | 'text' | 'thinking' | 'tool' | 'image' | 'error';
+  images?: string[];
   text?: string;
   streaming?: boolean;
   call?: ToolCall;

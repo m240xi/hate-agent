@@ -7,6 +7,7 @@
   import SessionBrowser from './SessionBrowser.svelte';
   import Pane from './Pane.svelte';
   import Inspector from './Inspector.svelte';
+  import TurnStatus from './TurnStatus.svelte';
 </script>
 
 <div class="chat">
@@ -25,6 +26,7 @@
       <Transcript />
     {/if}
     {#if session.pickerMode !== 'chat' && !session.sessionBusy}
+      <TurnStatus />
       <PermissionBar />
       <Composer />
     {/if}

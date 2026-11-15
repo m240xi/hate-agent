@@ -63,7 +63,10 @@ pub struct SessionConfig {
 }
 
 pub enum Command {
-    UserMessage(String),
+    UserMessage {
+        text: String,
+        images: Vec<crate::ImagePart>,
+    },
     Cancel,
     AnswerPrompt(String),
     RespondPermission {
@@ -81,6 +84,22 @@ pub enum Command {
         model: Option<String>,
     },
     Compact,
+}
+
+impl Command {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self::UserMessage {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+
+    pub fn user_with_images(text: impl Into<String>, images: Vec<crate::ImagePart>) -> Self {
+        Self::UserMessage {
+            text: text.into(),
+            images,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +145,36 @@ impl SessionHandle {
     pub fn session_id(&self) -> SessionId {
         self.session_id
     }
+
+    pub fn external() -> ExternalSession {
+        let (tx, rx) = mpsc::channel::<Command>(64);
+        let (events, _) = broadcast::channel::<Event>(EVENT_BUFFER);
+        let snapshot = Arc::new(std::sync::RwLock::new(SessionSnapshot {
+            state: "idle".to_string(),
+            turn: 0,
+            usage: TokenUsage::default(),
+            running: false,
+        }));
+        let session_id = SessionId::new();
+        ExternalSession {
+            handle: SessionHandle {
+                tx,
+                events: events.clone(),
+                snapshot: snapshot.clone(),
+                session_id,
+            },
+            commands: rx,
+            events,
+            snapshot,
+        }
+    }
+}
+
+pub struct ExternalSession {
+    pub handle: SessionHandle,
+    pub commands: mpsc::Receiver<Command>,
+    pub events: broadcast::Sender<Event>,
+    pub snapshot: Arc<std::sync::RwLock<SessionSnapshot>>,
 }
 
 enum TurnReport {
@@ -156,7 +205,7 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
         };
     let mut history = history;
     for m in &mut history {
-        if let Message::User { content } = m
+        if let Message::User { content, .. } = m
             && let Some(at) = content.find(LEGACY_PLAN_DIRECTIVE)
         {
             content.truncate(at);
@@ -270,7 +319,7 @@ impl Actor {
 
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
-            Command::UserMessage(text) => self.begin_turn(text),
+            Command::UserMessage { text, images } => self.begin_turn(text, images),
             Command::Cancel => {
                 if self.turn_done.is_some() {
                     debug!("cancelling in-flight turn");
@@ -380,7 +429,7 @@ impl Actor {
     }
 
     #[instrument(skip_all, fields(turn = self.turn.0 + 1))]
-    fn begin_turn(&mut self, text: String) {
+    fn begin_turn(&mut self, text: String, images: Vec<crate::ImagePart>) {
         if let Err(reason) = self.check_limits() {
             self.emit(Event::Failed { reason });
             return;
@@ -415,7 +464,7 @@ impl Actor {
         self.set_snapshot();
 
         let mut messages = self.history.clone();
-        messages.push(Message::User { content: text });
+        messages.push(Message::user_with_images(text, images));
 
         let (done_tx, done_rx) = mpsc::channel(1);
         self.turn_done = Some(done_rx);
@@ -502,10 +551,7 @@ impl Actor {
     }
 
     fn finish_turn(&mut self, rep: TurnReport) {
-        let user_msg = self
-            .pending_user
-            .take()
-            .map(|t| Message::User { content: t });
+        let user_msg = self.pending_user.take().map(Message::user);
 
         match rep {
             TurnReport::Completed {
@@ -568,7 +614,7 @@ impl Actor {
         };
         let mut probe = self.signals.clone();
         for m in self.history.iter().rev().take(6) {
-            if let Message::User { content } = m {
+            if let Message::User { content, .. } = m {
                 probe.extend(text_signals(content));
             }
         }
@@ -589,7 +635,7 @@ impl Actor {
             let req = ChatRequest {
                 model: model.clone(),
                 system: Some(skills::REFLECTION_SYSTEM.to_string()),
-                messages: vec![Message::User { content: digest }],
+                messages: vec![Message::user(digest)],
                 tools: Vec::new(),
                 max_output_tokens: 2000,
                 temperature: None,
@@ -679,7 +725,7 @@ impl Actor {
             .history
             .iter()
             .find_map(|m| match m {
-                Message::User { content } => {
+                Message::User { content, .. } => {
                     let line = content.lines().next().unwrap_or("").trim();
                     (!line.is_empty()).then(|| line.chars().take(80).collect::<String>())
                 }
@@ -699,6 +745,7 @@ impl Actor {
             turn: self.turn.0,
             usage,
             cost_usd: self.cost_usd,
+            external: None,
         });
     }
 
@@ -1243,7 +1290,7 @@ commands are allowed again]";
 
 fn strip_plan_directive(history: &mut [Message], directive: &str) {
     for m in history.iter_mut().rev() {
-        if let Message::User { content } = m
+        if let Message::User { content, .. } = m
             && let Some(task) = content.strip_suffix(directive)
         {
             let keep = task.trim_end().len();
@@ -1320,7 +1367,7 @@ fn prompt_bytes(system: &str, tools: &[crate::provider::ToolSpec], messages: &[M
     let msg_bytes: usize = messages
         .iter()
         .map(|m| match m {
-            Message::User { content } => content.len() + 8,
+            Message::User { content, .. } => content.len() + 8,
             Message::Assistant {
                 content,
                 tool_calls,
@@ -1344,7 +1391,7 @@ fn prompt_bytes(system: &str, tools: &[crate::provider::ToolSpec], messages: &[M
 
 fn push_message_text(m: &Message, out: &mut String) {
     match m {
-        Message::User { content } => {
+        Message::User { content, .. } => {
             out.push_str("\nuser\n");
             out.push_str(content);
         }
@@ -1432,7 +1479,7 @@ fn compact_core(convo: &mut Vec<Message>) -> bool {
     let note = compaction_note(&dropped, anchor > 0);
     let mut next = Vec::with_capacity(anchor + 1 + (n - tail));
     next.extend(convo[..anchor].iter().cloned());
-    next.push(Message::User { content: note });
+    next.push(Message::user(note));
     next.extend(convo[tail..].iter().cloned());
     *convo = next;
     true
@@ -1446,7 +1493,7 @@ fn compaction_note(dropped: &[Message], has_anchor: bool) -> String {
     );
     if !has_anchor
         && let Some(first) = dropped.iter().find_map(|m| match m {
-            Message::User { content } if !content.starts_with('[') => Some(content.as_str()),
+            Message::User { content, .. } if !content.starts_with('[') => Some(content.as_str()),
             _ => None,
         })
     {
@@ -1545,9 +1592,7 @@ mod tests {
     use crate::ToolName;
 
     fn user(text: &str) -> Message {
-        Message::User {
-            content: text.to_string(),
-        }
+        Message::user(text.to_string())
     }
 
     fn assistant(text: &str) -> Message {
@@ -1592,8 +1637,8 @@ mod tests {
             assistant("1. do it"),
         ];
         strip_plan_directive(&mut h, d);
-        assert!(matches!(&h[1], Message::User { content } if content == "rename the thing"));
-        assert!(matches!(&h[0], Message::User { content } if content == "older message"));
+        assert!(matches!(&h[1], Message::User { content, .. } if content == "rename the thing"));
+        assert!(matches!(&h[0], Message::User { content, .. } if content == "older message"));
         strip_plan_directive(&mut h, d);
         assert_eq!(h.len(), 3);
     }
@@ -1623,9 +1668,9 @@ mod tests {
         assert!(r.0 > r.1, "before={} after={}", r.0, r.1);
 
         assert_eq!(convo.len(), 1 + 1 + COMPACT_TAIL);
-        assert!(matches!(&convo[0], Message::User { content } if content.contains("THE TASK")));
+        assert!(matches!(&convo[0], Message::User { content, .. } if content.contains("THE TASK")));
         assert!(
-            matches!(&convo[1], Message::User { content } if content.contains("[Context compacted]"))
+            matches!(&convo[1], Message::User { content, .. } if content.contains("[Context compacted]"))
         );
         assert!(
             matches!(&convo[2], Message::User { .. })
@@ -1635,7 +1680,7 @@ mod tests {
             convo.last(),
             Some(Message::Assistant { content, .. }) if content == "final answer pending"
         ));
-        if let Message::User { content } = &convo[1] {
+        if let Message::User { content, .. } = &convo[1] {
             assert!(content.contains("earlier messages compacted"));
         }
     }
@@ -1648,7 +1693,7 @@ mod tests {
         assert!(before > after, "before={before} after={after}");
         assert!(convo.len() < n);
         assert!(
-            matches!(&convo[1], Message::User { content } if content.contains("[Context compacted]"))
+            matches!(&convo[1], Message::User { content, .. } if content.contains("[Context compacted]"))
         );
     }
 
@@ -1684,7 +1729,7 @@ mod tests {
         assert!(r.is_some());
         let note_idx = convo
             .iter()
-            .position(|m| matches!(m, Message::User { content } if content.contains("[Context compacted]")))
+            .position(|m| matches!(m, Message::User { content, .. } if content.contains("[Context compacted]")))
             .expect("note present");
         assert!(
             !matches!(convo[note_idx + 1], Message::Tool { .. }),

@@ -510,7 +510,7 @@ pub fn build_digest(messages: &[crate::provider::Message], signals: &[String]) -
     let mut tools: BTreeSet<String> = BTreeSet::new();
     for m in messages {
         match m {
-            crate::provider::Message::User { content } => {
+            crate::provider::Message::User { content, .. } => {
                 user_lines.push(truncate_chars(content, 400));
             }
             crate::provider::Message::Assistant { tool_calls, .. } => {

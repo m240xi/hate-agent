@@ -13,11 +13,11 @@
       <span class="plan-meta">{steps} step{steps === 1 ? '' : 's'} · nothing has been changed</span>
     </div>
     <div class="plan-actions">
-      <button class="btn primary" onclick={() => session.runPlan()}>Run plan</button>
-      <button class="btn" onclick={() => session.revisePlan()} title="Stay in plan mode and reply with changes">
+      <button class="btn primary sm" onclick={() => session.runPlan()}>Run plan</button>
+      <button class="btn sm" onclick={() => session.revisePlan()} title="Stay in plan mode and reply with changes">
         Revise
       </button>
-      <button class="btn danger" onclick={() => session.discardPlan()}>Discard</button>
+      <button class="btn danger sm" onclick={() => session.discardPlan()}>Discard</button>
     </div>
   </div>
 {/if}
@@ -62,25 +62,5 @@
     display: flex;
     gap: 6px;
     flex: none;
-  }
-  .btn {
-    padding: 3px 10px;
-    font-size: 11.5px;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    color: var(--fg-1);
-  }
-  .btn:hover {
-    color: var(--fg-0);
-    background: var(--bg-3);
-  }
-  .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-fg);
-  }
-  .btn.danger:hover {
-    color: var(--err);
-    border-color: var(--err);
   }
 </style>

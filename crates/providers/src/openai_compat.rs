@@ -86,7 +86,25 @@ fn wire_messages(req: &ChatRequest) -> Vec<Value> {
             continue;
         }
         out.push(match m {
-            Message::User { content } => json!({"role": "user", "content": content}),
+            Message::User { content, images } => {
+                if images.is_empty() {
+                    json!({"role": "user", "content": content})
+                } else {
+                    let mut parts: Vec<Value> = Vec::new();
+                    if !content.trim().is_empty() {
+                        parts.push(json!({"type": "text", "text": content}));
+                    }
+                    for img in images {
+                        parts.push(json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", img.mime, img.data)
+                            }
+                        }));
+                    }
+                    json!({"role": "user", "content": parts})
+                }
+            }
             Message::Assistant {
                 content,
                 tool_calls,
@@ -323,7 +341,7 @@ impl Provider for OpenAiCompatProvider {
             }
             for m in &req.messages {
                 match m {
-                    Message::User { content } | Message::Tool { content, .. } => {
+                    Message::User { content, .. } | Message::Tool { content, .. } => {
                         text.push_str(content);
                     }
                     Message::Assistant {
@@ -603,4 +621,33 @@ fn finish_tool_call(p: PendingToolCall) -> Result<ToolCall, serde_json::Error> {
         name: ToolName::new(p.name),
         args,
     })
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn user_images_use_openai_image_url_parts() {
+        let req = ChatRequest {
+            model: "gpt-test".into(),
+            system: None,
+            messages: vec![Message::user_with_images(
+                "what is this",
+                vec![hate_core::ImagePart {
+                    mime: "image/jpeg".into(),
+                    data: "ZGVm".into(),
+                }],
+            )],
+            tools: Vec::new(),
+            max_output_tokens: 64,
+            temperature: None,
+            thinking: ThinkingLevel::Off,
+        };
+        let wire = wire_messages(&req);
+        let parts = wire[0]["content"].as_array().expect("image content array");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,ZGVm");
+    }
 }

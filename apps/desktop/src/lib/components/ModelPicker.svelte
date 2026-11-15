@@ -31,6 +31,7 @@
 
   const PROVIDER_LABELS: Record<string, string> = {
     nous: 'Hermes',
+    antigravity: 'Antigravity',
     claude: 'Claude',
     anthropic: 'Claude',
     openai: 'OpenAI',

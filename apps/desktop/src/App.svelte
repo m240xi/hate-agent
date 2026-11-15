@@ -13,10 +13,15 @@
   import Landing from './lib/components/Landing.svelte';
   import ChatView from './lib/components/ChatView.svelte';
   import SettingsView from './lib/components/SettingsView.svelte';
+  import Notice from './lib/components/Notice.svelte';
   import ModeSwitch from './lib/components/ModeSwitch.svelte';
+  import StatusBar from './lib/components/StatusBar.svelte';
+  import TurnStatus from './lib/components/TurnStatus.svelte';
+  import CommandPalette from './lib/components/CommandPalette.svelte';
   import SessionBrowser from './lib/components/SessionBrowser.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { renderMarkdown } from './lib/markdown';
+  import { trapFocus } from './lib/focus';
 
   let inTauri = $state(false);
 
@@ -53,12 +58,39 @@
   }
 
   function onWindowKeydown(e: KeyboardEvent): void {
+    const mod = e.ctrlKey || e.metaKey;
+    const el = e.target instanceof Element ? e.target : null;
+    const typing = !!el?.closest('input, textarea, select, [contenteditable="true"]');
+
+    if (mod && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      session.paletteOpen = !session.paletteOpen;
+      return;
+    }
+    if (mod && e.key === ',') {
+      e.preventDefault();
+      session.setMode('settings');
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'n' && !e.shiftKey) {
+      e.preventDefault();
+      void session.newSession();
+      return;
+    }
+    if (e.key === '?' && !typing && !mod) {
+      e.preventDefault();
+      session.setMode('settings');
+      return;
+    }
     if (e.key !== 'Escape' || !session.viewer) return;
-    const el = e.target as HTMLElement | null;
-    if (el?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (typing) return;
     e.preventDefault();
     session.closeViewer();
   }
+
+  $effect(() => {
+    document.documentElement.dataset.density = session.density;
+  });
 
   $effect(() => {
     localStorage.setItem('hate:pane:left', String(session.leftWidth));
@@ -190,6 +222,7 @@
         aria-modal="true"
         aria-label="What's new"
         tabindex="-1"
+        use:trapFocus
         onclick={(e) => e.stopPropagation()}
         onkeydown={(e) => {
           if (e.key === 'Escape') session.dismissWhatsNew();
@@ -253,6 +286,7 @@
             {/if}
 
             {#if session.pickerMode !== 'code' && !session.sessionBusy}
+              <TurnStatus />
               <PermissionBar />
               <Composer />
             {/if}
@@ -272,6 +306,11 @@
       </div>
     {/key}
   </div>
+  <StatusBar />
+  {#if session.paletteOpen}
+    <CommandPalette onclose={() => (session.paletteOpen = false)} />
+  {/if}
+  <Notice />
 </div>
 
 <style>

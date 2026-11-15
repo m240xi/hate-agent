@@ -63,6 +63,48 @@
 
   const fmtTok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
 
+  const WRITE_TOOLS = new Set(['edit', 'write', 'apply_patch', 'multi_edit', 'str_replace']);
+  const isWriter = $derived(WRITE_TOOLS.has(block.call?.name ?? ''));
+
+  let diff = $state<{ unified: string; added: number; removed: number } | null>(null);
+  let diffError = $state<string | null>(null);
+  let diffFor = $state<string | null>(null);
+
+  $effect(() => {
+    const path = linkPath;
+    if (!block.expanded || !isWriter || !path || block.ok === false) return;
+    if (diffFor === path) return;
+    diffFor = path;
+    void import('../ipc')
+      .then((m) => m.workspaceDiff(path))
+      .then((d) => {
+        diff = d;
+      })
+      .catch((e: unknown) => {
+        diffError = e instanceof Error ? e.message : String(e);
+      });
+  });
+
+  const diffLines = $derived.by(() => {
+    if (!diff?.unified) return [];
+    return diff.unified
+      .split('\n')
+      .filter((l) => !l.startsWith('diff ') && !l.startsWith('index '))
+      .slice(0, 80)
+      .map((text) => ({
+        text,
+        kind: text.startsWith('@@')
+          ? ('meta' as const)
+          : text.startsWith('+++') || text.startsWith('---')
+            ? ('meta' as const)
+            : text.startsWith('+')
+              ? ('add' as const)
+              : text.startsWith('-')
+                ? ('del' as const)
+                : ('ctx' as const),
+      }));
+  });
+
   const savings = $derived(
     block.fullTokens !== undefined && block.sentTokens !== undefined
       ? `${fmtTok(block.fullTokens)} → ${fmtTok(block.sentTokens)}`
@@ -110,6 +152,26 @@
           request {usageLabel(block.usage)}
         </div>
       {/if}
+      {#if isWriter && diffLines.length > 0}
+        <div class="diff">
+          <div class="diff-head mono">
+            <span class="add">+{diff?.added ?? 0}</span>
+            <span class="del">-{diff?.removed ?? 0}</span>
+            <span class="spacer"></span>
+            <button
+              class="diff-open"
+              onclick={() => void session.openDiff(linkPath)}
+              title="Open the full diff"
+            >
+              full diff
+            </button>
+          </div>
+          <pre class="diff-body mono"
+            >{#each diffLines as l}<span class={l.kind}>{l.text}</span>{/each}</pre>
+        </div>
+      {:else if isWriter && diffError}
+        <p class="diff-note mono">{diffError}</p>
+      {/if}
       {#if block.preview}
         <pre class="preview mono">{block.preview}</pre>
       {:else}
@@ -141,6 +203,68 @@
   }
   .head:hover {
     background: var(--bg-2);
+  }
+  .diff {
+    margin: 0 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-0);
+  }
+  .diff-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    font-size: 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-1);
+  }
+  .diff-head .add {
+    color: var(--ok);
+  }
+  .diff-head .del {
+    color: var(--err);
+  }
+  .diff-head .spacer {
+    flex: 1 1 auto;
+  }
+  .diff-open {
+    font-size: 10px;
+    color: var(--fg-3);
+  }
+  .diff-open:hover {
+    color: var(--fg-0);
+    text-decoration: underline;
+  }
+  .diff-body {
+    margin: 0;
+    padding: 6px 8px;
+    max-height: 220px;
+    overflow: auto;
+    font-size: 10.5px;
+    line-height: 1.5;
+  }
+  .diff-body .add {
+    color: var(--ok);
+    display: block;
+  }
+  .diff-body .del {
+    color: var(--err);
+    display: block;
+  }
+  .diff-body .meta {
+    color: var(--info);
+    display: block;
+  }
+  .diff-body .ctx {
+    color: var(--fg-3);
+    display: block;
+  }
+  .diff-note {
+    margin: 0 0 8px;
+    font-size: 10px;
+    color: var(--fg-3);
   }
   .open-file {
     display: inline-flex;

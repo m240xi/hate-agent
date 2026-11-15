@@ -18,14 +18,14 @@ pub use checkpoint::{CheckpointBundle, restore_checkpoint, write_checkpoint};
 pub use event::{AgentError, Event};
 pub use index::{FileNode, NodeKind, SymKind, SymbolHit, WorkspaceIndex};
 pub use mcp::{MCP_PREFIX, McpConfigFile, McpHub, McpServerConfig, McpServerStatus};
-pub use persist::{PersistCtx, PersistedSession, SessionJournal, SessionMeta};
+pub use persist::{ExternalRef, PersistCtx, PersistedSession, SessionJournal, SessionMeta};
 pub use provider::{
-    BoxFuture, CacheMode, Capabilities, ChatRequest, CredentialSource, Delta, Message, ModelInfo,
-    ModelMeta, Provider, ProviderError, ThinkingLevel, ToolSpec,
+    BoxFuture, CacheMode, Capabilities, ChatRequest, CredentialSource, Delta, ImagePart, Message,
+    ModelInfo, ModelMeta, Provider, ProviderError, ThinkingLevel, ToolSpec,
 };
 pub use session::{
-    Command, Limits, PermissionHub, SessionConfig, SessionError, SessionHandle, SessionSnapshot,
-    spawn_session,
+    Command, ExternalSession, Limits, PermissionHub, SessionConfig, SessionError, SessionHandle,
+    SessionSnapshot, spawn_session,
 };
 pub use skills::{Skill, SkillStore};
 pub use state::SessionState;

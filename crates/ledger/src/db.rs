@@ -37,6 +37,61 @@ pub struct TaskRollup {
     pub cost_usd: Option<f64>,
 }
 
+/// Aggregated usage over a time window.
+#[derive(Debug, Clone, Default)]
+pub struct UsageTotals {
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub thinking_tokens: u64,
+    pub latency_ms: u64,
+    pub cost_usd: f64,
+}
+
+impl UsageTotals {
+    /// Share of input tokens that came from the prompt cache.
+    pub fn cache_ratio(&self) -> f64 {
+        if self.input_tokens == 0 {
+            0.0
+        } else {
+            self.cached_input_tokens as f64 / self.input_tokens as f64
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelUsage {
+    pub model: String,
+    pub provider: String,
+    pub totals: UsageTotals,
+}
+
+#[derive(Debug, Clone)]
+pub struct DayUsage {
+    /// Unix seconds at the start of the UTC day.
+    pub day: u64,
+    pub totals: UsageTotals,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionUsage {
+    pub session_id: String,
+    pub model: String,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
+    pub totals: UsageTotals,
+}
+
+/// One query's worth of usage history.
+#[derive(Debug, Clone)]
+pub struct UsageReport {
+    pub totals: UsageTotals,
+    pub by_model: Vec<ModelUsage>,
+    pub by_day: Vec<DayUsage>,
+    pub sessions: Vec<SessionUsage>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PriceEntry {
     pub model_match: &'static str,
@@ -292,6 +347,123 @@ impl Ledger {
             None => TaskRollup::default(),
         })
     }
+
+    /// Everything spent since `since` (unix seconds), with per-model and
+    /// per-day breakdowns plus the most recent sessions.
+    pub fn usage_since(
+        &self,
+        since: u64,
+        recent_sessions: u32,
+    ) -> Result<UsageReport, LedgerError> {
+        let conn = self.conn.lock().expect("ledger mutex poisoned");
+        let since = since.cast_signed();
+
+        let totals = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0), COALESCE(SUM(thinking_tokens), 0),
+                    COALESCE(SUM(latency_ms), 0), COALESCE(SUM(cost_usd), 0)
+             FROM requests WHERE created_at >= ?1",
+            params![since],
+            read_totals,
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT model, provider, COUNT(*), COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(cached_input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(thinking_tokens), 0), COALESCE(SUM(latency_ms), 0),
+                    COALESCE(SUM(cost_usd), 0)
+             FROM requests WHERE created_at >= ?1
+             GROUP BY model, provider
+             ORDER BY COALESCE(SUM(cost_usd), 0) DESC, COUNT(*) DESC",
+        )?;
+        let by_model = stmt
+            .query_map(params![since], |r| {
+                Ok(ModelUsage {
+                    model: r.get(0)?,
+                    provider: r.get(1)?,
+                    totals: UsageTotals {
+                        requests: r.get::<_, i64>(2)?.cast_unsigned(),
+                        input_tokens: r.get::<_, i64>(3)?.cast_unsigned(),
+                        cached_input_tokens: r.get::<_, i64>(4)?.cast_unsigned(),
+                        output_tokens: r.get::<_, i64>(5)?.cast_unsigned(),
+                        thinking_tokens: r.get::<_, i64>(6)?.cast_unsigned(),
+                        latency_ms: r.get::<_, i64>(7)?.cast_unsigned(),
+                        cost_usd: r.get::<_, f64>(8)?,
+                    },
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT (created_at / 86400) * 86400 AS day, COUNT(*),
+                    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0), COALESCE(SUM(thinking_tokens), 0),
+                    COALESCE(SUM(latency_ms), 0), COALESCE(SUM(cost_usd), 0)
+             FROM requests WHERE created_at >= ?1
+             GROUP BY day ORDER BY day ASC",
+        )?;
+        let by_day = stmt
+            .query_map(params![since], |r| {
+                Ok(DayUsage {
+                    day: r.get::<_, i64>(0)?.cast_unsigned(),
+                    totals: UsageTotals {
+                        requests: r.get::<_, i64>(1)?.cast_unsigned(),
+                        input_tokens: r.get::<_, i64>(2)?.cast_unsigned(),
+                        cached_input_tokens: r.get::<_, i64>(3)?.cast_unsigned(),
+                        output_tokens: r.get::<_, i64>(4)?.cast_unsigned(),
+                        thinking_tokens: r.get::<_, i64>(5)?.cast_unsigned(),
+                        latency_ms: r.get::<_, i64>(6)?.cast_unsigned(),
+                        cost_usd: r.get::<_, f64>(7)?,
+                    },
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT session_id, model, started_at, ended_at, input_tokens,
+                    cached_input_tokens, output_tokens, thinking_tokens, latency_ms,
+                    requests, COALESCE(cost_usd, 0)
+             FROM tasks ORDER BY started_at DESC LIMIT ?1",
+        )?;
+        let sessions = stmt
+            .query_map(params![i64::from(recent_sessions)], |r| {
+                Ok(SessionUsage {
+                    session_id: r.get(0)?,
+                    model: r.get(1)?,
+                    started_at: r.get::<_, i64>(2)?.cast_unsigned(),
+                    ended_at: r.get::<_, Option<i64>>(3)?.map(i64::cast_unsigned),
+                    totals: UsageTotals {
+                        input_tokens: r.get::<_, i64>(4)?.cast_unsigned(),
+                        cached_input_tokens: r.get::<_, i64>(5)?.cast_unsigned(),
+                        output_tokens: r.get::<_, i64>(6)?.cast_unsigned(),
+                        thinking_tokens: r.get::<_, i64>(7)?.cast_unsigned(),
+                        latency_ms: r.get::<_, i64>(8)?.cast_unsigned(),
+                        requests: r.get::<_, i64>(9)?.cast_unsigned(),
+                        cost_usd: r.get::<_, f64>(10)?,
+                    },
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(UsageReport {
+            totals,
+            by_model,
+            by_day,
+            sessions,
+        })
+    }
+}
+
+fn read_totals(r: &rusqlite::Row<'_>) -> Result<UsageTotals, rusqlite::Error> {
+    Ok(UsageTotals {
+        requests: r.get::<_, i64>(0)?.cast_unsigned(),
+        input_tokens: r.get::<_, i64>(1)?.cast_unsigned(),
+        cached_input_tokens: r.get::<_, i64>(2)?.cast_unsigned(),
+        output_tokens: r.get::<_, i64>(3)?.cast_unsigned(),
+        thinking_tokens: r.get::<_, i64>(4)?.cast_unsigned(),
+        latency_ms: r.get::<_, i64>(5)?.cast_unsigned(),
+        cost_usd: r.get::<_, f64>(6)?,
+    })
 }
 
 #[cfg(test)]
@@ -334,6 +506,35 @@ mod tests {
         r.model = "nous/hermes-4-405b".to_string();
         assert!(l.record_request(&r).expect("record").is_none());
         assert!(l.task_rollup("s2").expect("rollup").cost_usd.is_none());
+    }
+
+    #[test]
+    fn usage_aggregates_and_orders_by_cost() {
+        let l = Ledger::in_memory().expect("memory ledger");
+        l.record_request(&rec("s1")).expect("rec");
+        let mut cheap = rec("s2");
+        cheap.model = "deepseek-v3.2".to_string();
+        cheap.input_tokens = 1_000;
+        cheap.cached_input_tokens = 0;
+        cheap.output_tokens = 100;
+        cheap.thinking_tokens = 0;
+        l.record_request(&cheap).expect("rec");
+
+        let report = l.usage_since(0, 10).expect("usage");
+        let (totals, by_model, by_day, sessions) = (
+            report.totals,
+            report.by_model,
+            report.by_day,
+            report.sessions,
+        );
+        assert_eq!(totals.requests, 2);
+        assert_eq!(totals.input_tokens, 11_000);
+        assert!((totals.cache_ratio() - 8_000.0 / 11_000.0).abs() < 1e-9);
+        assert_eq!(by_model.len(), 2);
+        assert_eq!(by_model[0].model, "claude-sonnet-4-5");
+        assert!(!by_day.is_empty());
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].totals.requests, 1);
     }
 
     #[test]

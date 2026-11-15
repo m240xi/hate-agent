@@ -1,6 +1,8 @@
 #![deny(unsafe_code)]
 
+mod antigravity;
 mod commands;
+mod images;
 mod presence;
 mod sessions_db;
 
@@ -15,12 +17,18 @@ pub fn run() {
         commands::session_compact,
         commands::session_answer,
         commands::session_respond_permission,
-        commands::session_rewind,
+        commands::session_rewind_message,
         commands::session_set_options,
         commands::session_set_provider,
         commands::models_list,
         commands::provider_set_model,
         commands::provider_presets,
+        commands::provider_preview_models,
+        commands::prefs_get,
+        commands::prefs_set,
+        commands::usage_overview,
+        commands::export_save,
+        commands::session_rewind,
         commands::provider_upsert,
         commands::provider_remove,
         commands::skills_list,
@@ -41,6 +49,9 @@ pub fn run() {
         commands::workspace_pick,
         commands::workspace_index,
         commands::workspace_read,
+        commands::image_read,
+        commands::image_save,
+        commands::image_reveal,
         commands::workspace_changes,
         commands::workspace_diff,
         commands::mcp_list,
@@ -50,10 +61,17 @@ pub fn run() {
         commands::session_new,
         commands::session_open,
         commands::session_delete,
+        commands::session_rename,
         commands::session_save_ui,
         commands::update_check,
         commands::update_install,
         commands::presence_set_mode,
+        antigravity::antigravity_status,
+        antigravity::antigravity_install,
+        antigravity::antigravity_refresh,
+        antigravity::antigravity_login,
+        antigravity::antigravity_login_cancel,
+        antigravity::antigravity_logout,
         commands::presence_get,
         commands::presence_set,
     ]);
@@ -77,6 +95,7 @@ pub fn run() {
             app.manage(commands::Sessions::default());
             app.manage(commands::AuthState::default());
             app.manage(commands::UpdateState::default());
+            app.manage(antigravity::AntigravityState::default());
             let discord_on =
                 hate_auth::AuthContext::load().map_or(true, |c| c.config.discord_presence);
             let presence = presence::Presence::start(discord_on);

@@ -11,6 +11,11 @@
   import EmptyState from './EmptyState.svelte';
   import CommandPalette from './CommandPalette.svelte';
   import FilePicker from './FilePicker.svelte';
+  import AddProviderSheet from './AddProviderSheet.svelte';
+  import UsagePanel from './UsagePanel.svelte';
+  import StatusBar from './StatusBar.svelte';
+  import TurnStatus from './TurnStatus.svelte';
+  import type { ProviderPreset } from '../ipc';
   import type { PermissionRequest, TranscriptBlock as Block } from '../types';
 
   type Theme = 'dark' | 'light' | 'system';
@@ -51,6 +56,19 @@
     reason: 'runs a build script',
     detail: 'cargo test --workspace',
   };
+
+  const demoPreset: ProviderPreset = {
+    name: 'moonshot',
+    label: 'Moonshot (Kimi)',
+    group: 'first-party',
+    kind: 'openai_compat',
+    base_url: 'https://api.moonshot.ai/v1',
+    model: 'kimi-latest',
+    auth: 'api_key',
+    env_hint: 'MOONSHOT_API_KEY',
+    key_url: 'https://platform.moonshot.ai/console/api-keys',
+  };
+  let showAddProvider = $state(false);
 
   let showPalette = $state(false);
   let showPicker = $state(false);
@@ -129,6 +147,35 @@
     <h2>Inspector</h2>
     <div class="frame" style:height="380px">
       <Inspector />
+    </div>
+  </section>
+
+  <section class="g-sec">
+    <h2>AddProviderSheet</h2>
+    <div class="frame" style:height="120px">
+      <button class="btn" onclick={() => (showAddProvider = true)}>Add Moonshot (Kimi)…</button>
+    </div>
+    {#if showAddProvider}
+      <AddProviderSheet
+        preset={demoPreset}
+        onClose={() => (showAddProvider = false)}
+        onAdded={() => (showAddProvider = false)}
+      />
+    {/if}
+  </section>
+
+  <section class="g-sec">
+    <h2>TurnStatus + StatusBar</h2>
+    <div class="frame" style:height="130px">
+      <TurnStatus />
+      <StatusBar />
+    </div>
+  </section>
+
+  <section class="g-sec">
+    <h2>UsagePanel</h2>
+    <div class="frame" style:height="420px">
+      <UsagePanel />
     </div>
   </section>
 

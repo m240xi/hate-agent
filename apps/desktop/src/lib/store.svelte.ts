@@ -26,9 +26,17 @@ import type {
   TranscriptBlock,
   TurnOutcome,
 } from './types';
-import type { ProviderInfo, ProviderModel, SessionMeta, ThinkingLevel } from './ipc';
+import type {
+  ImageAttachment,
+  Prefs,
+  ProviderInfo,
+  ProviderModel,
+  SessionMeta,
+  ThinkingLevel,
+  UsageOverview,
+} from './ipc';
 import { isThemeId } from './themes';
-import { copyText, parsePlan, transcriptMarkdown } from './format';
+import { copyText, parsePlan, transcriptHtml, transcriptJson, transcriptMarkdown } from './format';
 
 const inTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -104,6 +112,12 @@ export interface ViewerState {
 export interface QueuedMessage {
   text: string;
   pins: PinRef[];
+  images: ImageAttachment[];
+}
+
+export interface PendingImage extends ImageAttachment {
+  /** data URI used for the inline preview */
+  url: string;
 }
 
 class SessionStore {
@@ -139,8 +153,10 @@ class SessionStore {
   sessionBeganAt = $state<number | null>(null);
   sessionTotals = $state<TokenUsage>({ input: 0, cached_input: 0, output: 0, thinking: 0 });
   ctxUsed = $state(0);
+  agentCtxSize = $state(0);
 
   draft = $state('');
+  attachments = $state<PendingImage[]>([]);
   pendingPermission = $state<PermissionRequest | null>(null);
   awaitingPrompt = $state<string | null>(null);
   queue = $state<QueuedMessage[]>([]);
@@ -167,9 +183,34 @@ class SessionStore {
   updateTotal = $state<number | null>(null);
   whatsNew = $state<{ version: string; notes: string | null } | null>(null);
 
+  // Live turn telemetry, used by the "still working" bar.
+  turnStartedAt = $state<number | null>(null);
+  firstTokenMs = $state<number | null>(null);
+  toolsThisTurn = $state(0);
+  notice = $state<{ id: number; text: string } | null>(null);
+
   mode = $state<AppMode>('home');
   theme = $state<string>('auto');
   workspacePath = $state<string | null>(null);
+
+  // Spending guardrails and completion attention.
+  prefs = $state<Prefs>({
+    budget_session_usd: null,
+    budget_day_usd: null,
+    sound_on_done: false,
+    notify_on_done: true,
+  });
+  todayCostUsd = $state(0);
+  budgetPrompt = $state(false);
+  private budgetOverride = false;
+
+  usageOverview = $state<UsageOverview | null>(null);
+  usageState = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  usageError = $state('');
+  usageDays = $state(30);
+
+  density = $state<'comfortable' | 'compact'>('comfortable');
+  paletteOpen = $state(false);
 
   private unlisten: UnlistenFn | null = null;
   private unlistenUpdate: UnlistenFn | null = null;
@@ -193,7 +234,7 @@ class SessionStore {
   }
 
   get ctxLimit(): number {
-    return this.selectedModel?.context_tokens ?? this.budgetTokens;
+    return this.agentCtxSize || (this.selectedModel?.context_tokens ?? this.budgetTokens);
   }
 
   get ctxRatio(): number {
@@ -244,6 +285,7 @@ class SessionStore {
       });
       void this.checkForUpdate();
       void this.checkWhatsNew();
+      void this.loadPrefs();
       void import('./ipc')
         .then((m) => m.presenceSetMode(this.mode))
         .catch(() => {});
@@ -260,6 +302,7 @@ class SessionStore {
       this.costUsd = 0.0031;
       this.cacheRatio = 0.82;
       this.startFixturePlayback();
+      void this.loadPrefs();
       (window as unknown as { __hateSession?: SessionStore }).__hateSession = this;
     }
   }
@@ -326,15 +369,22 @@ class SessionStore {
   }
 
   send(override?: string, pinsOverride?: PinRef[]): void {
+    if (this.budgetBlocked) {
+      this.budgetPrompt = true;
+      return;
+    }
     const text = (override ?? this.draft).trim();
-    if (!text) return;
+    const images = this.attachments.map(({ mime, data }) => ({ mime, data }));
+    if (!text && images.length === 0) return;
     const pins = pinsOverride ?? this.collectPins(text);
+    const dropped = override === undefined ? this.attachments : [];
     if (override === undefined) {
       this.draft = '';
       this.pinned = [];
+      this.attachments = [];
     }
     if (this.sessionState === 'running' || this.sessionState === 'awaiting_permission') {
-      this.queue.push({ text, pins });
+      this.queue.push({ text, pins, images });
       return;
     }
     const plan = this.planMode;
@@ -342,16 +392,22 @@ class SessionStore {
     this.planReady = false;
     const begin = () => {
       const id = nextBlockId++;
-      this.blocks.push(
-        plan
-          ? { id, kind: 'user', text, plan: true, ...(pins.length ? { pins } : {}) }
-          : { id, kind: 'user', text, ...(pins.length ? { pins } : {}) },
-      );
+      this.blocks.push({
+        id,
+        kind: 'user',
+        text,
+        ...(plan ? { plan: true } : {}),
+        ...(pins.length ? { pins } : {}),
+        ...(dropped.length ? { images: dropped.map((a) => a.url) } : {}),
+      });
       this.turnBlockId = id;
       this.turnIsPlan = plan;
       this.roundStart = this.blocks.length;
       this.pendingToolUsage = null;
       this.sessionState = 'running';
+      this.turnStartedAt = Date.now();
+      this.firstTokenMs = null;
+      this.toolsThisTurn = 0;
       this.sessionTurns += 1;
       this.sessionBeganAt ??= Date.now();
       this.finishStreamingBlocks();
@@ -361,7 +417,7 @@ class SessionStore {
         return;
       }
       void import('./ipc')
-        .then((m) => m.sessionSend(wire, pins))
+        .then((m) => m.sessionSend(wire, pins, images))
         .catch((err: unknown) => {
           this.sessionState = 'failed';
           this.pushError(String(err));
@@ -612,6 +668,233 @@ class SessionStore {
     this.note('no reply to copy yet');
   }
 
+  // ---- spending guardrails -------------------------------------------------
+
+  get sessionBudget(): number | null {
+    const b = this.prefs.budget_session_usd;
+    return b && b > 0 ? b : null;
+  }
+
+  get sessionCostRatio(): number {
+    const b = this.sessionBudget;
+    return b ? this.costUsd / b : 0;
+  }
+
+  get dayBudget(): number | null {
+    const b = this.prefs.budget_day_usd;
+    return b && b > 0 ? b : null;
+  }
+
+  get dayCostRatio(): number {
+    const b = this.dayBudget;
+    return b ? this.todayCostUsd / b : 0;
+  }
+
+  get budgetBlocked(): boolean {
+    if (this.budgetOverride) return false;
+    return this.sessionCostRatio >= 1 || this.dayCostRatio >= 1;
+  }
+
+  get budgetWarning(): boolean {
+    return (
+      !this.budgetBlocked &&
+      (this.sessionCostRatio >= 0.8 || this.dayCostRatio >= 0.8)
+    );
+  }
+
+  continueOverBudget(): void {
+    this.budgetOverride = true;
+    this.budgetPrompt = false;
+    this.send();
+  }
+
+  dismissBudgetPrompt(): void {
+    this.budgetPrompt = false;
+  }
+
+  async loadPrefs(): Promise<void> {
+    this.density =
+      localStorage.getItem('hate:density') === 'compact' ? 'compact' : 'comfortable';
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    this.prefs = await m.prefsGet().catch(() => this.prefs);
+    if (this.dayBudget) void this.refreshToday();
+  }
+
+  async savePrefs(patch: Partial<Prefs>): Promise<void> {
+    this.prefs = { ...this.prefs, ...patch };
+    if (patch.budget_session_usd !== undefined || patch.budget_day_usd !== undefined) {
+      this.budgetOverride = false;
+    }
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    await m.prefsSet(this.prefs).catch((e: unknown) => {
+      this.note(`couldn't save preferences: ${e instanceof Error ? e.message : String(e)}`);
+    });
+    if (this.dayBudget) void this.refreshToday();
+  }
+
+  setDensity(d: 'comfortable' | 'compact'): void {
+    this.density = d;
+    localStorage.setItem('hate:density', d);
+  }
+
+  /** Today's spend, from the ledger, for the daily ceiling. */
+  async refreshToday(): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    const overview = await m.usageOverview(1).catch(() => null);
+    if (!overview) return;
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const startSec = Math.floor(start.getTime() / 1000);
+    this.todayCostUsd = overview.by_day
+      .filter((d) => d.day + 86_400 > startSec)
+      .reduce((n, d) => n + d.totals.cost_usd, 0);
+  }
+
+  // ---- usage history -------------------------------------------------------
+
+  async loadUsage(days = this.usageDays): Promise<void> {
+    this.usageDays = days;
+    if (!inTauri()) {
+      this.usageState = 'error';
+      this.usageError = 'usage history needs the desktop app';
+      return;
+    }
+    this.usageState = 'loading';
+    const m = await import('./ipc');
+    try {
+      this.usageOverview = await m.usageOverview(days);
+      this.usageState = 'ready';
+    } catch (e) {
+      this.usageError = e instanceof Error ? e.message : String(e);
+      this.usageState = 'error';
+    }
+  }
+
+  // ---- transcript edit / branch -------------------------------------------
+
+  /**
+   * Rewind the conversation to just before a user message and send edited
+   * text. `branch` copies the surviving history into a new session instead of
+   * rewriting the current one.
+   */
+  async editUserMessage(blockId: number, text: string, branch: boolean): Promise<void> {
+    const idx = this.blocks.findIndex((b) => b.id === blockId);
+    if (idx < 0) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const userIndex = this.blocks.slice(0, idx).filter((b) => b.kind === 'user').length;
+
+    let result: { session_id: string; branched: boolean } | null = null;
+    if (inTauri()) {
+      const m = await import('./ipc');
+      try {
+        result = await m.sessionRewindMessage(userIndex, branch, null);
+      } catch (e) {
+        this.note(`couldn't rewind: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+      }
+    }
+
+    const pins = this.blocks[idx]?.pins ?? [];
+    this.blocks = this.blocks.slice(0, idx);
+    this.queue = [];
+    this.sessionTurns = userIndex;
+    if (result?.branched) {
+      this.sessionId = result.session_id;
+      this.costUsd = 0;
+      this.usage = { input: 0, cached_input: 0, output: 0, thinking: 0 };
+      this.sessionTotals = { input: 0, cached_input: 0, output: 0, thinking: 0 };
+      this.cacheRatio = 0;
+      this.sessionBeganAt = null;
+      this.note('branched into a new session');
+    }
+    this.send(trimmed, pins);
+  }
+
+  // ---- export --------------------------------------------------------------
+
+  async exportTo(format: 'md' | 'html' | 'json'): Promise<void> {
+    if (this.blocks.length === 0) {
+      this.note('nothing to export yet');
+      return;
+    }
+    if (!inTauri()) {
+      this.note('exporting needs the desktop app');
+      return;
+    }
+    const m = await import('./ipc');
+    const content =
+      format === 'md'
+        ? transcriptMarkdown(this.blocks)
+        : format === 'html'
+          ? transcriptHtml(this.blocks, this.exportMeta())
+          : transcriptJson(this.blocks, this.exportMeta());
+    try {
+      const path = await m.exportSave(format, content);
+      if (path) this.setNotice(`saved to ${path}`);
+    } catch (e) {
+      this.note(`export failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private exportMeta(): {
+    title: string;
+    model: string;
+    provider: string;
+    sessionId: string | null;
+    costUsd: number;
+    turns: number;
+    usage: TokenUsage;
+  } {
+    return {
+      title: this.sessionMeta?.title || 'hate-agent session',
+      model: this.model,
+      provider: this.providerName || this.provider,
+      sessionId: this.sessionId,
+      costUsd: this.costUsd,
+      turns: this.sessionTurns,
+      usage: this.sessionTotals,
+    };
+  }
+
+  setNotice(text: string): void {
+    this.notice = { id: Date.now(), text };
+  }
+
+  // ---- completion chime ----------------------------------------------------
+
+  private chime(): void {
+    if (!this.prefs.sound_on_done || typeof window === 'undefined') return;
+    try {
+      const Ctx =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const now = ctx.currentTime;
+      const notes = [660, 990];
+      notes.forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        const at = now + i * 0.11;
+        gain.gain.setValueAtTime(0, at);
+        gain.gain.linearRampToValueAtTime(0.06, at + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.28);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(at);
+        osc.stop(at + 0.3);
+      });
+      setTimeout(() => void ctx.close().catch(() => {}), 900);
+    } catch {
+      // audio is best-effort
+    }
+  }
+
   async exportTranscript(): Promise<void> {
     if (this.blocks.length === 0) {
       this.note('nothing to export yet');
@@ -621,8 +904,88 @@ class SessionStore {
     this.note(ok ? 'transcript copied to the clipboard as Markdown' : 'clipboard unavailable');
   }
 
+  addImage(file: File): Promise<void> {
+    return new Promise((resolve) => {
+      if (!/^image\/(png|jpeg|webp|gif|bmp)$/.test(file.type) || file.size > 8 * 1024 * 1024) {
+        this.note('only PNG, JPEG, WebP, GIF or BMP images up to 8 MB can be attached');
+        resolve();
+        return;
+      }
+      if (this.attachments.length >= 4) {
+        this.note('attach at most 4 images per message');
+        resolve();
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = String(reader.result ?? '');
+        const at = url.indexOf(',');
+        if (at < 0) {
+          resolve();
+          return;
+        }
+        const data = url.slice(at + 1);
+        this.attachments = [...this.attachments, { mime: file.type, data, url }];
+        resolve();
+      };
+      reader.onerror = () => resolve();
+      reader.readAsDataURL(file);
+    });
+  }
+
+  removeAttachment(index: number): void {
+    this.attachments = this.attachments.filter((_, i) => i !== index);
+  }
+
+  clearAttachments(): void {
+    this.attachments = [];
+  }
+
+  get visionUnsupported(): boolean {
+    return this.selectedModel?.supports_vision === false;
+  }
+
   note(text: string): void {
     this.blocks.push({ id: nextBlockId++, kind: 'text', text, streaming: false, local: true });
+  }
+
+  /** Record time-to-first-token once per turn. */
+  private markFirstToken(): void {
+    if (this.firstTokenMs !== null || this.turnStartedAt === null) return;
+    this.firstTokenMs = Date.now() - this.turnStartedAt;
+  }
+
+  /** Flash the taskbar when a long turn finishes while the window is in the background. */
+  private async attention(): Promise<void> {
+    this.turnStartedAt = null;
+    if (this.dayBudget) void this.refreshToday();
+    if (!inTauri()) return;
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const win = getCurrentWindow();
+      if (await win.isFocused()) return;
+      this.chime();
+      if (!this.prefs.notify_on_done) return;
+      await win.requestUserAttention(2);
+      this.notice = { id: Date.now(), text: 'Turn finished — click to return' };
+    } catch {
+      // attention is best-effort
+    }
+  }
+
+  dismissNotice(): void {
+    this.notice = null;
+  }
+
+  async focusWindow(): Promise<void> {
+    this.dismissNotice();
+    if (!inTauri()) return;
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().setFocus();
+    } catch {
+      // ignore
+    }
   }
 
   async rewindCheckpoint(id: string): Promise<void> {
@@ -846,6 +1209,21 @@ class SessionStore {
     }
   }
 
+  async renameSession(id: string, title: string): Promise<boolean> {
+    if (!inTauri()) return false;
+    try {
+      const m = await import('./ipc');
+      await m.sessionRename(id, title);
+      const target = this.sessions.find((s) => s.id === id);
+      if (target) target.title = title.trim();
+      if (this.sessionMeta?.id === id) this.sessionMeta.title = title.trim();
+      return true;
+    } catch (e) {
+      this.note(`rename failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
   async newSession(): Promise<void> {
     if (!inTauri()) {
       this.resetConversation();
@@ -895,6 +1273,7 @@ class SessionStore {
     this.sessionBeganAt = null;
     this.sessionTotals = { input: 0, cached_input: 0, output: 0, thinking: 0 };
     this.ctxUsed = 0;
+    this.agentCtxSize = 0;
     this.costUsd = 0;
     this.cacheRatio = 0;
     this.draft = '';
@@ -1003,6 +1382,7 @@ class SessionStore {
     this.sessionBeganAt = null;
     this.sessionTotals = { input: 0, cached_input: 0, output: 0, thinking: 0 };
     this.ctxUsed = 0;
+    this.agentCtxSize = 0;
     this.roundStart = 0;
     this.pendingToolUsage = null;
     this.turnBlockId = null;
@@ -1071,12 +1451,15 @@ class SessionStore {
     switch (e.type) {
       case 'delta':
         this.sessionState = 'running';
+        this.markFirstToken();
         this.appendText(e.text);
         break;
       case 'thinking_delta':
+        this.markFirstToken();
         this.appendThinking(e.text);
         break;
       case 'tool_started':
+        this.toolsThisTurn += 1;
         this.blocks.push({
           id: nextBlockId++,
           kind: 'tool',
@@ -1089,6 +1472,15 @@ class SessionStore {
       case 'tool_output': {
         const b = this.findTool(e.call_id);
         if (b) b.preview = e.preview;
+        break;
+      }
+      case 'image': {
+        const b = e.call_id ? this.findTool(e.call_id) : undefined;
+        if (b) {
+          if (!b.images?.includes(e.source)) b.images = [...(b.images ?? []), e.source];
+        } else {
+          this.blocks.push({ id: nextBlockId++, kind: 'image', images: [e.source] });
+        }
         break;
       }
       case 'tool_finished': {
@@ -1148,6 +1540,11 @@ class SessionStore {
         this.finishStreamingBlocks();
         void this.refreshIndex();
         this.finishTurn(e.outcome);
+        void this.attention();
+        break;
+      case 'context_usage':
+        this.ctxUsed = e.used;
+        this.agentCtxSize = e.size;
         break;
       case 'awaiting_user':
         this.awaitingPrompt = e.prompt;
@@ -1237,7 +1634,12 @@ class SessionStore {
     }
     if (completed && !this.planReady && this.queue.length > 0) {
       const next = this.queue.shift();
-      if (next) queueMicrotask(() => this.send(next.text, next.pins));
+      if (next) {
+        // Carry queued attachments back through the composer slot so the
+        // normal send path picks them up.
+        this.attachments = next.images.map((a) => ({ ...a, url: `data:${a.mime};base64,${a.data}` }));
+        queueMicrotask(() => this.send(next.text, next.pins));
+      }
     }
   }
 

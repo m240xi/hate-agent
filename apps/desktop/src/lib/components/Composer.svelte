@@ -10,6 +10,33 @@
   let ta = $state<HTMLTextAreaElement | null>(null);
   let paletteOpen = $state(false);
   let pickerOpen = $state(false);
+  let fileInput = $state<HTMLInputElement | null>(null);
+  let dragging = $state(false);
+
+  function onPaste(e: ClipboardEvent): void {
+    const files = [...(e.clipboardData?.items ?? [])]
+      .filter((i) => i.kind === 'file' && i.type.startsWith('image/'))
+      .map((i) => i.getAsFile())
+      .filter((f): f is File => f !== null);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void Promise.all(files.map((f) => session.addImage(f)));
+  }
+
+  function onDrop(e: DragEvent): void {
+    dragging = false;
+    const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    if (files.length === 0) return;
+    e.preventDefault();
+    void Promise.all(files.map((f) => session.addImage(f)));
+  }
+
+  function onFilePick(e: Event): void {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    void Promise.all(files.map((f) => session.addImage(f)));
+    input.value = '';
+  }
 
   function autoGrow(): void {
     if (!ta) return;
@@ -88,7 +115,44 @@
     </div>
   {/if}
 
-  <div class="composer" class:busy={session.running} class:planning={session.planMode}>
+  <div
+    class="composer"
+    class:busy={session.running}
+    class:planning={session.planMode}
+    class:dragging
+    role="group"
+    aria-label="Message composer"
+    ondragover={(e) => {
+      if ([...(e.dataTransfer?.items ?? [])].some((i) => i.type.startsWith('image/'))) {
+        e.preventDefault();
+        dragging = true;
+      }
+    }}
+    ondragleave={() => (dragging = false)}
+    ondrop={onDrop}
+  >
+    {#if session.attachments.length > 0}
+      <ul class="attachments" aria-label="Attached images">
+        {#each session.attachments as a, i (a.url)}
+          <li class="attach">
+            <img src={a.url} alt="" />
+            <button
+              class="attach-x"
+              onclick={() => session.removeAttachment(i)}
+              aria-label="Remove attached image"
+              title="Remove"
+            >
+              <Icon name="x" size={9} />
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    {#if session.visionUnsupported && session.attachments.length > 0}
+      <p class="vision-warn">
+        {session.model} can't see images — the attachment will be ignored by the model.
+      </p>
+    {/if}
     {#if session.pinned.length > 0}
       <ul class="pins" aria-label="Attached files">
         {#each session.pinned as p (p.path)}
@@ -114,6 +178,7 @@
       bind:value={session.draft}
       oninput={autoGrow}
       onkeydown={onKeydown}
+      onpaste={onPaste}
       placeholder={session.running
         ? 'running… type to queue the next message (Esc to cancel)'
         : session.planMode
@@ -129,6 +194,22 @@
         <kbd>/</kbd> commands · <kbd>@</kbd> files · <kbd>⇧tab</kbd> think
       </span>
       <span class="spacer"></span>
+      <button
+        class="attach-btn"
+        onclick={() => fileInput?.click()}
+        aria-label="Attach image"
+        title="Attach an image (or paste / drop one)"
+      >
+        <Icon name="image" size={13} />
+      </button>
+      <input
+        class="file-input"
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+        multiple
+        bind:this={fileInput}
+        onchange={onFilePick}
+      />
       <button
         class="plan-toggle"
         class:on={session.planMode}
@@ -153,7 +234,7 @@
         <button
           class="send"
           onclick={() => session.send()}
-          disabled={!session.draft.trim()}
+          disabled={!session.draft.trim() && session.attachments.length === 0}
           aria-label="Send message"
           title="Send (Enter)"
         >
@@ -223,6 +304,71 @@
   .composer.planning {
     border-style: dashed;
     border-color: var(--accent-dim);
+  }
+  .composer.dragging {
+    border-color: var(--accent-dim);
+    background: var(--accent-soft);
+  }
+  .attachments {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    padding: 8px 10px 0;
+  }
+  .attach {
+    position: relative;
+    width: 56px;
+    height: 56px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-0);
+  }
+  .attach img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .attach-x {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--bg-0) 75%, transparent);
+    color: var(--fg-1);
+  }
+  .attach-x:hover {
+    color: var(--err);
+  }
+  .vision-warn {
+    margin: 6px 10px 0;
+    font-size: 10.5px;
+    color: var(--warn);
+  }
+  .attach-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 22px;
+    border-radius: var(--radius);
+    color: var(--fg-3);
+    flex: none;
+  }
+  .attach-btn:hover {
+    color: var(--fg-0);
+    background: var(--bg-3);
+  }
+  .file-input {
+    display: none;
   }
   .plan-toggle {
     padding: 2px 8px;

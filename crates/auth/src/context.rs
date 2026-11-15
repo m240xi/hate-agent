@@ -92,6 +92,10 @@ impl AuthContext {
                 kind: "oauth",
                 expires_at: tokens.expires_at,
             },
+            None if env_key_present(name) => CredStatus {
+                kind: "env",
+                expires_at: None,
+            },
             None => CredStatus {
                 kind: "none",
                 expires_at: None,
@@ -113,17 +117,14 @@ impl AuthContext {
     }
 }
 
-fn env_vars_for(name: &str) -> &'static [&'static str] {
-    match name {
-        "openai" => &["OPENAI_API_KEY"],
-        "anthropic" | "claude" => &["ANTHROPIC_API_KEY"],
-        "openrouter" => &["OPENROUTER_API_KEY"],
-        "deepseek" => &["DEEPSEEK_API_KEY"],
-        "gemini" | "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        "xai" | "grok" => &["XAI_API_KEY"],
-        "groq" => &["GROQ_API_KEY"],
-        "mistral" => &["MISTRAL_API_KEY"],
-        "nous" => &["NOUS_API_KEY"],
-        _ => &[],
-    }
+/// Candidate environment variables for a provider name, in priority order.
+pub fn env_vars_for(name: &str) -> &'static [&'static str] {
+    crate::presets::env_vars_for(name)
+}
+
+/// Whether an API key for `name` is already available in the environment.
+pub fn env_key_present(name: &str) -> bool {
+    env_vars_for(name)
+        .iter()
+        .any(|var| std::env::var(var).is_ok_and(|v| !v.trim().is_empty()))
 }

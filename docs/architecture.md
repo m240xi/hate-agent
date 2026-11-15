@@ -253,9 +253,18 @@ A cheap second-opinion reviewer subagent runs before surfacing diffs over
 `trait Provider` with `stream(req) -> Stream<Delta>`, `count_tokens`,
 `list_models`, `capabilities() -> { vision, tools, cache, thinking }`.
 
-Ship: Anthropic, OpenAI, Gemini, DeepSeek, OpenRouter, and a generic
-OpenAI-compatible adapter (Ollama/LM Studio/vLLM/llama.cpp). Route by
-capability, not vendor name. Unknown model → OpenAI-compatible + warning.
+Two wire formats cover the field: Anthropic Messages and OpenAI Chat
+Completions. A preset table in `crates/app/src/commands.rs` (`PRESETS`) lists
+every provider the app can add from Settings — first-party APIs (Anthropic,
+OpenAI, Gemini, xAI, DeepSeek, Mistral, Moonshot, Z.AI, Qwen, MiniMax, Cohere,
+Upstage, Perplexity), routers (Nous Portal, OpenRouter, Requesty, GitHub
+Models), hosted open-model inference (Groq, Cerebras, SambaNova, Together,
+Fireworks, DeepInfra, Nebius, Novita, Hyperbolic), and local servers (Ollama,
+LM Studio, llama.cpp, vLLM). Each entry carries a base URL, default model,
+auth kind, key page, and the environment variable `hate-auth` reads as a
+fallback. Route by capability, not vendor name. Unknown model →
+OpenAI-compatible + warning. Adding a provider is one table row; a test keeps
+the table and the env-var map in sync.
 
 Retry: 3 attempts, exponential with jitter, only on 429/5xx/connect,
 honor `Retry-After`. On 429 surface reset time in the UI.
@@ -263,6 +272,22 @@ honor `Retry-After`. On 429 surface reset time in the UI.
 Mid-conversation model switch preserves the transcript, re-tokenizes
 against the new counter, and re-evaluates the compaction threshold
 immediately.
+
+## Spend and history
+
+`hate-ledger` writes one row per request (model, provider, tokens, cached
+tokens, thinking tokens, latency, cost) and aggregates per task. The desktop
+app reads it back through `usage_overview` for the Usage panel and the daily
+spending ceiling; nothing is uploaded. Ceilings live in `config.toml`
+(`budget_session_usd`, `budget_day_usd`) and are enforced before a turn starts —
+the UI asks before continuing rather than blocking silently.
+
+## Editing history
+
+`session_rewind_message(user_index, branch)` truncates the persisted message
+list to just before the Nth user message. With `branch` it writes that prefix
+into a new session instead, so the original transcript survives. The UI maps
+transcript bubbles to user-message indexes and re-sends the edited text.
 
 ## Auth
 

@@ -77,7 +77,7 @@ impl Provider for MockProvider {
             }
             for m in &req.messages {
                 match m {
-                    hate_core::Message::User { content }
+                    hate_core::Message::User { content, .. }
                     | hate_core::Message::Tool { content, .. } => text.push_str(content),
                     hate_core::Message::Assistant { content, .. } => text.push_str(content),
                 }

@@ -102,7 +102,7 @@ async fn echo_turn_emits_deltas_usage_and_completion() {
     let mut rx = session.subscribe();
 
     session
-        .command(Command::UserMessage("hi".to_string()))
+        .command(Command::user("hi".to_string()))
         .expect("command");
 
     let mut text = String::new();
@@ -143,7 +143,7 @@ async fn second_message_continues_session() {
 
     for _ in 0..2 {
         session
-            .command(Command::UserMessage("hi".to_string()))
+            .command(Command::user("hi".to_string()))
             .expect("command");
         loop {
             match rx.recv().await.expect("stream") {
@@ -171,7 +171,7 @@ async fn cancel_interrupts_in_flight_stream() {
     let mut rx = session.subscribe();
 
     session
-        .command(Command::UserMessage("go".to_string()))
+        .command(Command::user("go".to_string()))
         .expect("command");
 
     let start = std::time::Instant::now();
@@ -248,7 +248,7 @@ async fn provider_error_surfaces_as_failed() {
     let session = session_with(Arc::new(Fails));
     let mut rx = session.subscribe();
     session
-        .command(Command::UserMessage("hi".to_string()))
+        .command(Command::user("hi".to_string()))
         .expect("command");
     loop {
         match rx.recv().await.expect("stream") {
@@ -356,7 +356,7 @@ async fn tool_calls_execute_and_feed_results_back() {
     });
     let mut rx = session.subscribe();
     session
-        .command(Command::UserMessage("read note.txt".to_string()))
+        .command(Command::user("read note.txt".to_string()))
         .expect("command");
 
     let mut saw_tool_events = false;
@@ -414,7 +414,7 @@ async fn tool_call_without_tools_fails_honestly() {
     let session = session_with(provider);
     let mut rx = session.subscribe();
     session
-        .command(Command::UserMessage("hi".to_string()))
+        .command(Command::user("hi".to_string()))
         .expect("command");
     loop {
         match rx.recv().await.expect("stream") {
@@ -469,7 +469,7 @@ async fn gated_tool_waits_for_permission_then_denies() {
     });
     let mut rx = session.subscribe();
     session
-        .command(Command::UserMessage("run echo".to_string()))
+        .command(Command::user("run echo".to_string()))
         .expect("command");
 
     let mut denied = false;
@@ -544,7 +544,7 @@ async fn allow_session_skips_repeat_prompts() {
     });
     let mut rx = session.subscribe();
     session
-        .command(Command::UserMessage("write twice".to_string()))
+        .command(Command::user("write twice".to_string()))
         .expect("command");
 
     let mut prompts = 0u32;
@@ -618,7 +618,7 @@ async fn compaction_bounds_journaled_history() {
 
     for i in 0..14 {
         session
-            .command(Command::UserMessage(format!("turn number {i}")))
+            .command(Command::user(format!("turn number {i}")))
             .expect("command");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -642,7 +642,7 @@ async fn compaction_bounds_journaled_history() {
     assert!(
         msgs.iter().any(|m| matches!(
             m,
-            Message::User { content } if content.contains("[Context compacted]")
+            Message::User { content, .. } if content.contains("[Context compacted]")
         )),
         "expected a compaction note in journaled history ({} msgs)",
         msgs.len()
@@ -660,7 +660,7 @@ async fn drive_turn(
     msg: &str,
 ) {
     session
-        .command(Command::UserMessage(msg.to_string()))
+        .command(Command::user(msg.to_string()))
         .expect("command");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -827,7 +827,7 @@ async fn skill_save_tool_persists_and_emits() {
     });
     let mut rx = session.subscribe();
     session
-        .command(Command::UserMessage("save what you learned".to_string()))
+        .command(Command::user("save what you learned".to_string()))
         .expect("command");
 
     let mut saw_skill_event = false;
@@ -1002,7 +1002,7 @@ async fn set_provider_swaps_adapter_mid_session() {
     let mut rx = session.subscribe();
 
     session
-        .command(Command::UserMessage("hi".to_string()))
+        .command(Command::user("hi".to_string()))
         .expect("command");
     let mut text = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1027,7 +1027,7 @@ async fn set_provider_swaps_adapter_mid_session() {
         })
         .expect("set provider");
     session
-        .command(Command::UserMessage("again".to_string()))
+        .command(Command::user("again".to_string()))
         .expect("command");
     text.clear();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1148,7 +1148,7 @@ async fn read_batches_keep_order_and_duplicate_reads_cost_a_stub() {
     let mut rx = session.subscribe();
 
     session
-        .command(Command::UserMessage("read both".to_string()))
+        .command(Command::user("read both".to_string()))
         .expect("command");
     let mut finished: Vec<(String, u32, u32)> = Vec::new();
     loop {
@@ -1208,7 +1208,7 @@ async fn tool_round_limit_is_configurable_and_fails_honestly() {
     );
     let mut rx = session.subscribe();
     session
-        .command(Command::UserMessage("loop".to_string()))
+        .command(Command::user("loop".to_string()))
         .expect("command");
     loop {
         match rx.recv().await.expect("stream") {
@@ -1248,7 +1248,7 @@ async fn plan_turn_is_read_only_without_prompting() {
     );
     let mut rx = session.subscribe();
     session
-        .command(Command::UserMessage("/plan rename the thing".to_string()))
+        .command(Command::user("/plan rename the thing".to_string()))
         .expect("command");
     let mut results: Vec<(String, bool)> = Vec::new();
     loop {

@@ -76,6 +76,19 @@ enum AuthCommands {
     },
     /// Show credential state (never prints secrets).
     Status,
+    /// List the built-in provider presets.
+    Presets,
+    /// Add a provider from the built-in catalog (`hate auth add groq`).
+    Add {
+        /// Preset name, e.g. `groq`, `openrouter`, `moonshot`.
+        preset: String,
+        /// Override the preset base URL (proxies, self-hosted servers).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Override the preset's default model.
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -154,6 +167,66 @@ async fn auth(cmd: AuthCommands) -> i32 {
                 2
             }
         },
+        AuthCommands::Presets => {
+            let groups = ["first-party", "router", "hosted", "local"];
+            for group in groups {
+                let rows: Vec<_> = hate_auth::presets::PRESETS
+                    .iter()
+                    .filter(|p| p.group == group)
+                    .collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                println!("{group}:");
+                for p in rows {
+                    let key = p
+                        .env
+                        .map_or_else(|| " · no key".to_string(), |e| format!(" · ${e}"));
+                    println!("  {:<12} {:<22} {}{key}", p.name, p.model, p.base_url);
+                }
+            }
+            0
+        }
+        AuthCommands::Add {
+            preset,
+            base_url,
+            model,
+        } => {
+            let Some(p) = hate_auth::presets::find(&preset) else {
+                eprintln!("error: unknown preset {preset:?} — try `hate auth presets`");
+                return 2;
+            };
+            if p.auth == "agent" {
+                eprintln!(
+                    "error: {} runs through the desktop app (Antigravity sign-in)",
+                    p.label
+                );
+                return 2;
+            }
+            let mut config = ctx.config.clone();
+            let entry = hate_auth::ProviderConfig {
+                kind: p.kind.to_string(),
+                base_url: base_url.unwrap_or_else(|| p.base_url.to_string()),
+                model: model.unwrap_or_else(|| p.model.to_string()),
+            };
+            config.providers.insert(p.name.to_string(), entry);
+            if config.default_provider.is_none() {
+                config.default_provider = Some(p.name.to_string());
+            }
+            match config.save() {
+                Ok(()) => {
+                    println!("added {} ({} · {})", p.label, p.model, p.base_url);
+                    if let Some(env) = p.env {
+                        println!("set ${env} or run `hate auth set-key {} <key>`", p.name);
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    2
+                }
+            }
+        }
         AuthCommands::Status => {
             let mut config = ctx.config.clone();
             config.ensure_default_provider();
@@ -386,7 +459,7 @@ async fn run(
     });
 
     let mut rx = session.subscribe();
-    let _ = session.command(Command::UserMessage(prompt));
+    let _ = session.command(Command::user(prompt));
 
     let mut saw_done = false;
     loop {

@@ -47,9 +47,15 @@
 
 <div class="inspector">
   <section class="sec">
-    <h3 class="sec-title"><Icon name="list" size={11} /> Plan</h3>
+    <h3 class="section-title"><Icon name="list" size={11} /> Plan</h3>
     {#if session.plan.length === 0}
-      <p class="dim">No plan yet — the agent emits one in plan mode.</p>
+      <div class="empty">
+        <p class="empty-title">No plan yet</p>
+        <p class="empty-body">
+          Turn on plan mode in the composer and the agent investigates read-only,
+          then proposes steps for you to approve.
+        </p>
+      </div>
     {:else}
       <ol class="steps">
         {#each session.plan as step, i}
@@ -65,7 +71,7 @@
   </section>
 
   <section class="sec">
-    <h3 class="sec-title"><Icon name="bolt" size={11} /> Tokens</h3>
+    <h3 class="section-title"><Icon name="bolt" size={11} /> Tokens</h3>
     <div class="meter" role="img" aria-label="context usage">
       <div
         class="meter-fill"
@@ -95,9 +101,15 @@
   </section>
 
   <section class="sec">
-    <h3 class="sec-title"><Icon name="clock" size={11} /> Checkpoints</h3>
+    <h3 class="section-title"><Icon name="clock" size={11} /> Checkpoints</h3>
     {#if session.checkpoints.length === 0}
-      <p class="dim">None yet — snapshots are taken before writes.</p>
+      <div class="empty">
+        <p class="empty-title">No checkpoints yet</p>
+        <p class="empty-body">
+          A snapshot of the touched files is taken before the first write, so you can
+          roll the workspace back to it.
+        </p>
+      </div>
     {:else}
       <ul class="cps">
         {#each session.checkpoints as cp}
@@ -119,7 +131,7 @@
   </section>
 
   <section class="sec">
-    <h3 class="sec-title">
+    <h3 class="section-title">
       <Icon name="diff" size={11} /> Changed files
       <span class="spacer"></span>
       <button class="sec-btn" onclick={() => void session.refreshChanges()} title="Refresh from git">
@@ -127,7 +139,12 @@
       </button>
     </h3>
     {#if session.changedFiles.length === 0}
-      <p class="dim">No changes yet.</p>
+      <div class="empty">
+        <p class="empty-title">No changes yet</p>
+        <p class="empty-body">
+          Files the agent edits show up here with a one-click diff.
+        </p>
+      </div>
     {:else}
       <ul class="files">
         {#each session.changedFiles as f}
@@ -161,17 +178,6 @@
     padding: 8px 10px;
     background: var(--bg-1);
   }
-  .sec-title {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 0 0 8px;
-    font-size: 10.5px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--fg-3);
-  }
   .spacer {
     flex: 1;
   }
@@ -187,6 +193,23 @@
   .sec-btn:hover {
     background: var(--bg-3);
     color: var(--fg-0);
+  }
+  .empty {
+    padding: 8px 10px;
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+  }
+  .empty-title {
+    margin: 0 0 4px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--fg-2);
+  }
+  .empty-body {
+    margin: 0;
+    font-size: 10.5px;
+    line-height: 1.55;
+    color: var(--fg-3);
   }
   .dim {
     color: var(--fg-3);

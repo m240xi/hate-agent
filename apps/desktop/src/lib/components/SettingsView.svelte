@@ -3,14 +3,18 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
+  import AddProviderSheet from './AddProviderSheet.svelte';
+  import UsagePanel from './UsagePanel.svelte';
   import Popover from './Popover.svelte';
   import type {
+    AntigravityStatus,
     AppInfo,
     ClaudeLoginInfo,
     McpServerConfig,
     McpServerInfo,
     NousLoginInfo,
     ProviderInfo,
+    ProviderModel,
     ProviderPreset,
     SkillInfo,
   } from '../ipc';
@@ -37,10 +41,66 @@
   let claudeError = $state<string | null>(null);
   let presetBusy = $state<string | null>(null);
 
+  let agStatus = $state<AntigravityStatus | null>(null);
+  let agBusy = $state<'install' | 'login' | 'refresh' | 'logout' | null>(null);
+  let agError = $state<string | null>(null);
+  let agProgress = $state<{ downloaded: number; total: number | null } | null>(null);
+  let agLoginUrl = $state<string | null>(null);
+  let agCopied = $state(false);
+  let agUnlisten: UnlistenFn | null = null;
+
   let keyDrafts = $state<Record<string, string>>({});
   let keyBusy = $state<string | null>(null);
 
   import { THEMES } from '../themes';
+
+  const SECTIONS = [
+    { id: 'appearance', label: 'Appearance' },
+    { id: 'providers', label: 'Providers' },
+    { id: 'workspace', label: 'Workspace' },
+    { id: 'skills', label: 'Skills' },
+    { id: 'spending', label: 'Spending' },
+    { id: 'usage', label: 'Usage' },
+    { id: 'mcp', label: 'MCP' },
+    { id: 'about', label: 'About' },
+  ] as const;
+
+  let activeSection = $state<string>('appearance');
+  let spy: IntersectionObserver | null = null;
+
+  function jumpTo(id: string): void {
+    const el = document.getElementById(id);
+    if (!el) return;
+    activeSection = id;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function startSpy(): void {
+    spy?.disconnect();
+    const visible = new Map<string, number>();
+    spy = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          visible.set((e.target as HTMLElement).id, e.isIntersecting ? e.intersectionRatio : 0);
+        }
+        const best = [...visible.entries()].sort((a, b) => b[1] - a[1])[0];
+        if (best && best[1] > 0) activeSection = best[0];
+      },
+      { root: document.querySelector('.settings'), rootMargin: '-72px 0px -55% 0px', threshold: [0, 0.25, 0.6] },
+    );
+    for (const sec of SECTIONS) {
+      const el = document.getElementById(sec.id);
+      if (el) spy.observe(el);
+    }
+  }
+
+  $effect(() => {
+    const t = setTimeout(startSpy, 60);
+    return () => {
+      clearTimeout(t);
+      spy?.disconnect();
+    };
+  });
 
   async function refresh(): Promise<void> {
     if (!inTauri) return;
@@ -51,6 +111,9 @@
     skillAuto = await m.skillsAutoGet().catch(() => true);
     discordOn = await m.presenceGet().catch(() => true);
     appInfo = await m.appInfo().catch(() => null);
+    if (providers.some((p) => p.kind === 'acp')) {
+      agStatus = await m.antigravityStatus().catch(() => null);
+    }
     await loadMcp();
     void session.refreshModels();
   }
@@ -62,6 +125,18 @@
       inTauri = true;
       await refresh();
       const { listen } = await import('@tauri-apps/api/event');
+      agUnlisten = await listen<{
+        kind: string;
+        downloaded?: number;
+        total?: number | null;
+        url?: string;
+      }>('antigravity-event', (e) => {
+        if (e.payload.kind === 'download') {
+          agProgress = { downloaded: e.payload.downloaded ?? 0, total: e.payload.total ?? null };
+        } else if (e.payload.kind === 'login_url' && e.payload.url) {
+          agLoginUrl = e.payload.url;
+        }
+      });
       unlisten = await listen<{ type: string; ok: boolean; error?: string }>(
         'auth-event',
         (e) => {
@@ -91,6 +166,7 @@
 
   onDestroy(() => {
     unlisten?.();
+    agUnlisten?.();
     if (mcpSaveTimer) {
       clearTimeout(mcpSaveTimer);
       mcpSaveTimer = null;
@@ -129,9 +205,44 @@
     await refresh();
   }
 
+  let presetQuery = $state('');
+
+  const PRESET_GROUPS = [
+    { key: 'first-party', label: 'First-party' },
+    { key: 'router', label: 'Routers' },
+    { key: 'hosted', label: 'Hosted inference' },
+    { key: 'local', label: 'Local' },
+  ] as const;
+
   const addablePresets = $derived(
     presets.filter((p) => !providers.some((q) => q.name === p.name)),
   );
+
+  const filteredPresets = $derived.by(() => {
+    const q = presetQuery.trim().toLowerCase();
+    if (!q) return addablePresets;
+    return addablePresets.filter(
+      (p) =>
+        p.label.toLowerCase().includes(q) ||
+        p.name.toLowerCase().includes(q) ||
+        p.base_url.toLowerCase().includes(q) ||
+        p.model.toLowerCase().includes(q),
+    );
+  });
+
+  const presetGroupCount = $derived(
+    PRESET_GROUPS.filter((g) => filteredPresets.some((p) => p.group === g.key)).length,
+  );
+
+  function presetsInGroup(key: string): ProviderPreset[] {
+    return filteredPresets.filter((p) => p.group === key);
+  }
+
+  const presetLabels = $derived(new Map(presets.map((p) => [p.name, p.label])));
+
+  function providerLabel(name: string): string {
+    return presetLabels.get(name) ?? name;
+  }
 
   async function addPreset(preset: ProviderPreset): Promise<void> {
     presetBusy = preset.name;
@@ -145,6 +256,54 @@
     } finally {
       presetBusy = null;
     }
+  }
+
+  let adding = $state<ProviderPreset | null>(null);
+  let justAdded = $state<string | null>(null);
+  let modelLists = $state<Record<string, ProviderModel[]>>({});
+  let modelBusy = $state<string | null>(null);
+
+  function openAdd(preset: ProviderPreset): void {
+    // Local servers and the ACP agent need no key or model decision, so they
+    // stay one click.
+    if (preset.auth === 'none' || preset.auth === 'agent') {
+      void addPreset(preset);
+      return;
+    }
+    error = null;
+    adding = preset;
+  }
+
+  async function addedProvider(name: string, model: string, useNow: boolean): Promise<void> {
+    adding = null;
+    justAdded = name;
+    await refresh();
+    if (useNow) await session.setModel(model, name).catch(() => {});
+    setTimeout(() => (justAdded = null), 2600);
+  }
+
+  async function loadProviderModels(name: string): Promise<void> {
+    if (modelLists[name]) {
+      modelLists = { ...modelLists, [name]: [] };
+      return;
+    }
+    modelBusy = name;
+    try {
+      const m = await import('../ipc');
+      const list = await m.modelsList(name);
+      modelLists = { ...modelLists, [name]: list };
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      modelBusy = null;
+    }
+  }
+
+  async function pickModel(provider: string, model: string): Promise<void> {
+    await session.setModel(model, provider).catch((e: unknown) => {
+      error = e instanceof Error ? e.message : String(e);
+    });
+    await refresh();
   }
 
   async function removeProvider(name: string): Promise<void> {
@@ -235,9 +394,52 @@
     }
   }
 
+  async function agRun(
+    kind: 'install' | 'login' | 'refresh' | 'logout',
+    call: (m: typeof import('../ipc')) => Promise<AntigravityStatus>,
+  ): Promise<void> {
+    agBusy = kind;
+    agError = null;
+    try {
+      const m = await import('../ipc');
+      agStatus = await call(m);
+      if (kind !== 'install') await refresh();
+    } catch (e) {
+      agError = e instanceof Error ? e.message : String(e);
+    } finally {
+      agBusy = null;
+      agProgress = null;
+      agLoginUrl = null;
+      agCopied = false;
+    }
+  }
+
+  async function agCancelLogin(): Promise<void> {
+    const m = await import('../ipc');
+    await m.antigravityLoginCancel().catch(() => {});
+  }
+
+  async function agCopyLink(): Promise<void> {
+    if (!agLoginUrl) return;
+    agCopied = await navigator.clipboard
+      .writeText(agLoginUrl)
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  function agProgressLabel(): string {
+    if (!agProgress) return 'Downloading…';
+    const mb = (n: number) => (n / 1048576).toFixed(0);
+    return agProgress.total
+      ? `Downloading… ${Math.round((agProgress.downloaded / agProgress.total) * 100)}%`
+      : `Downloading… ${mb(agProgress.downloaded)} MB`;
+  }
+
   function authLabel(p: ProviderInfo): string {
+    if (p.kind === 'acp') return p.auth_kind === 'oauth' ? 'google sign-in' : 'not signed in';
     if (p.auth_kind === 'oauth') return 'subscription';
     if (p.auth_kind === 'api_key') return 'api key';
+    if (p.auth_kind === 'env') return 'env key';
     return 'not connected';
   }
 
@@ -475,9 +677,24 @@
 
 <div class="settings">
   <div class="settings-inner">
-    <h1 class="page-title">Settings</h1>
+    <header class="page-head">
+      <p class="eyebrow mono">preferences</p>
+      <h1 class="page-title">Settings</h1>
+    </header>
 
-    <section class="group">
+    <nav class="rail" aria-label="Settings sections">
+      {#each SECTIONS as sec (sec.id)}
+        <button
+          class="rail-chip"
+          class:active={activeSection === sec.id}
+          onclick={() => jumpTo(sec.id)}
+        >
+          {sec.label}
+        </button>
+      {/each}
+    </nav>
+
+    <section class="group" id="appearance">
       <h2 class="group-title">Appearance</h2>
       <p class="group-hint">
         Pick a palette — Auto follows your system's setting.
@@ -500,10 +717,32 @@
             </button>
           {/each}
         </div>
+        <div class="density-row">
+          <span class="density-label">Density</span>
+          <div class="range" role="group" aria-label="Transcript density">
+            <button
+              class="range-btn"
+              class:active={session.density === 'comfortable'}
+              onclick={() => session.setDensity('comfortable')}
+              aria-pressed={session.density === 'comfortable'}
+            >
+              Cosy
+            </button>
+            <button
+              class="range-btn"
+              class:active={session.density === 'compact'}
+              onclick={() => session.setDensity('compact')}
+              aria-pressed={session.density === 'compact'}
+            >
+              Compact
+            </button>
+          </div>
+          <span class="density-hint">Trims vertical rhythm in the transcript.</span>
+        </div>
       </div>
     </section>
 
-    <section class="group">
+    <section class="group" id="providers">
       <h2 class="group-title">Providers</h2>
       <p class="group-hint">
         Connect a provider to chat or run code sessions. Keys go to the OS
@@ -515,9 +754,16 @@
       {:else}
         <div class="provider-list">
           {#each providers as p (p.name)}
-            <div class="provider">
+            <div
+              class="provider"
+              class:live={p.auth_kind !== 'none'}
+              class:fresh={justAdded === p.name}
+            >
               <div class="provider-head">
-                <span class="provider-name">{p.name}</span>
+                <span class="provider-name">{providerLabel(p.name)}</span>
+                {#if providerLabel(p.name) !== p.name}
+                  <span class="provider-slug mono">{p.name}</span>
+                {/if}
                 {#if p.is_default}
                   <span class="badge">default</span>
                 {/if}
@@ -529,6 +775,38 @@
                 {p.kind} · {p.model}
               </div>
               <div class="provider-url mono" title={p.base_url}>{p.base_url}</div>
+              {#if p.kind !== 'acp'}
+                <div class="model-row">
+                  <button
+                    class="model-toggle"
+                    onclick={() => loadProviderModels(p.name)}
+                    disabled={modelBusy === p.name}
+                    aria-expanded={!!modelLists[p.name]?.length}
+                  >
+                    <Icon
+                      name={modelLists[p.name]?.length ? 'chevron-down' : 'chevron-right'}
+                      size={9}
+                    />
+                    {modelBusy === p.name ? 'loading models…' : 'Model'}
+                  </button>
+                  {#if modelLists[p.name]?.length}
+                    <select
+                      class="input model-select"
+                      value={p.model}
+                      onchange={(e) => pickModel(p.name, e.currentTarget.value)}
+                    >
+                      {#if !(modelLists[p.name] ?? []).some((x) => x.id === p.model)}
+                        <option value={p.model}>{p.model}</option>
+                      {/if}
+                      {#each modelLists[p.name] ?? [] as m (m.id)}
+                        <option value={m.id}>{m.id}</option>
+                      {/each}
+                    </select>
+                  {:else}
+                    <span class="model-current mono">{p.model || 'no model'}</span>
+                  {/if}
+                </div>
+              {/if}
 
               {#if p.name === 'nous'}
                 {#if login}
@@ -547,17 +825,90 @@
                     <button
                       class="btn primary"
                       onclick={connectNous}
-                      disabled={loginBusy || p.auth_kind !== 'none'}
+                      disabled={loginBusy || (p.auth_kind !== 'none' && p.auth_kind !== 'env')}
                     >
                       {p.auth_kind === 'none' ? 'Connect Nous Portal' : 'Reconnect'}
                     </button>
-                    {#if p.auth_kind !== 'none'}
+                    {#if p.auth_kind === 'api_key' || p.auth_kind === 'oauth'}
                       <button class="btn" onclick={() => disconnect(p.name)}>Disconnect</button>
                     {/if}
                   </div>
                 {/if}
                 {#if loginError}
                   <p class="error-text">{loginError}</p>
+                {/if}
+              {:else if p.kind === 'acp'}
+                {#if agStatus && !agStatus.supported}
+                  <p class="provider-hint">
+                    Google doesn't publish Antigravity for this platform.
+                  </p>
+                {:else if !agStatus?.installed}
+                  <div class="provider-actions">
+                    <button
+                      class="btn primary"
+                      onclick={() => agRun('install', (m) => m.antigravityInstall())}
+                      disabled={agBusy !== null}
+                    >
+                      {agBusy === 'install' ? agProgressLabel() : 'Install Antigravity'}
+                    </button>
+                    <span class="provider-hint">~100 MB download from Google, checksum-verified</span>
+                  </div>
+                {:else if agBusy === 'login'}
+                  <div class="login-box">
+                    <p class="login-line">Finish signing in with Google in your browser…</p>
+                    <div class="provider-actions">
+                      {#if agLoginUrl}
+                        <button class="btn" onclick={agCopyLink}>
+                          {agCopied ? 'Copied' : 'Copy sign-in link'}
+                        </button>
+                      {/if}
+                      <button class="btn ghost" onclick={agCancelLogin}>Cancel</button>
+                    </div>
+                  </div>
+                {:else if !agStatus.signed_in}
+                  <div class="provider-actions">
+                    <button
+                      class="btn primary"
+                      onclick={() => agRun('login', (m) => m.antigravityLogin())}
+                      disabled={agBusy !== null}
+                    >
+                      Sign in with Google
+                    </button>
+                    <span class="provider-hint">Google AI Free / Pro / Ultra plan</span>
+                  </div>
+                {:else}
+                  <div class="provider-actions">
+                    <span class="provider-hint">
+                      Signed in · {agStatus.models} model{agStatus.models === 1 ? '' : 's'} · v{agStatus.installed}
+                    </span>
+                    <button
+                      class="btn"
+                      onclick={() => agRun('refresh', (m) => m.antigravityRefresh())}
+                      disabled={agBusy !== null}
+                    >
+                      {agBusy === 'refresh' ? 'Checking…' : 'Refresh'}
+                    </button>
+                    <button
+                      class="btn ghost"
+                      onclick={() => agRun('logout', (m) => m.antigravityLogout())}
+                      disabled={agBusy !== null}
+                    >
+                      Sign out
+                    </button>
+                  </div>
+                {/if}
+                <p class="provider-hint ag-note">
+                  Runs Google's official Antigravity agent with its own tools and prompt —
+                  Gemini models from your Google AI plan. hate-agent's token savings don't
+                  apply to these turns.
+                </p>
+                {#if agError}
+                  <p class="error-text">{agError}</p>
+                {/if}
+                {#if !p.is_default}
+                  <div class="provider-actions">
+                    <button class="btn ghost" onclick={() => removeProvider(p.name)}>Remove</button>
+                  </div>
                 {/if}
               {:else}
                 {#if p.name === 'claude'}
@@ -575,7 +926,7 @@
                       </p>
                       <div class="provider-actions">
                         <input
-                          class="key-input"
+                          class="input"
                           type="text"
                           placeholder="paste the code shown…"
                           bind:value={claudeCode}
@@ -620,7 +971,7 @@
                 {/if}
                 <div class="provider-actions">
                   <input
-                    class="key-input"
+                    class="input"
                     type="password"
                     placeholder={p.auth_kind === 'api_key' ? 'replace key…' : 'API key…'}
                     bind:value={keyDrafts[p.name]}
@@ -632,7 +983,7 @@
                   >
                     {keyBusy === p.name ? 'Saving…' : 'Save key'}
                   </button>
-                  {#if p.auth_kind !== 'none'}
+                  {#if p.auth_kind === 'api_key' || p.auth_kind === 'oauth'}
                     <button class="btn ghost" onclick={() => disconnect(p.name)}>Disconnect</button>
                   {/if}
                   {#if !p.is_default}
@@ -644,26 +995,54 @@
           {/each}
 
           {#if addablePresets.length > 0}
-            <p class="preset-title">Add a provider</p>
-            <div class="preset-grid">
-              {#each addablePresets as preset}
-                <button
-                  class="preset-card"
-                  onclick={() => addPreset(preset)}
-                  disabled={presetBusy === preset.name}
-                  title={preset.key_url ?? preset.base_url}
-                >
-                  <span class="preset-name">{preset.label}</span>
-                  <span class="preset-meta">
-                    {preset.auth === 'none'
-                      ? 'local · no key'
-                      : preset.auth === 'oauth'
-                        ? 'subscription or key'
-                        : 'api key'}
-                  </span>
-                </button>
-              {/each}
+            <div class="preset-head">
+              <p class="preset-title">
+                Add a provider
+                <span class="preset-count mono">{addablePresets.length} available</span>
+              </p>
+              {#if addablePresets.length > 6}
+                <input
+                  class="input preset-filter"
+                  type="search"
+                  placeholder="Filter providers…"
+                  aria-label="Filter providers"
+                  bind:value={presetQuery}
+                />
+              {/if}
             </div>
+            {#each PRESET_GROUPS as group (group.key)}
+              {@const items = presetsInGroup(group.key)}
+              {#if items.length > 0}
+                {#if presetGroupCount > 1}
+                  <p class="preset-sub mono">{group.label}</p>
+                {/if}
+                <div class="preset-grid">
+                  {#each items as preset (preset.name)}
+                    <button
+                      class="preset-card"
+                      onclick={() => openAdd(preset)}
+                      disabled={presetBusy === preset.name}
+                      title={`${preset.base_url}
+${preset.key_url ?? ''}`}
+                    >
+                      <span class="preset-name">{preset.label}</span>
+                      <span class="preset-meta">
+                        {preset.auth === 'none'
+                          ? 'local · no key'
+                          : preset.auth === 'agent'
+                            ? 'Google sign-in'
+                            : preset.auth === 'oauth'
+                              ? 'subscription or key'
+                              : (preset.env_hint ?? 'api key')}
+                      </span>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            {/each}
+            {#if filteredPresets.length === 0}
+              <p class="muted">No provider matches “{presetQuery}”.</p>
+            {/if}
           {/if}
         </div>
       {/if}
@@ -672,7 +1051,11 @@
       {/if}
     </section>
 
-    <section class="group">
+    {#if adding}
+      <AddProviderSheet preset={adding} onClose={() => (adding = null)} onAdded={addedProvider} />
+    {/if}
+
+    <section class="group" id="workspace">
       <h2 class="group-title">Workspace</h2>
       <p class="group-hint">
         Folder code sessions operate in. Chat doesn't use it.
@@ -682,7 +1065,6 @@
         <span class="workspace-path mono">
           {session.workspacePath ?? 'No folder — uses app data directory'}
         </span>
-        <span class="spacer"></span>
         <button class="btn" onclick={() => session.pickWorkspace()}>
           Choose folder…
         </button>
@@ -701,7 +1083,7 @@
       </div>
     </section>
 
-    <section class="group">
+    <section class="group" id="skills">
       <h2 class="group-title">Skills</h2>
       <p class="group-hint">
         Markdown knowledge files the agent writes from your sessions — best
@@ -719,7 +1101,28 @@
           <span>Auto-create skills from sessions (one small model call after 3+ turns)</span>
         </label>
         {#if skills.length === 0}
-          <p class="muted skill-empty">No skills yet — they appear here as you work.</p>
+          <div class="empty-block">
+            <p class="empty-title">No skills yet</p>
+            <p class="empty-copy">
+              A skill is a short Markdown note the agent writes after solving something
+              non-obvious — the command that finally worked, the version quirk, the
+              pitfall. Matching skills ride along in the prompt next time.
+            </p>
+            <p class="empty-example mono">
+              example · nextjs-route-handlers — triggers: app router, route handler
+            </p>
+            {#if !skillAuto}
+              <p class="empty-copy">
+                Auto-create is off, so nothing will be learned from your sessions.
+                <button class="btn sm" onclick={() => setAutoSkills(true)}>Turn it on</button>
+              </p>
+            {:else}
+              <p class="empty-copy dim">
+                Skills appear once a session reaches three turns, or when you ask the agent
+                to remember something.
+              </p>
+            {/if}
+          </div>
         {:else}
           <div class="skill-list">
             {#each skills as s (s.name)}
@@ -746,7 +1149,100 @@
       </div>
     </section>
 
-    <section class="group">
+    <section class="group" id="spending">
+      <h2 class="group-title">Spending</h2>
+      <p class="group-hint">
+        Optional ceilings, checked before a turn starts. Nothing is ever blocked
+        silently — hitting the limit asks first.
+      </p>
+      <div class="card spend-card">
+        <div class="spend-row">
+          <label class="spend-field">
+            <span class="spend-label">Per session</span>
+            <div class="money-input">
+              <span class="money-sym mono">$</span>
+              <input
+                class="input"
+                type="number"
+                min="0"
+                step="0.5"
+                placeholder="no limit"
+                value={session.prefs.budget_session_usd ?? ''}
+                onchange={(e) => {
+                  const v = Number(e.currentTarget.value);
+                  void session.savePrefs({
+                    budget_session_usd:
+                      e.currentTarget.value.trim() === '' || !Number.isFinite(v) || v <= 0
+                        ? null
+                        : v,
+                  });
+                }}
+              />
+            </div>
+          </label>
+          <label class="spend-field">
+            <span class="spend-label">Per day</span>
+            <div class="money-input">
+              <span class="money-sym mono">$</span>
+              <input
+                class="input"
+                type="number"
+                min="0"
+                step="1"
+                placeholder="no limit"
+                value={session.prefs.budget_day_usd ?? ''}
+                onchange={(e) => {
+                  const v = Number(e.currentTarget.value);
+                  void session.savePrefs({
+                    budget_day_usd:
+                      e.currentTarget.value.trim() === '' || !Number.isFinite(v) || v <= 0
+                        ? null
+                        : v,
+                  });
+                }}
+              />
+            </div>
+          </label>
+        </div>
+        <p class="spend-now mono">
+          this session {session.costUsd > 0 ? `$${session.costUsd.toFixed(4)}` : '$0'}
+          {#if session.todayCostUsd > 0}
+            · today ${session.todayCostUsd.toFixed(2)}
+          {/if}
+        </p>
+        <div class="toggle-row">
+          <label class="toggle">
+            <input
+              type="checkbox"
+              checked={session.prefs.sound_on_done}
+              onchange={(e) => void session.savePrefs({ sound_on_done: e.currentTarget.checked })}
+            />
+            <span>Chime when a turn finishes in the background</span>
+          </label>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              checked={session.prefs.notify_on_done}
+              onchange={(e) => void session.savePrefs({ notify_on_done: e.currentTarget.checked })}
+            />
+            <span>Flash the taskbar and show a toast</span>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <section class="group" id="usage">
+      <h2 class="group-title">Usage</h2>
+      <p class="group-hint">
+        Read from the local request ledger — tokens, cache hits, latency and price per
+        call. Never uploaded.
+      </p>
+      <div class="card">
+        <UsagePanel />
+      </div>
+    </section>
+
+    <section class="group" id="mcp">
       <h2 class="group-title">
         MCP servers
         <button
@@ -905,10 +1401,22 @@
         </div>
       {:else if mcpLoaded}
         <div class="card">
-          <p class="muted mcp-empty">
-            No MCP servers yet — add one below and its tools show up in
-            every session, Chat included.
-          </p>
+          <div class="empty-block mcp-empty">
+            <p class="empty-title">No MCP servers yet</p>
+            <p class="empty-body">
+              A server exposes extra tools to every session — docs search, a database,
+              your issue tracker. Add one below, or start with Context7 for library docs.
+            </p>
+            <div class="empty-actions">
+              <button class="btn sm" onclick={() => (showMcpAdd = true)}>
+                <Icon name="plus" size={11} />
+                Add a server
+              </button>
+              <button class="btn ghost sm" onclick={addContext7}>
+                Add Context7 docs
+              </button>
+            </div>
+          </div>
         </div>
       {/if}
 
@@ -988,6 +1496,7 @@
           >
             <Icon name="bolt" size={13} /> Add Context7 docs
           </button>
+          <span class="spacer"></span>
           <Popover align="right" width="420px">
             {#snippet trigger()}
               <Icon name="info" size={12} /> docs info
@@ -1043,7 +1552,7 @@
       {/if}
     </section>
 
-    <section class="group">
+    <section class="group" id="about">
       <h2 class="group-title">About</h2>
       <div class="card">
         {#if appInfo}
@@ -1077,47 +1586,193 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    background: var(--bg-0);
+    background:
+      radial-gradient(120% 55% at 50% -12%, var(--bg-1), transparent 62%),
+      var(--bg-0);
   }
   .settings-inner {
-    max-width: 680px;
+    max-width: 704px;
     margin: 0 auto;
-    padding: 30px 24px 72px;
+    padding: 36px 32px 88px;
   }
-  .page-title {
-    font-family: var(--font-ui);
-    font-size: 38px;
-    font-weight: 400;
-    color: var(--fg-0);
-    margin: 0 0 30px;
+  .rail {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 6px;
+    margin: 0 -32px 24px;
+    padding: 10px 32px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    background: linear-gradient(180deg, var(--bg-0) 70%, transparent);
+  }
+  .rail::-webkit-scrollbar {
+    display: none;
+  }
+  .rail-chip {
+    flex: none;
+    padding: 3px 10px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    transition:
+      color var(--motion),
+      border-color var(--motion),
+      background var(--motion);
+  }
+  .rail-chip:hover {
+    color: var(--fg-1);
+    border-color: var(--border-strong);
+  }
+  .rail-chip.active {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
   }
   .group {
-    margin-bottom: 34px;
+    margin-bottom: 30px;
+    scroll-margin-top: 56px;
   }
   .group-title {
-    font-family: var(--font-mono);
-    font-size: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-ui);
+    font-size: 13px;
+    font-weight: 600;
     color: var(--fg-0);
-    margin: 0 0 4px;
+    margin: 0 0 6px;
+  }
+  .group-title::after {
+    content: '';
+    flex: 1;
+    min-width: 24px;
+    height: 1px;
+    background: linear-gradient(90deg, var(--border), transparent);
   }
   .group-hint {
+    max-width: 64ch;
     font-family: var(--font-mono);
-    font-size: 14px;
+    font-size: 12px;
     color: var(--fg-2);
-    margin: 0 0 12px;
+    margin: 0 0 14px;
     line-height: 1.6;
   }
 
   .card,
   .provider,
   .workspace-row {
-    background: var(--bg-1);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--fg-0) 2.5%, var(--bg-1)),
+      var(--bg-1)
+    );
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-sm);
   }
+  .density-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .density-label {
+    font-size: 11.5px;
+    color: var(--fg-1);
+  }
+  .density-hint {
+    font-size: 10.5px;
+    color: var(--fg-3);
+  }
+  .range {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .range-btn {
+    padding: 3px 9px;
+    border-radius: 6px;
+    font-size: 10.5px;
+    color: var(--fg-3);
+  }
+  .range-btn.active {
+    background: var(--bg-0);
+    color: var(--fg-0);
+  }
+  .spend-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .spend-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+  }
+  .spend-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .spend-label {
+    font-size: 11px;
+    color: var(--fg-2);
+  }
+  .money-input {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .money-input .input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .money-sym {
+    font-size: 12px;
+    color: var(--fg-3);
+    flex: none;
+  }
+  .spend-now {
+    margin: 0;
+    font-size: 10.5px;
+    color: var(--fg-3);
+  }
+  .toggle-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    color: var(--fg-2);
+    cursor: pointer;
+  }
+  .toggle input {
+    accent-color: var(--accent);
+    flex: none;
+  }
   .card {
-    padding: 14px 16px;
+    padding: 16px 18px;
+  }
+  /* These cards supply their own row padding, so the shell stays flush. */
+  .card:has(> .skill-toggle) {
+    padding: 0;
   }
 
   .provider-name,
@@ -1126,23 +1781,22 @@
   .workspace-path,
   .about-grid dd,
   .login-line,
-  .login-line code,
-  .key-input {
+  .login-line code {
     font-family: var(--font-mono);
   }
   .seg {
     display: inline-flex;
-    gap: 4px;
+    gap: 3px;
     padding: 3px;
-    background: var(--bg-2);
+    background: var(--bg-0);
     border: 1px solid var(--border);
     border-radius: var(--radius);
   }
   .seg-item {
     font-family: var(--font-mono);
-    font-size: 14px;
-    padding: 7px 18px;
-    border-radius: 5px;
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: 7px;
     border: 1px solid transparent;
     color: var(--fg-2);
     text-transform: capitalize;
@@ -1155,59 +1809,59 @@
     color: var(--fg-0);
   }
   .seg-item.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-fg);
-    box-shadow: 0 2px 0 rgba(0, 0, 0, 0.4);
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+    color: var(--accent);
   }
   .theme-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
     gap: 10px;
   }
   .theme-card {
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 8px;
     padding: 8px;
-    background: var(--bg-1);
+    background: var(--bg-0);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: 12px;
     cursor: pointer;
     text-align: left;
     transition:
       border-color var(--motion),
-      transform var(--motion);
+      transform var(--motion),
+      box-shadow var(--motion);
   }
   .theme-card:hover {
     border-color: var(--border-strong);
     transform: translateY(-1px);
   }
   .theme-card.active {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .theme-prev {
     display: flex;
     flex-direction: column;
     justify-content: flex-end;
     gap: 5px;
-    height: 44px;
-    padding: 8px;
-    border-radius: 5px;
-    border: 1px solid rgba(128, 128, 128, 0.25);
+    height: 46px;
+    padding: 9px;
+    border-radius: 8px;
+    border: 1px solid rgba(128, 128, 128, 0.2);
     overflow: hidden;
   }
   .theme-bar {
     height: 5px;
     width: 55%;
-    border-radius: 2px;
+    border-radius: 3px;
   }
   .theme-line {
     height: 3px;
     width: 80%;
-    border-radius: 2px;
-    opacity: 0.55;
+    border-radius: 3px;
+    opacity: 0.5;
   }
   .theme-name {
     font-family: var(--font-ui);
@@ -1223,75 +1877,125 @@
     gap: 10px;
   }
   .provider {
-    padding: 14px 16px;
+    position: relative;
+    overflow: hidden;
+    padding: 16px 18px 16px 20px;
+  }
+  .provider::before {
+    content: '';
+    position: absolute;
+    inset: 14px auto 14px 0;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+  .provider.live::before {
+    background: color-mix(in srgb, var(--ok) 65%, transparent);
   }
   .provider-head {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
-    margin-bottom: 4px;
+    margin-bottom: 3px;
   }
   .provider-name {
-    font-size: 16px;
+    font-size: 13px;
+    font-weight: 500;
     color: var(--fg-0);
   }
   .badge {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 10px;
+    letter-spacing: 0.05em;
     padding: 2px 8px;
     border-radius: var(--radius-pill);
     background: var(--bg-3);
     color: var(--fg-2);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
   .badge.connected {
     background: var(--accent-soft);
     color: var(--accent);
   }
   .provider-meta {
-    font-size: 14px;
+    font-size: 11.5px;
+    color: var(--fg-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .provider.fresh {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 1px var(--accent-dim);
+  }
+  .model-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .model-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    font-size: 10.5px;
+    color: var(--fg-3);
+    padding: 3px 6px;
+    border-radius: 6px;
+  }
+  .model-toggle:hover:not(:disabled) {
     color: var(--fg-1);
+    background: var(--bg-3);
+  }
+  .model-current {
+    font-size: 10.5px;
+    color: var(--fg-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .model-select {
+    width: auto;
+    padding: 4px 8px;
+    font-size: 11.5px;
+    flex: 1 1 auto;
+    min-width: 0;
   }
   .provider-url {
-    font-size: 13px;
+    font-size: 11px;
     color: var(--fg-3);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    margin-bottom: 10px;
+    margin-top: 2px;
   }
   .provider-actions {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+    margin-top: 12px;
   }
-  .key-input {
-    flex: 1;
+  .provider-actions .input {
+    flex: 1 1 200px;
     min-width: 160px;
-    padding: 8px 12px;
-    font-size: 14px;
-    background: var(--bg-0);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--fg-0);
-  }
-  .key-input::placeholder {
-    color: var(--fg-3);
-  }
-  .key-input:focus {
-    outline: none;
-    border-color: var(--accent-dim);
+    width: auto;
   }
   .login-box {
-    padding: 8px 0 2px;
+    margin-top: 10px;
+    padding: 4px 0 0;
+  }
+  .login-box .provider-actions {
+    margin-top: 8px;
   }
   .login-line {
-    font-size: 14px;
+    font-size: 12px;
     color: var(--fg-1);
     margin: 0 0 8px;
-    line-height: 1.6;
+    line-height: 1.65;
+    overflow-wrap: anywhere;
   }
   .login-line a {
     color: var(--fg-0);
@@ -1304,31 +2008,70 @@
     border-radius: var(--radius-sm);
   }
   .provider-hint {
-    font-size: 10px;
+    font-size: 11px;
     color: var(--fg-3);
     align-self: center;
   }
+  .preset-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 20px 0 4px;
+    flex-wrap: wrap;
+  }
   .preset-title {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
     font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+    margin: 0;
+  }
+  .preset-count {
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--fg-4, var(--fg-3));
+    opacity: 0.7;
+  }
+  .preset-filter {
+    margin-left: auto;
+    width: 200px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+  }
+  .preset-sub {
     font-size: 10px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--fg-3);
-    margin: 14px 0 8px;
+    color: var(--fg-4, var(--fg-3));
+    opacity: 0.75;
+    margin: 14px 0 6px;
+  }
+  .provider-slug {
+    font-size: 10px;
+    color: var(--fg-4, var(--fg-3));
+    opacity: 0.65;
   }
   .preset-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
     gap: 8px;
   }
   .preset-card {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 3px;
     padding: 10px 12px;
-    background: var(--bg-1);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--fg-0) 2.5%, var(--bg-1)),
+      var(--bg-1)
+    );
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: 12px;
     cursor: pointer;
     text-align: left;
     transition:
@@ -1340,33 +2083,72 @@
     transform: translateY(-1px);
   }
   .preset-card:disabled {
-    opacity: 0.5;
+    opacity: 0.45;
     cursor: default;
   }
   .preset-name {
     font-size: 12px;
     color: var(--fg-0);
+    overflow-wrap: anywhere;
   }
   .preset-meta {
     font-family: var(--font-mono);
     font-size: 10px;
     color: var(--fg-3);
+    overflow-wrap: anywhere;
   }
   .skill-toggle {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 10px 14px;
+    gap: 9px;
+    padding: 12px 16px;
     font-size: 12px;
     color: var(--fg-1);
     cursor: pointer;
   }
   .skill-toggle input {
     accent-color: var(--accent);
+    flex: none;
   }
-  .skill-empty {
-    padding: 0 14px 12px;
-    font-size: 12px;
+  .empty-block {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 4px 16px 16px;
+  }
+  .card:has(> .skill-toggle) .empty-block {
+    padding: 14px 16px 16px;
+    border-top: 1px solid var(--border);
+  }
+  .empty-title {
+    margin: 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--fg-0);
+  }
+  .empty-copy,
+  .empty-body {
+    margin: 0;
+    max-width: 62ch;
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: var(--fg-2);
+  }
+  .empty-copy.dim {
+    color: var(--fg-3);
+  }
+  .empty-example {
+    margin: 0;
+    padding: 7px 10px;
+    font-size: 10.5px;
+    color: var(--fg-2);
+    background: var(--bg-0);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+  }
+  .empty-copy .btn {
+    margin-left: 6px;
+    vertical-align: middle;
   }
   .skill-list {
     display: flex;
@@ -1377,7 +2159,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px 6px 14px;
+    padding: 6px 12px 6px 16px;
     border-bottom: 1px solid var(--border);
   }
   .skill-row:last-of-type {
@@ -1388,6 +2170,7 @@
     flex-direction: column;
     gap: 2px;
     flex: 1;
+    min-width: 0;
     text-align: left;
     background: none;
     border: none;
@@ -1397,18 +2180,20 @@
   .skill-title {
     font-size: 12px;
     color: var(--fg-0);
+    overflow-wrap: anywhere;
   }
   .skill-meta {
     font-size: 10px;
     color: var(--fg-3);
+    overflow-wrap: anywhere;
   }
   .skill-body {
     margin: 0;
-    padding: 10px 14px;
+    padding: 12px 16px;
     font-size: 11px;
-    line-height: 1.55;
+    line-height: 1.6;
     color: var(--fg-1);
-    background: var(--bg-1);
+    background: var(--bg-0);
     border-bottom: 1px solid var(--border);
     max-height: 260px;
     overflow: auto;
@@ -1417,12 +2202,15 @@
   .workspace-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
-    padding: 12px 14px;
+    padding: 13px 16px;
     color: var(--fg-2);
   }
   .workspace-path {
-    font-size: 14px;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 12.5px;
     color: var(--fg-1);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1432,67 +2220,15 @@
     flex: 1;
   }
 
-  .btn {
-    font-family: var(--font-mono);
-    font-size: 15px;
-    padding: 8px 16px;
-    border-radius: 5px;
-    border: 2px solid #2b2d31;
-    background: linear-gradient(#1a1c1f, #121315);
-    color: #e9e7e1;
-    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
-    cursor: pointer;
-    transition:
-      transform var(--motion),
-      border-color var(--motion),
-      box-shadow var(--motion),
-      filter var(--motion);
-    box-shadow:
-      inset 0 2px 0 rgba(255, 255, 255, 0.07),
-      inset 0 -2px 0 rgba(0, 0, 0, 0.55),
-      0 3px 0 #050505,
-      var(--shadow-sm);
-  }
-  .btn:hover {
-    border-color: var(--accent-dim);
-    transform: translateY(-1px);
-  }
-  .btn:active {
-    transform: translateY(2px);
-    box-shadow:
-      inset 0 2px 0 rgba(255, 255, 255, 0.05),
-      inset 0 -1px 0 rgba(0, 0, 0, 0.55),
-      0 1px 0 #050505,
-      var(--shadow-sm);
-  }
-  .btn:disabled {
-    opacity: 0.45;
-    cursor: default;
-    transform: none;
-  }
-  .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-fg);
-    text-shadow: none;
-  }
-  .btn.primary:hover {
-    filter: brightness(1.06);
-  }
-  .btn.ghost {
-    background: rgba(18, 19, 21, 0.7);
-    border-color: #26282c;
-    color: #b9b6ae;
-  }
   .error-text {
+    margin: 10px 0 0;
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 12px;
     color: var(--err);
-    margin: 8px 0 0;
   }
   .muted {
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 12px;
     color: var(--fg-3);
   }
   .pref-row {
@@ -1500,10 +2236,10 @@
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    margin: 14px -16px -14px;
-    padding: 12px 16px;
+    margin: 16px -18px -16px;
+    padding: 13px 18px;
     border-top: 1px solid var(--border);
-    border-radius: 0 0 var(--radius) var(--radius);
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
     cursor: pointer;
     transition: background var(--motion);
   }
@@ -1523,47 +2259,12 @@
     font-size: 11px;
     color: var(--fg-2);
   }
-  .switch {
-    appearance: none;
-    flex: none;
-    width: 34px;
-    height: 19px;
-    border-radius: 10px;
-    background: var(--bg-3);
-    border: 1px solid var(--border);
-    position: relative;
-    cursor: pointer;
-    transition:
-      background var(--motion),
-      border-color var(--motion);
-  }
-  .switch::after {
-    content: '';
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    background: var(--fg-2);
-    transition:
-      transform var(--motion),
-      background var(--motion);
-  }
-  .switch:checked {
-    background: color-mix(in srgb, var(--accent) 28%, var(--bg-3));
-    border-color: var(--accent);
-  }
-  .switch:checked::after {
-    transform: translateX(15px);
-    background: var(--accent);
-  }
   .about-grid {
     display: grid;
-    grid-template-columns: 90px 1fr;
-    gap: 8px 14px;
+    grid-template-columns: 84px minmax(0, 1fr);
+    gap: 9px 14px;
     margin: 0;
-    font-size: 13px;
+    font-size: 12.5px;
   }
   .about-grid dt {
     font-family: var(--font-mono);
@@ -1571,7 +2272,7 @@
   }
   .about-grid dd {
     margin: 0;
-    font-size: 14px;
+    font-size: 12.5px;
     color: var(--fg-1);
   }
   .about-path {
@@ -1587,8 +2288,8 @@
     overflow: hidden;
   }
   .mcp-row {
-    padding: 10px 14px;
-    border-bottom: 1px solid rgba(38, 40, 44, 0.6);
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
   }
   .mcp-row:last-child {
     border-bottom: none;
@@ -1596,33 +2297,40 @@
   .mcp-row.mcp-off {
     opacity: 0.55;
   }
-  .mcp-refresh {
+  .ag-note {
+    margin: 10px 0 0;
     font-size: 11px;
-    padding: 2px 8px;
-    margin-left: 8px;
+    line-height: 1.6;
+    color: var(--fg-2);
+  }
+  .mcp-refresh {
+    font-size: 10.5px;
+    padding: 2px 9px;
+    margin-left: 2px;
     vertical-align: middle;
   }
   .mcp-head {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
   }
   .mcp-dot {
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     background: var(--fg-3);
     flex: none;
   }
   .mcp-dot.dot-ok {
-    background: #4caf7d;
+    background: color-mix(in srgb, var(--ok) 80%, transparent);
   }
   .mcp-dot.dot-busy {
-    background: #d9a441;
+    background: var(--warn);
     animation: mcp-pulse 1s ease-in-out infinite;
   }
   .mcp-dot.dot-err {
-    background: var(--err, #d95f4e);
+    background: var(--err);
   }
   @keyframes mcp-pulse {
     50% {
@@ -1630,27 +2338,27 @@
     }
   }
   .mcp-name {
-    font-size: 13px;
-    color: var(--fg-1);
+    font-size: 12.5px;
+    color: var(--fg-0);
   }
   .mcp-kind {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 10px;
     color: var(--fg-3);
-    border: 1px solid #26282c;
-    border-radius: 3px;
-    padding: 1px 5px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 6px;
   }
   .mcp-state {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 10.5px;
     color: var(--fg-3);
   }
   .mcp-state.state-ok {
-    color: #4caf7d;
+    color: color-mix(in srgb, var(--ok) 85%, var(--fg-2));
   }
   .mcp-state.state-err {
-    color: var(--err, #d95f4e);
+    color: var(--err);
   }
   .mcp-spacer {
     flex: 1;
@@ -1660,14 +2368,18 @@
     align-items: center;
     gap: 4px;
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 10.5px;
     color: var(--fg-3);
     cursor: pointer;
     user-select: none;
   }
+  .mcp-enable input {
+    accent-color: var(--accent);
+    flex: none;
+  }
   .mcp-sub {
-    margin: 5px 0 0 16px;
-    font-size: 12px;
+    margin: 5px 0 0 15px;
+    font-size: 11.5px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1676,28 +2388,27 @@
     color: var(--fg-3);
   }
   .mcp-editor {
-    margin: 10px 0 2px 16px;
+    margin: 12px 0 2px 15px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    max-width: 520px;
+    gap: 10px;
   }
   .mcp-add {
     margin-top: 10px;
+    padding: 0;
   }
   .mcp-add-grid {
     display: grid;
-    grid-template-columns: 1fr 130px;
-    gap: 10px 14px;
-    padding: 14px;
+    grid-template-columns: 1fr 132px;
+    gap: 12px 14px;
+    padding: 16px 18px 12px;
   }
   .mcp-add-actions {
     display: flex;
     gap: 8px;
-    padding: 0 14px 14px;
+    padding: 0 18px 16px;
   }
   .mcp-add-btn {
-    margin-top: 10px;
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -1707,12 +2418,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 8px;
-  }
-  .mcp-add-row .mcp-add-btn {
-    margin-top: 10px;
-  }
-  .mcp-add-row :global(.pop) {
-    margin-top: 10px;
+    margin-top: 12px;
   }
   .ctx7 {
     display: flex;
@@ -1774,51 +2480,44 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-top: 10px;
+    margin-top: 12px;
   }
   .mcp-error {
     font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--err, #d95f4e);
+    font-size: 11.5px;
+    color: var(--err);
+  }
+  .empty-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
   }
   .mcp-empty {
-    padding: 14px;
+    padding: 0;
     margin: 0;
-    font-size: 13px;
   }
   .fld {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 5px;
+    min-width: 0;
   }
   .fld-wide {
     grid-column: 1 / -1;
   }
   .fld-label {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 10.5px;
     color: var(--fg-3);
-  }
-  .input {
-    background: rgba(18, 19, 21, 0.7);
-    border: 1px solid #26282c;
-    border-radius: 5px;
-    color: var(--fg-1);
-    font-family: inherit;
-    font-size: 13px;
-    padding: 6px 9px;
-    outline: none;
-  }
-  .input:focus {
-    border-color: #3d4148;
   }
   .input.mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 11.5px;
   }
   textarea.input {
     resize: vertical;
-    min-height: 34px;
+    min-height: 36px;
   }
   .seg-sm .seg-item {
     padding: 3px 10px;
@@ -1831,16 +2530,41 @@
     width: 24px;
     height: 24px;
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     background: transparent;
     color: var(--fg-3);
     cursor: pointer;
+    transition:
+      background var(--motion),
+      color var(--motion);
   }
   .icon-btn:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--bg-2);
     color: var(--fg-1);
   }
   .icon-btn.danger:hover {
-    color: var(--err, #d95f4e);
+    color: var(--err);
+  }
+  @media (max-width: 640px) {
+    .settings-inner {
+      padding: 24px 16px 64px;
+    }
+    .rail {
+      margin: 0 -16px 20px;
+      padding: 8px 16px;
+    }
+    .preset-filter {
+      width: 100%;
+      margin-left: 0;
+    }
+    .mcp-add-grid {
+      grid-template-columns: 1fr;
+    }
+    .about-grid {
+      grid-template-columns: 74px minmax(0, 1fr);
+    }
+    .theme-grid {
+      grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    }
   }
 </style>

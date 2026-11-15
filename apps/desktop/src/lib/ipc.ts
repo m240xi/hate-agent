@@ -11,8 +11,21 @@ export async function appInfo(): Promise<AppInfo> {
   return invoke<AppInfo>('app_info');
 }
 
-export async function sessionSend(text: string, pins?: PinRef[]): Promise<void> {
-  return invoke<void>('session_send', { text, pins: pins?.length ? pins : null });
+export interface ImageAttachment {
+  mime: string;
+  data: string;
+}
+
+export async function sessionSend(
+  text: string,
+  pins?: PinRef[],
+  images?: ImageAttachment[],
+): Promise<void> {
+  return invoke<void>('session_send', {
+    text,
+    pins: pins?.length ? pins : null,
+    images: images?.length ? images : null,
+  });
 }
 
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
@@ -48,6 +61,14 @@ export interface ProviderModel {
 
 export async function modelsList(provider?: string): Promise<ProviderModel[]> {
   return invoke<ProviderModel[]>('models_list', { provider: provider ?? null });
+}
+
+export async function providerPreviewModels(
+  kind: string,
+  base_url: string,
+  api_key: string,
+): Promise<ProviderModel[]> {
+  return invoke<ProviderModel[]>('provider_preview_models', { kind, baseUrl: base_url, apiKey: api_key });
 }
 
 export async function providerSetModel(provider: string, model: string): Promise<void> {
@@ -104,6 +125,38 @@ export async function authSetKey(provider: string, key: string): Promise<void> {
   return invoke<void>('auth_set_key', { provider, key });
 }
 
+export interface AntigravityStatus {
+  supported: boolean;
+  platform: string | null;
+  installed: string | null;
+  signed_in: boolean;
+  models: number;
+}
+
+export async function antigravityStatus(): Promise<AntigravityStatus> {
+  return invoke<AntigravityStatus>('antigravity_status');
+}
+
+export async function antigravityInstall(): Promise<AntigravityStatus> {
+  return invoke<AntigravityStatus>('antigravity_install');
+}
+
+export async function antigravityRefresh(): Promise<AntigravityStatus> {
+  return invoke<AntigravityStatus>('antigravity_refresh');
+}
+
+export async function antigravityLogin(): Promise<AntigravityStatus> {
+  return invoke<AntigravityStatus>('antigravity_login');
+}
+
+export async function antigravityLoginCancel(): Promise<void> {
+  return invoke<void>('antigravity_login_cancel');
+}
+
+export async function antigravityLogout(): Promise<AntigravityStatus> {
+  return invoke<AntigravityStatus>('antigravity_logout');
+}
+
 export async function authLogout(provider: string): Promise<void> {
   return invoke<void>('auth_logout', { provider });
 }
@@ -114,7 +167,7 @@ export interface ProviderInfo {
   base_url: string;
   model: string;
   is_default: boolean;
-  auth_kind: 'none' | 'api_key' | 'oauth';
+  auth_kind: 'none' | 'api_key' | 'oauth' | 'env';
   auth_expires_at: number | null;
 }
 
@@ -125,10 +178,11 @@ export async function providersList(): Promise<ProviderInfo[]> {
 export interface ProviderPreset {
   name: string;
   label: string;
+  group: string;
   kind: string;
   base_url: string;
   model: string;
-  auth: 'api_key' | 'oauth' | 'none';
+  auth: 'api_key' | 'oauth' | 'none' | 'agent';
   env_hint: string | null;
   key_url: string | null;
 }
@@ -148,6 +202,88 @@ export async function providerUpsert(
 
 export async function providerRemove(name: string): Promise<void> {
   return invoke<void>('provider_remove', { name });
+}
+
+export interface Prefs {
+  budget_session_usd: number | null;
+  budget_day_usd: number | null;
+  sound_on_done: boolean;
+  notify_on_done: boolean;
+}
+
+export async function prefsGet(): Promise<Prefs> {
+  return invoke<Prefs>('prefs_get');
+}
+
+export async function prefsSet(p: Prefs): Promise<void> {
+  return invoke<void>('prefs_set', {
+    budgetSessionUsd: p.budget_session_usd,
+    budgetDayUsd: p.budget_day_usd,
+    soundOnDone: p.sound_on_done,
+    notifyOnDone: p.notify_on_done,
+  });
+}
+
+export interface UsageTotalsInfo {
+  requests: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  thinking_tokens: number;
+  latency_ms: number;
+  cost_usd: number;
+}
+
+export interface ModelUsageInfo {
+  model: string;
+  provider: string;
+  totals: UsageTotalsInfo;
+}
+
+export interface DayUsageInfo {
+  day: number;
+  totals: UsageTotalsInfo;
+}
+
+export interface SessionUsageInfo {
+  session_id: string;
+  title: string;
+  model: string;
+  started_at: number;
+  totals: UsageTotalsInfo;
+}
+
+export interface UsageOverview {
+  totals: UsageTotalsInfo;
+  by_model: ModelUsageInfo[];
+  by_day: DayUsageInfo[];
+  sessions: SessionUsageInfo[];
+  priced: boolean;
+}
+
+export async function usageOverview(days: number): Promise<UsageOverview> {
+  return invoke<UsageOverview>('usage_overview', { days });
+}
+
+export async function exportSave(format: string, content: string): Promise<string | null> {
+  return invoke<string | null>('export_save', { format, content });
+}
+
+export interface RewindResult {
+  session_id: string;
+  branched: boolean;
+}
+
+export async function sessionRewindMessage(
+  userIndex: number,
+  branch: boolean,
+  title: string | null,
+): Promise<RewindResult> {
+  return invoke<RewindResult>('session_rewind_message', {
+    userIndex,
+    branch,
+    title,
+  });
 }
 
 export interface SkillInfo {
@@ -267,6 +403,10 @@ export async function sessionOpen(id: string): Promise<SessionOpenResult> {
 
 export async function sessionDelete(id: string): Promise<void> {
   return invoke<void>('session_delete', { id });
+}
+
+export async function sessionRename(id: string, title: string): Promise<void> {
+  return invoke<void>('session_rename', { id, title });
 }
 
 export async function sessionSaveUi(id: string, uiState: string): Promise<void> {

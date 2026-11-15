@@ -196,6 +196,80 @@
   --info: #9a8fc4;
 }
 
+/* Density: compact trims vertical rhythm without touching type sizes. */
+:root[data-density='compact'] .transcript {
+  gap: 4px;
+  padding-top: 10px;
+}
+:root[data-density='compact'] .transcript .tool-card,
+:root[data-density='compact'] .transcript .user-msg,
+:root[data-density='compact'] .transcript .assistant-msg {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+:root[data-density='compact'] .transcript .tool-line {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+/* ---- type system -----------------------------------------------------
+   One eyebrow/title/section scale for every surface, so the views share a
+   rhythm instead of each inventing its own. */
+
+.eyebrow {
+  margin: 0 0 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.page-title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fg-0);
+}
+
+.page-head {
+  margin-bottom: 18px;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.hint {
+  margin: 0;
+  max-width: 64ch;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg-3);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -222,6 +296,136 @@ pre,
 .mono {
   font-family: var(--font-mono);
   font-size: 0.92em;
+}
+
+/* ---- shared controls -------------------------------------------------
+   One button and field system for every surface (settings, permission and
+   plan bars, pickers). Components may size variants, but colour, radius and
+   focus treatment live here so themes stay consistent. */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 7px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--bg-2);
+  color: var(--fg-0);
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition:
+    background var(--motion),
+    border-color var(--motion),
+    color var(--motion),
+    transform var(--motion);
+}
+.btn:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border-strong));
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.btn.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-fg);
+}
+.btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, var(--fg-0));
+}
+.btn.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--fg-2);
+  box-shadow: none;
+}
+.btn.ghost:hover:not(:disabled) {
+  background: var(--bg-2);
+  color: var(--fg-0);
+}
+.btn.danger {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 32%, var(--border-strong));
+}
+.btn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--err) 12%, var(--bg-2));
+  border-color: var(--err);
+  color: var(--err);
+}
+.btn.sm {
+  padding: 3px 10px;
+  font-size: 11.5px;
+  border-radius: 7px;
+  box-shadow: none;
+}
+
+.input {
+  width: 100%;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--fg-1);
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  transition:
+    border-color var(--motion),
+    box-shadow var(--motion);
+}
+.input::placeholder {
+  color: var(--fg-3);
+}
+.input:focus {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.switch {
+  appearance: none;
+  flex: none;
+  width: 34px;
+  height: 19px;
+  border-radius: 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: pointer;
+  transition:
+    background var(--motion),
+    border-color var(--motion);
+}
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--fg-2);
+  transition:
+    transform var(--motion),
+    background var(--motion);
+}
+.switch:checked {
+  background: color-mix(in srgb, var(--accent) 26%, var(--bg-3));
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.switch:checked::after {
+  transform: translateX(15px);
+  background: var(--accent);
 }
 
 button {

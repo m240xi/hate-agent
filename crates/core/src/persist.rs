@@ -18,6 +18,14 @@ pub struct PersistedSession {
     pub turn: u32,
     pub usage: TokenUsage,
     pub cost_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<ExternalRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalRef {
+    pub agent: String,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

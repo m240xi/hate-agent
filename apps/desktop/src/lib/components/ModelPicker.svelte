@@ -296,7 +296,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    max-height: min(480px, 70vh);
+    max-height: min(480px, var(--pop-max, 70vh));
   }
   .mp-search {
     padding: 8px;

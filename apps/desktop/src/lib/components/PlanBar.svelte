@@ -8,7 +8,7 @@
 {#if session.planReady && !session.running}
   <div class="plan-bar rise" role="status" aria-label="Plan ready">
     <div class="plan-head">
-      <Icon name="list" size={13} />
+      <Icon name="list-ordered" size={13} />
       <span class="plan-title">Plan ready</span>
       <span class="plan-meta">{steps} step{steps === 1 ? '' : 's'} · nothing has been changed</span>
     </div>

@@ -106,7 +106,7 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
     if let Some((name, pconf)) = provider_entry(&ctx, provider_override.as_deref())
         && pconf.kind == antigravity::KIND
     {
-        let handle = spawn_antigravity(&mut guard, app, &ctx, name, pconf.model)?;
+        let handle = spawn_antigravity(&mut guard, app, name, pconf.model)?;
         return Ok(forward_events(&mut guard, app, handle, true));
     }
     let (name, configured_model, provider) = resolve_target(&ctx, provider_override.as_deref())?;
@@ -133,26 +133,21 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
         None => None,
     };
 
-    let tools = if guard.mode == "code" {
-        guard
-            .workspace
-            .clone()
-            .or_else(|| ctx.config.workspace_path.clone())
-            .and_then(|p| match WorkspaceTools::new(&p) {
-                Ok(t) => {
-                    if let Some(key) = guard.key.as_deref() {
-                        t.enable_checkpoints(checkpoint_root(key));
-                    }
-                    Some(std::sync::Arc::new(t))
+    let tools = guard
+        .workspace
+        .clone()
+        .and_then(|p| match WorkspaceTools::new(&p) {
+            Ok(t) => {
+                if let Some(key) = guard.key.as_deref() {
+                    t.enable_checkpoints(checkpoint_root(key));
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "workspace tools unavailable");
-                    None
-                }
-            })
-    } else {
-        None
-    };
+                Some(std::sync::Arc::new(t))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "workspace tools unavailable");
+                None
+            }
+        });
 
     let ledger = ledger_handle();
     let mcp = app.state::<McpState>().hub.clone();
@@ -198,7 +193,6 @@ fn forward_events(
 fn spawn_antigravity(
     guard: &mut SessionSlot,
     app: &AppHandle,
-    ctx: &AuthContext,
     name: String,
     configured_model: String,
 ) -> Result<SessionHandle, String> {
@@ -213,15 +207,10 @@ fn spawn_antigravity(
                 .map(|r| r.model.clone())
         })
         .unwrap_or(configured_model);
-    let cwd = if guard.mode == "code" {
-        guard
-            .workspace
-            .clone()
-            .or_else(|| ctx.config.workspace_path.clone())
-            .map_or_else(hate_acp::runtime::scratch_dir, std::path::PathBuf::from)
-    } else {
-        hate_acp::runtime::scratch_dir()
-    };
+    let cwd = guard
+        .workspace
+        .clone()
+        .map_or_else(hate_acp::runtime::scratch_dir, std::path::PathBuf::from);
     let persist = match guard.key.clone() {
         Some(key) => Some(PersistCtx {
             key,
@@ -381,12 +370,10 @@ pub fn session_rewind(state: State<'_, Sessions>, checkpoint_id: String) -> Resu
         .lock()
         .map_err(|_| "session lock poisoned".to_string())?;
     let key = guard.key.clone().ok_or("session has no checkpoint store")?;
-    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
     let ws = guard
         .workspace
         .clone()
-        .or_else(|| ctx.config.workspace_path.clone())
-        .ok_or("no workspace folder")?;
+        .ok_or("no folder attached to this chat")?;
     let ckpt_dir = checkpoint_root(&key).join(&checkpoint_id);
     let restored =
         hate_core::restore_checkpoint(std::path::Path::new(&ckpt_dir), std::path::Path::new(&ws))?;
@@ -1297,23 +1284,39 @@ pub fn session_rewind_message(
     }
 }
 
-#[tauri::command]
-#[specta::specta]
-pub fn workspace_get() -> Result<Option<String>, String> {
-    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
-    Ok(ctx.config.workspace_path.clone())
+fn mode_for(workspace: Option<&str>) -> &'static str {
+    if workspace.is_some() { "code" } else { "chat" }
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn workspace_set(state: State<'_, Sessions>, path: Option<String>) -> Result<(), String> {
-    let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
-    ctx.config.workspace_path.clone_from(&path);
-    ctx.config.save().map_err(|e| e.to_string())?;
-    if let Ok(mut guard) = state.inner.lock()
-        && guard.mode == "code"
+pub fn session_set_workspace(
+    state: State<'_, Sessions>,
+    path: Option<String>,
+) -> Result<(), String> {
+    ensure_idle(&state)?;
+    let path = path.filter(|p| !p.trim().is_empty());
+    if let Some(p) = path.as_deref()
+        && !std::path::Path::new(p).is_dir()
     {
-        guard.workspace = path;
+        return Err(format!("{p} is not a folder"));
+    }
+    let mut guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    if guard.workspace == path {
+        return Ok(());
+    }
+    guard.workspace.clone_from(&path);
+    guard.mode = mode_for(path.as_deref()).to_string();
+    if let Some(key) = guard.key.clone() {
+        let db = db()?;
+        db.set_workspace(&key, path.as_deref(), &guard.mode)?;
+        if guard.handle.take().is_some() {
+            guard.acp = false;
+            guard.restore = db.load(&key)?.and_then(|s| s.persisted);
+        }
     }
     Ok(())
 }
@@ -1386,12 +1389,8 @@ fn prime_slot(guard: &mut SessionSlot, stored: Option<StoredSession>) {
     guard.thinking = None;
     if let Some(s) = stored {
         guard.key = Some(s.meta.id.clone());
-        guard.mode.clone_from(&s.meta.mode);
-        guard.workspace = s
-            .persisted
-            .as_ref()
-            .and_then(|p| p.workspace.clone())
-            .or_else(|| s.meta.workspace.clone());
+        guard.workspace.clone_from(&s.meta.workspace);
+        guard.mode = mode_for(guard.workspace.as_deref()).to_string();
         guard.provider = (!s.meta.provider.is_empty()).then(|| s.meta.provider.clone());
         guard.restore = s.persisted;
     } else {
@@ -1413,19 +1412,19 @@ pub fn sessions_list(mode: Option<String>) -> Result<Vec<SessionMetaInfo>, Strin
 
 #[tauri::command]
 #[specta::specta]
-pub fn session_new(state: State<'_, Sessions>, mode: String) -> Result<SessionMetaInfo, String> {
-    if mode != "chat" && mode != "code" {
-        return Err(format!("unknown session mode {mode:?}"));
-    }
+pub fn session_new(
+    state: State<'_, Sessions>,
+    workspace: Option<String>,
+) -> Result<SessionMetaInfo, String> {
     ensure_idle(&state)?;
+    let workspace = workspace.filter(|p| std::path::Path::new(p).is_dir());
+    let mode = mode_for(workspace.as_deref()).to_string();
 
     let key = uuid::Uuid::new_v4().to_string();
-    db()?.create(&key, &mode)?;
+    let db = db()?;
+    db.create(&key, &mode)?;
+    db.set_workspace(&key, workspace.as_deref(), &mode)?;
 
-    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
-    let workspace = (mode == "code")
-        .then(|| ctx.config.workspace_path.clone())
-        .flatten();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX));
@@ -1442,7 +1441,7 @@ pub fn session_new(state: State<'_, Sessions>, mode: String) -> Result<SessionMe
     Ok(SessionMetaInfo {
         id: key,
         mode,
-        title: "New session".to_string(),
+        title: "New chat".to_string(),
         provider: String::new(),
         model: String::new(),
         workspace,
@@ -1564,15 +1563,9 @@ fn workspace_root(state: &Sessions) -> Result<std::path::PathBuf, String> {
             .map_err(|_| "session lock poisoned".to_string())?;
         guard.workspace.clone()
     };
-    if let Some(p) = from_session {
-        return Ok(std::path::PathBuf::from(p));
-    }
-    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
-    ctx.config
-        .workspace_path
-        .clone()
+    from_session
         .map(std::path::PathBuf::from)
-        .ok_or_else(|| "no workspace folder attached".to_string())
+        .ok_or_else(|| "no folder attached to this chat".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -1662,6 +1655,53 @@ pub async fn image_read(state: State<'_, Sessions>, path: String) -> Result<Stri
     tauri::async_runtime::spawn_blocking(move || crate::images::read_image(&path, &roots))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct DroppedItem {
+    pub path: String,
+    pub kind: String,
+    pub mime: Option<String>,
+    pub data: Option<String>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn drop_inspect(paths: Vec<String>) -> Result<Vec<DroppedItem>, String> {
+    use base64::Engine;
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .take(8)
+            .map(|path| {
+                let p = std::path::Path::new(&path);
+                let item = |kind: &str| DroppedItem {
+                    path: path.clone(),
+                    kind: kind.to_string(),
+                    mime: None,
+                    data: None,
+                    error: None,
+                };
+                if p.is_dir() {
+                    return item("folder");
+                }
+                match crate::images::load_dropped(p) {
+                    Ok(img) => DroppedItem {
+                        mime: Some(img.mime.to_string()),
+                        data: Some(base64::engine::general_purpose::STANDARD.encode(&img.bytes)),
+                        ..item("image")
+                    },
+                    Err(e) => DroppedItem {
+                        error: Some(e),
+                        ..item("other")
+                    },
+                }
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Ask the user where to keep a generated image, then write it there.

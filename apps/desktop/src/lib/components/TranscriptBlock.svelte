@@ -15,6 +15,8 @@
 
   let thinkingOpen = $state(false);
   let copied = $state(false);
+  let detailsOpen = $state(false);
+  const isLatest = $derived(block.kind === 'text' && block.id === session.lastReplyId);
   let editing = $state(false);
   let editText = $state('');
   let editBusy = $state(false);
@@ -138,14 +140,44 @@
       {#if block.streaming}<span class="caret" aria-hidden="true"></span>{/if}
     </div>
     {#if !block.streaming && !block.local}
-      <div class="msg-foot">
-        <button class="copy-msg" onclick={copyMessage} aria-label="Copy message">
-          {copied ? 'copied' : 'copy'}
+      <div class="msg-actions" class:pinned={isLatest}>
+        <button
+          class="act"
+          class:done={copied}
+          onclick={copyMessage}
+          aria-label={copied ? 'Copied' : 'Copy reply'}
+          title={copied ? 'Copied' : 'Copy'}
+        >
+          <Icon name={copied ? 'check' : 'copy'} size={14} />
         </button>
+        {#if isLatest && session.lastUserBlock?.text && !session.lastUserBlock.images?.length}
+          <button
+            class="act"
+            onclick={() => void session.regenerate()}
+            disabled={!session.canRegenerate}
+            aria-label="Regenerate reply"
+            title="Regenerate — replaces this reply"
+          >
+            <Icon name="refresh" size={14} />
+          </button>
+        {/if}
         {#if block.usage}
+          <button
+            class="act"
+            class:on={detailsOpen}
+            onclick={() => (detailsOpen = !detailsOpen)}
+            aria-expanded={detailsOpen}
+            aria-label="Token details"
+            title="Token details"
+          >
+            <Icon name="info" size={14} />
+          </button>
           <span class="usage mono" title={usageTitle(block.usage)}>{usageLabel(block.usage)}</span>
         {/if}
       </div>
+      {#if detailsOpen && block.usage}
+        <pre class="details mono">{usageTitle(block.usage)}</pre>
+      {/if}
     {/if}
   </div>
 {:else if block.kind === 'thinking'}
@@ -189,23 +221,26 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 8px 10px;
+    padding: 10px 16px;
     background: var(--bg-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: 20px 20px 6px 20px;
     align-self: flex-end;
-    max-width: 85%;
+    max-width: 78%;
   }
   .user-tag {
+    display: none;
+  }
+  .user-tag:has(.plan-tag) {
+    display: block;
     font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
     color: var(--fg-3);
   }
   .user-text {
     white-space: pre-wrap;
     word-break: break-word;
+    font-size: 14px;
+    line-height: 1.55;
     color: var(--fg-0);
   }
   .user-images {
@@ -307,30 +342,62 @@
     color: var(--fg-2);
     font-size: 12px;
   }
-  .msg-foot {
+  .msg-actions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: flex-end;
-    gap: 2px 10px;
-    min-height: 14px;
-  }
-  .copy-msg {
-    font-size: 10px;
-    color: var(--fg-3);
+    gap: 2px;
+    min-height: 28px;
+    margin-left: -6px;
     opacity: 0;
     transition: opacity var(--motion);
   }
-  .assistant-msg:hover .copy-msg,
-  .copy-msg:focus-visible {
+  .msg-actions.pinned,
+  .assistant-msg:hover .msg-actions,
+  .msg-actions:focus-within {
     opacity: 1;
   }
-  .copy-msg:hover {
+  .act {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    color: var(--fg-3);
+    transition: background var(--motion), color var(--motion);
+  }
+  .act:hover:not(:disabled),
+  .act.on {
+    background: var(--bg-2);
     color: var(--fg-0);
+  }
+  .act.done {
+    color: var(--ok);
+  }
+  .act:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+  .msg-actions .usage {
+    margin-left: 6px;
+  }
+  .details {
+    margin: 2px 0 0;
+    padding: 8px 10px;
+    width: fit-content;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--fg-2);
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    white-space: pre;
   }
   .assistant-text {
     color: var(--fg-0);
-    line-height: 1.55;
+    font-size: 14px;
+    line-height: 1.65;
     min-width: 0;
     overflow-wrap: anywhere;
   }

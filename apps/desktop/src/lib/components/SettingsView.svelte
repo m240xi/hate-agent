@@ -53,53 +53,18 @@
   let keyBusy = $state<string | null>(null);
 
   import { THEMES } from '../themes';
+  import { SETTINGS_SECTIONS } from '../settings';
 
-  const SECTIONS = [
-    { id: 'appearance', label: 'Appearance' },
-    { id: 'providers', label: 'Providers' },
-    { id: 'workspace', label: 'Workspace' },
-    { id: 'skills', label: 'Skills' },
-    { id: 'spending', label: 'Spending' },
-    { id: 'usage', label: 'Usage' },
-    { id: 'mcp', label: 'MCP' },
-    { id: 'about', label: 'About' },
-  ] as const;
+  const SECTIONS = SETTINGS_SECTIONS;
 
-  let activeSection = $state<string>('appearance');
-  let spy: IntersectionObserver | null = null;
-
-  function jumpTo(id: string): void {
-    const el = document.getElementById(id);
-    if (!el) return;
-    activeSection = id;
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-
-  function startSpy(): void {
-    spy?.disconnect();
-    const visible = new Map<string, number>();
-    spy = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          visible.set((e.target as HTMLElement).id, e.isIntersecting ? e.intersectionRatio : 0);
-        }
-        const best = [...visible.entries()].sort((a, b) => b[1] - a[1])[0];
-        if (best && best[1] > 0) activeSection = best[0];
-      },
-      { root: document.querySelector('.settings'), rootMargin: '-72px 0px -55% 0px', threshold: [0, 0.25, 0.6] },
-    );
-    for (const sec of SECTIONS) {
-      const el = document.getElementById(sec.id);
-      if (el) spy.observe(el);
-    }
-  }
+  const active = $derived(
+    SECTIONS.some((s) => s.id === session.settingsSection) ? session.settingsSection : 'appearance',
+  );
+  let paneEl = $state<HTMLDivElement | null>(null);
 
   $effect(() => {
-    const t = setTimeout(startSpy, 60);
-    return () => {
-      clearTimeout(t);
-      spy?.disconnect();
-    };
+    active;
+    paneEl?.scrollTo({ top: 0 });
   });
 
   async function refresh(): Promise<void> {
@@ -676,25 +641,26 @@
 </script>
 
 <div class="settings">
-  <div class="settings-inner">
-    <header class="page-head">
-      <p class="eyebrow mono">preferences</p>
-      <h1 class="page-title">Settings</h1>
-    </header>
-
-    <nav class="rail" aria-label="Settings sections">
+  <div class="pane" bind:this={paneEl}>
+  {#if session.sidebarCollapsed}
+    <nav class="dock" aria-label="Settings sections">
       {#each SECTIONS as sec (sec.id)}
         <button
-          class="rail-chip"
-          class:active={activeSection === sec.id}
-          onclick={() => jumpTo(sec.id)}
+          class="dock-item"
+          class:active={active === sec.id}
+          aria-current={active === sec.id ? 'page' : undefined}
+          onclick={() => (session.settingsSection = sec.id)}
+          title={sec.label}
         >
-          {sec.label}
+          <Icon name={sec.icon} size={14} />
+          <span>{sec.label}</span>
         </button>
       {/each}
     </nav>
+  {/if}
+  <div class="settings-inner">
 
-    <section class="group" id="appearance">
+    <section class="group" id="appearance" hidden={active !== 'appearance'}>
       <h2 class="group-title">Appearance</h2>
       <p class="group-hint">
         Pick a palette — Auto follows your system's setting.
@@ -742,10 +708,10 @@
       </div>
     </section>
 
-    <section class="group" id="providers">
+    <section class="group" id="providers" hidden={active !== 'providers'}>
       <h2 class="group-title">Providers</h2>
       <p class="group-hint">
-        Connect a provider to chat or run code sessions. Keys go to the OS
+        Connect a provider to start chatting. Keys go to the OS
         keychain; Portal logins use your subscription.
       </p>
 
@@ -1055,35 +1021,7 @@ ${preset.key_url ?? ''}`}
       <AddProviderSheet preset={adding} onClose={() => (adding = null)} onAdded={addedProvider} />
     {/if}
 
-    <section class="group" id="workspace">
-      <h2 class="group-title">Workspace</h2>
-      <p class="group-hint">
-        Folder code sessions operate in. Chat doesn't use it.
-      </p>
-      <div class="workspace-row">
-        <Icon name="folder" size={14} />
-        <span class="workspace-path mono">
-          {session.workspacePath ?? 'No folder — uses app data directory'}
-        </span>
-        <button class="btn" onclick={() => session.pickWorkspace()}>
-          Choose folder…
-        </button>
-        {#if session.workspacePath}
-          <button
-            class="btn ghost"
-            onclick={async () => {
-              const m = await import('../ipc');
-              await m.workspaceSet(null).catch(() => {});
-              session.workspacePath = null;
-            }}
-          >
-            Clear
-          </button>
-        {/if}
-      </div>
-    </section>
-
-    <section class="group" id="skills">
+    <section class="group" id="skills" hidden={active !== 'skills'}>
       <h2 class="group-title">Skills</h2>
       <p class="group-hint">
         Markdown knowledge files the agent writes from your sessions — best
@@ -1149,7 +1087,7 @@ ${preset.key_url ?? ''}`}
       </div>
     </section>
 
-    <section class="group" id="spending">
+    <section class="group" id="spending" hidden={active !== 'spending'}>
       <h2 class="group-title">Spending</h2>
       <p class="group-hint">
         Optional ceilings, checked before a turn starts. Nothing is ever blocked
@@ -1231,7 +1169,7 @@ ${preset.key_url ?? ''}`}
       </div>
     </section>
 
-    <section class="group" id="usage">
+    <section class="group" id="usage" hidden={active !== 'usage'}>
       <h2 class="group-title">Usage</h2>
       <p class="group-hint">
         Read from the local request ledger — tokens, cache hits, latency and price per
@@ -1242,7 +1180,7 @@ ${preset.key_url ?? ''}`}
       </div>
     </section>
 
-    <section class="group" id="mcp">
+    <section class="group" id="mcp" hidden={active !== 'mcp'}>
       <h2 class="group-title">
         MCP servers
         <button
@@ -1494,7 +1432,7 @@ ${preset.key_url ?? ''}`}
             onclick={addContext7}
             title="Add the Context7 docs server"
           >
-            <Icon name="bolt" size={13} /> Add Context7 docs
+            <Icon name="book" size={13} /> Add Context7 docs
           </button>
           <span class="spacer"></span>
           <Popover align="right" width="420px">
@@ -1504,7 +1442,7 @@ ${preset.key_url ?? ''}`}
             {#snippet panel({ close })}
               <div class="ctx7">
                 <div class="ctx7-head">
-                  <Icon name="bolt" size={13} />
+                  <Icon name="book" size={13} />
                   <span class="ctx7-title">Context7 docs</span>
                   <span class="mcp-spacer"></span>
                   <button class="icon-btn" onclick={close} aria-label="Close">
@@ -1552,7 +1490,7 @@ ${preset.key_url ?? ''}`}
       {/if}
     </section>
 
-    <section class="group" id="about">
+    <section class="group" id="about" hidden={active !== 'about'}>
       <h2 class="group-title">About</h2>
       <div class="card">
         {#if appInfo}
@@ -1579,80 +1517,79 @@ ${preset.key_url ?? ''}`}
       </div>
     </section>
   </div>
+  </div>
 </div>
 
 <style>
   .settings {
     flex: 1;
+    min-width: 0;
     min-height: 0;
-    overflow-y: auto;
-    background:
-      radial-gradient(120% 55% at 50% -12%, var(--bg-1), transparent 62%),
-      var(--bg-0);
-  }
-  .settings-inner {
-    max-width: 704px;
-    margin: 0 auto;
-    padding: 36px 32px 88px;
-  }
-  .rail {
-    position: sticky;
-    top: 0;
-    z-index: 5;
     display: flex;
-    flex-wrap: nowrap;
-    gap: 6px;
-    margin: 0 -32px 24px;
-    padding: 10px 32px;
+    background: var(--bg-0);
+  }
+  .dock {
+    position: sticky;
+    top: 12px;
+    z-index: 10;
+    display: flex;
+    width: fit-content;
+    max-width: calc(100% - 32px);
+    margin: 12px auto 0;
+    gap: 2px;
+    padding: 4px;
     overflow-x: auto;
     scrollbar-width: none;
-    background: linear-gradient(180deg, var(--bg-0) 70%, transparent);
+    background: color-mix(in srgb, var(--bg-1) 86%, transparent);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--shadow-md);
   }
-  .rail::-webkit-scrollbar {
+  .dock::-webkit-scrollbar {
     display: none;
   }
-  .rail-chip {
+  .dock-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     flex: none;
-    padding: 3px 10px;
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    color: var(--fg-3);
-    border: 1px solid var(--border);
+    height: 30px;
+    padding: 0 12px;
     border-radius: var(--radius-pill);
+    font-size: 12.5px;
+    color: var(--fg-2);
     transition:
-      color var(--motion),
-      border-color var(--motion),
-      background var(--motion);
+      background var(--motion),
+      color var(--motion);
   }
-  .rail-chip:hover {
-    color: var(--fg-1);
-    border-color: var(--border-strong);
+  .dock-item:hover {
+    color: var(--fg-0);
   }
-  .rail-chip.active {
-    color: var(--accent);
-    background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  .dock-item.active {
+    background: var(--bg-3);
+    color: var(--fg-0);
   }
-  .group {
-    margin-bottom: 30px;
-    scroll-margin-top: 56px;
+  .pane {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+  }
+  .settings-inner {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 28px 36px 88px;
+  }
+  .group[hidden] {
+    display: none;
   }
   .group-title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
     font-family: var(--font-ui);
-    font-size: 13px;
+    font-size: 20px;
     font-weight: 600;
+    letter-spacing: -0.01em;
     color: var(--fg-0);
     margin: 0 0 6px;
-  }
-  .group-title::after {
-    content: '';
-    flex: 1;
-    min-width: 24px;
-    height: 1px;
-    background: linear-gradient(90deg, var(--border), transparent);
   }
   .group-hint {
     max-width: 64ch;
@@ -1664,8 +1601,7 @@ ${preset.key_url ?? ''}`}
   }
 
   .card,
-  .provider,
-  .workspace-row {
+  .provider {
     background: linear-gradient(
       180deg,
       color-mix(in srgb, var(--fg-0) 2.5%, var(--bg-1)),
@@ -1778,7 +1714,6 @@ ${preset.key_url ?? ''}`}
   .provider-name,
   .provider-meta,
   .provider-url,
-  .workspace-path,
   .about-grid dd,
   .login-line,
   .login-line code {
@@ -2199,23 +2134,6 @@ ${preset.key_url ?? ''}`}
     overflow: auto;
     white-space: pre-wrap;
   }
-  .workspace-row {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 10px;
-    padding: 13px 16px;
-    color: var(--fg-2);
-  }
-  .workspace-path {
-    flex: 1 1 auto;
-    min-width: 0;
-    font-size: 12.5px;
-    color: var(--fg-1);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   .spacer {
     flex: 1;
   }
@@ -2545,13 +2463,14 @@ ${preset.key_url ?? ''}`}
   .icon-btn.danger:hover {
     color: var(--err);
   }
+  @media (max-width: 820px) {
+    .dock-item span {
+      display: none;
+    }
+  }
   @media (max-width: 640px) {
     .settings-inner {
       padding: 24px 16px 64px;
-    }
-    .rail {
-      margin: 0 -16px 20px;
-      padding: 8px 16px;
     }
     .preset-filter {
       width: 100%;

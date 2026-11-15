@@ -665,7 +665,7 @@ impl Actor {
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| "New session".to_string());
+            .unwrap_or_else(|| "New chat".to_string());
         p.journal.save(&PersistedSession {
             key: p.key.clone(),
             mode: p.mode.clone(),

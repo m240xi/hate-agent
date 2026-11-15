@@ -15,7 +15,6 @@
       providers = await m.providersList();
       version = (await m.appInfo()).version;
       inTauri = true;
-      session.workspacePath = await m.workspaceGet().catch(() => session.workspacePath);
       void session.refreshSessions();
     } catch {
     }
@@ -30,23 +29,15 @@
       hint: 'OpenRouter, OpenAI, Claude, Gemini, a local server…',
       done: connected,
       cta: 'Add one',
-      run: () => session.setMode('settings'),
-    },
-    {
-      id: 'workspace',
-      label: 'Attach a folder',
-      hint: 'Code sessions read and edit files inside it.',
-      done: !!session.workspacePath,
-      cta: 'Choose folder',
-      run: () => void session.pickWorkspace(),
+      run: () => session.openSettings('providers'),
     },
     {
       id: 'first',
-      label: 'Run your first task',
-      hint: 'Describe a change; watch every tool call and its token cost.',
+      label: 'Start your first chat',
+      hint: 'Add a folder from the composer to let it read and edit a project.',
       done: session.sessionTurns > 0 || session.sessions.length > 0,
       cta: 'Start',
-      run: () => void session.newSession(),
+      run: () => session.startFresh(),
     },
   ]);
   const remaining = $derived(steps.filter((s) => !s.done).length);
@@ -55,9 +46,16 @@
   );
 
   const PLATES = [
-    { mode: 'code' as const, label: 'Code' },
-    { mode: 'chat' as const, label: 'Chat' },
-    { mode: 'settings' as const, label: 'Settings' },
+    { id: 'chat', label: 'Chat', run: () => session.setMode('chat') },
+    {
+      id: 'folder',
+      label: 'Open folder',
+      run: () => {
+        session.startFresh();
+        void session.pickWorkspace();
+      },
+    },
+    { id: 'settings', label: 'Settings', run: () => session.setMode('settings') },
   ];
 </script>
 
@@ -73,8 +71,8 @@
     </p>
 
     <div class="plates">
-      {#each PLATES as plate (plate.mode)}
-        <button class="plate pixel" onclick={() => session.setMode(plate.mode)}>
+      {#each PLATES as plate (plate.id)}
+        <button class="plate pixel" onclick={plate.run}>
           {plate.label}
         </button>
       {/each}
@@ -105,7 +103,7 @@
         </ul>
       </div>
     {:else if inTauri && !connected}
-      <button class="connect-hint" onclick={() => session.setMode('settings')}>
+      <button class="connect-hint" onclick={() => session.openSettings('providers')}>
         <Icon name="link" size={13} />
         No provider connected — Settings to link Nous Portal
       </button>

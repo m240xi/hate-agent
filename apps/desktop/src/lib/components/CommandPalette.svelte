@@ -29,7 +29,8 @@
   ];
 
   const commands = $derived<Command[]>([
-    { name: '/new', hint: 'start a new session', group: 'session', keys: '⌘N', run: () => void session.newSession() },
+    { name: '/new', hint: 'start a fresh chat', group: 'session', keys: '⌘N', run: () => session.startFresh() },
+    { name: '/sidebar', hint: session.sidebarCollapsed ? 'show the sidebar' : 'hide the sidebar', group: 'view', keys: '⌘B', run: () => (session.sidebarCollapsed = !session.sidebarCollapsed) },
     { name: '/clear', hint: 'clear this transcript', group: 'session', run: () => session.clearTranscript() },
     { name: '/compact', hint: 'compact context now', group: 'session', run: () => void session.compact() },
     { name: '/retry', hint: 'send the last message again', group: 'session', run: () => session.retryLast() },
@@ -41,13 +42,13 @@
     { name: '/thinking', hint: `cycle thinking level (now ${session.thinkingLevel})`, group: 'model', run: () => session.cycleThinking() },
     { name: '/theme', hint: `cycle palette (now ${session.theme})`, group: 'view', run: () => cycleTheme() },
     { name: '/density', hint: `transcript density (now ${session.density})`, group: 'view', run: () => session.setDensity(session.density === 'compact' ? 'comfortable' : 'compact') },
-    { name: '/inspector', hint: session.rightCollapsed ? 'show the inspector' : 'hide the inspector', group: 'view', run: () => (session.rightCollapsed = !session.rightCollapsed) },
+    { name: '/activity', hint: session.panelOpen ? 'hide the side panel' : 'show tokens, plan and checkpoints', group: 'view', run: () => (session.panelOpen ? session.setPanel(false) : session.openActivity()) },
     { name: '/export md', hint: 'write the transcript as Markdown', group: 'export', run: () => void session.exportTo('md') },
     { name: '/export html', hint: 'self-contained HTML, images inline', group: 'export', run: () => void session.exportTo('html') },
     { name: '/export json', hint: 'structured transcript for tooling', group: 'export', run: () => void session.exportTo('json') },
-    { name: '/settings', hint: 'providers, workspace, usage', group: 'settings', keys: '⌘,', run: () => session.setMode('settings') },
-    { name: '/providers', hint: 'add or switch a provider', group: 'settings', run: () => { session.setMode('settings'); jumpTo('providers'); } },
-    { name: '/usage', hint: 'spend, cache savings, latency', group: 'settings', run: () => { session.setMode('settings'); jumpTo('usage'); } },
+    { name: '/settings', hint: 'providers, MCP, usage', group: 'settings', keys: '⌘,', run: () => session.setMode('settings') },
+    { name: '/providers', hint: 'add or switch a provider', group: 'settings', run: () => session.openSettings('providers') },
+    { name: '/usage', hint: 'spend, cache savings, latency', group: 'settings', run: () => session.openSettings('usage') },
     { name: '/shortcuts', hint: 'keyboard reference', group: 'settings', keys: '?', run: () => session.note(HELP_TEXT) },
   ]);
 
@@ -72,7 +73,8 @@
     '  Up           recall the last message (empty composer)',
     '  ⌘K / Ctrl+K  command palette',
     '  ⌘, / Ctrl+,  settings',
-    '  ⌘N / Ctrl+N  new session',
+    '  ⌘N / Ctrl+N  new chat',
+    '  ⌘B / Ctrl+B  toggle the sidebar',
     '  /            command palette',
     '  @            attach file reference',
     '',
@@ -80,11 +82,6 @@
     '/plan investigates read-only and proposes steps; nothing changes until you run the plan.',
   ].join('\n');
 
-  function jumpTo(id: string): void {
-    setTimeout(() => {
-      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 60);
-  }
 
   let filter = $state('');
   let sel = $state(0);

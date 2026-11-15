@@ -70,7 +70,7 @@
       spending ceiling used
     </span>
     <span class="spacer"></span>
-    <button class="btn ghost sm" onclick={() => session.setMode('settings')}>Raise limit</button>
+    <button class="btn ghost sm" onclick={() => session.openSettings('spending')}>Raise limit</button>
   </div>
 {/if}
 

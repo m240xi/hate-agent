@@ -326,12 +326,20 @@ export async function authClaudeComplete(code: string): Promise<void> {
   return invoke<void>('auth_claude_complete', { code });
 }
 
-export async function workspaceGet(): Promise<string | null> {
-  return invoke<string | null>('workspace_get');
+export interface DroppedItem {
+  path: string;
+  kind: 'folder' | 'image' | 'other';
+  mime: string | null;
+  data: string | null;
+  error: string | null;
 }
 
-export async function workspaceSet(path: string | null): Promise<void> {
-  return invoke<void>('workspace_set', { path });
+export async function dropInspect(paths: string[]): Promise<DroppedItem[]> {
+  return invoke<DroppedItem[]>('drop_inspect', { paths });
+}
+
+export async function sessionSetWorkspace(path: string | null): Promise<void> {
+  return invoke<void>('session_set_workspace', { path });
 }
 
 export async function workspacePick(): Promise<string | null> {
@@ -393,8 +401,8 @@ export async function sessionsList(mode?: 'chat' | 'code'): Promise<SessionMeta[
   return invoke<SessionMeta[]>('sessions_list', { mode: mode ?? null });
 }
 
-export async function sessionNew(mode: 'chat' | 'code'): Promise<SessionMeta> {
-  return invoke<SessionMeta>('session_new', { mode });
+export async function sessionNew(workspace: string | null): Promise<SessionMeta> {
+  return invoke<SessionMeta>('session_new', { workspace });
 }
 
 export async function sessionOpen(id: string): Promise<SessionOpenResult> {

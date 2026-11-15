@@ -47,7 +47,7 @@
 
 <div class="inspector">
   <section class="sec">
-    <h3 class="section-title"><Icon name="list" size={11} /> Plan</h3>
+    <h3 class="section-title"><Icon name="list-ordered" size={11} /> Plan</h3>
     {#if session.plan.length === 0}
       <div class="empty">
         <p class="empty-title">No plan yet</p>
@@ -71,7 +71,7 @@
   </section>
 
   <section class="sec">
-    <h3 class="section-title"><Icon name="bolt" size={11} /> Tokens</h3>
+    <h3 class="section-title"><Icon name="coins" size={11} /> Tokens</h3>
     <div class="meter" role="img" aria-label="context usage">
       <div
         class="meter-fill"
@@ -100,14 +100,15 @@
     </div>
   </section>
 
+  {#if session.workspacePath || session.checkpoints.length > 0}
   <section class="sec">
-    <h3 class="section-title"><Icon name="clock" size={11} /> Checkpoints</h3>
+    <h3 class="section-title"><Icon name="history" size={11} /> Checkpoints</h3>
     {#if session.checkpoints.length === 0}
       <div class="empty">
         <p class="empty-title">No checkpoints yet</p>
         <p class="empty-body">
           A snapshot of the touched files is taken before the first write, so you can
-          roll the workspace back to it.
+          roll the folder back to it.
         </p>
       </div>
     {:else}
@@ -119,7 +120,7 @@
             <span class="cp-at mono dim">{cp.at}</span>
             <button
               class="cp-rewind"
-              title="Restore workspace files to this checkpoint"
+              title="Restore this folder's files to this checkpoint"
               onclick={() => session.rewindCheckpoint(cp.id)}
             >
               rewind
@@ -129,13 +130,15 @@
       </ul>
     {/if}
   </section>
+  {/if}
 
+  {#if session.workspacePath}
   <section class="sec">
     <h3 class="section-title">
       <Icon name="diff" size={11} /> Changed files
       <span class="spacer"></span>
       <button class="sec-btn" onclick={() => void session.refreshChanges()} title="Refresh from git">
-        <Icon name="clock" size={10} />
+        <Icon name="refresh" size={10} />
       </button>
     </h3>
     {#if session.changedFiles.length === 0}
@@ -159,6 +162,7 @@
       </ul>
     {/if}
   </section>
+  {/if}
 </div>
 
 <style>

@@ -12,6 +12,9 @@
   let pickerOpen = $state(false);
   let fileInput = $state<HTMLInputElement | null>(null);
   let dragging = $state(false);
+  const folderName = $derived(
+    session.workspacePath?.split(/[\\/]/).filter(Boolean).pop() ?? '',
+  );
 
   function onPaste(e: ClipboardEvent): void {
     const files = [...(e.clipboardData?.items ?? [])]
@@ -73,8 +76,8 @@
       paletteOpen = true;
       return;
     }
-    if (e.key === '@') {
-      session.draft = session.draft.slice(0, -1);
+    if (e.key === '@' && session.workspacePath && session.tree.length > 0) {
+      e.preventDefault();
       pickerOpen = true;
     }
   }
@@ -180,27 +183,24 @@
       onkeydown={onKeydown}
       onpaste={onPaste}
       placeholder={session.running
-        ? 'running… type to queue the next message (Esc to cancel)'
+        ? 'Working… type to queue a follow-up (Esc to stop)'
         : session.planMode
-          ? 'Describe what to plan — nothing is changed until you approve…'
-          : 'Ask hate-agent…'}
+          ? 'Describe what to plan — nothing changes until you approve'
+          : session.workspacePath
+            ? 'Describe a change — / for commands, @ for files'
+            : 'Ask anything — / for commands'}
       rows="1"
       aria-label="Message composer"
       disabled={session.sessionState === 'awaiting_permission'}
     ></textarea>
     <div class="composer-meta">
-      <span class="hint">
-        <kbd>⏎</kbd> send · <kbd>⇧⏎</kbd> newline · <kbd>esc</kbd> cancel ·
-        <kbd>/</kbd> commands · <kbd>@</kbd> files · <kbd>⇧tab</kbd> think
-      </span>
-      <span class="spacer"></span>
       <button
         class="attach-btn"
         onclick={() => fileInput?.click()}
         aria-label="Attach image"
         title="Attach an image (or paste / drop one)"
       >
-        <Icon name="image" size={13} />
+        <Icon name="plus" size={16} />
       </button>
       <input
         class="file-input"
@@ -210,6 +210,38 @@
         bind:this={fileInput}
         onchange={onFilePick}
       />
+      {#if session.workspacePath}
+        <span class="folder-chip" title={session.workspacePath}>
+          <button
+            class="folder-main"
+            onclick={() => session.pickWorkspace()}
+            disabled={session.running}
+            aria-label="Change folder"
+          >
+            <Icon name="folder" size={13} />
+            <span class="folder-name">{folderName}</span>
+          </button>
+          <button
+            class="folder-x"
+            onclick={() => session.attachFolder(null)}
+            disabled={session.running}
+            aria-label="Remove folder from this chat"
+            title="Remove folder from this chat"
+          >
+            <Icon name="x" size={11} />
+          </button>
+        </span>
+      {:else}
+        <button
+          class="plan-toggle"
+          onclick={() => session.pickWorkspace()}
+          disabled={session.running}
+          title="Let this chat read and edit a project folder"
+        >
+          <Icon name="folder" size={13} />
+          <span class="lbl">Folder</span>
+        </button>
+      {/if}
       <button
         class="plan-toggle"
         class:on={session.planMode}
@@ -217,28 +249,30 @@
         aria-pressed={session.planMode}
         title="Plan mode: read-only investigation, then a plan you approve (/plan)"
       >
-        plan
+        <Icon name="list-ordered" size={13} />
+        <span class="lbl">Plan</span>
       </button>
+      <span class="spacer"></span>
       <ModelPicker />
       <ThinkingMenu />
       {#if session.running}
-        <button class="send cancel" onclick={() => session.cancel()} aria-label="Cancel turn" title="Cancel (Esc)">
-          <Icon name="x" size={13} />
-        </button>
         {#if session.draft.trim()}
           <button class="send" onclick={() => session.send()} aria-label="Queue message" title="Queue (Enter)">
-            <Icon name="plus" size={13} />
+            <Icon name="arrow-up" size={15} />
           </button>
         {/if}
+        <button class="send cancel" onclick={() => session.cancel()} aria-label="Stop" title="Stop (Esc)">
+          <Icon name="stop" size={12} />
+        </button>
       {:else}
         <button
           class="send"
           onclick={() => session.send()}
           disabled={!session.draft.trim() && session.attachments.length === 0}
           aria-label="Send message"
-          title="Send (Enter)"
+          title="Send (Enter) · Shift+Enter for a new line"
         >
-          <Icon name="send" size={13} />
+          <Icon name="arrow-up" size={15} />
         </button>
       {/if}
     </div>
@@ -254,14 +288,30 @@
 
 <style>
   .composer-wrap {
-    padding: 8px 16px 12px;
+    padding: 6px 16px 4px;
     background: var(--bg-0);
     flex: none;
     min-width: 0;
     container-type: inline-size;
   }
   @container (max-width: 560px) {
-    .hint {
+    .lbl {
+      display: none;
+    }
+    .plan-toggle {
+      width: 32px;
+      padding: 0;
+      justify-content: center;
+    }
+    .folder-chip {
+      max-width: 120px;
+    }
+    .composer-meta > :global(.pop:not(.pop-left)) {
+      max-width: 150px;
+    }
+  }
+  @container (max-width: 400px) {
+    .folder-name {
       display: none;
     }
   }
@@ -294,12 +344,17 @@
   .composer {
     background: var(--bg-1);
     border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    box-shadow: 0 2px 10px rgb(0 0 0 / 0.25);
-    transition: border-color var(--motion);
+    border-radius: 22px;
+    box-shadow: var(--shadow-md);
+    transition:
+      border-color var(--motion),
+      box-shadow var(--motion);
   }
   .composer:focus-within {
-    border-color: var(--accent-dim);
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--border-strong));
+    box-shadow:
+      var(--shadow-md),
+      0 0 0 3px var(--accent-soft);
   }
   .composer.planning {
     border-style: dashed;
@@ -315,7 +370,7 @@
     flex-wrap: wrap;
     gap: 6px;
     margin: 0;
-    padding: 8px 10px 0;
+    padding: 12px 14px 0;
   }
   .attach {
     position: relative;
@@ -357,10 +412,11 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 24px;
-    height: 22px;
-    border-radius: var(--radius);
-    color: var(--fg-3);
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    color: var(--fg-2);
+    border: 1px solid var(--border);
     flex: none;
   }
   .attach-btn:hover {
@@ -371,20 +427,69 @@
     display: none;
   }
   .plan-toggle {
-    padding: 2px 8px;
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    color: var(--fg-3);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 12px;
+    font-size: 12.5px;
+    color: var(--fg-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-pill);
     flex: none;
   }
   .plan-toggle:hover {
-    color: var(--fg-1);
+    color: var(--fg-0);
+    background: var(--bg-3);
+  }
+  .plan-toggle:disabled,
+  .folder-chip button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .folder-chip {
+    display: inline-flex;
+    align-items: center;
+    height: 32px;
+    max-width: 200px;
+    flex: 0 1 auto;
+    min-width: 0;
+    color: var(--fg-0);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    background: var(--accent-soft);
+    border-radius: var(--radius-pill);
+  }
+  .folder-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    height: 100%;
+    padding: 0 4px 0 12px;
+    font-size: 12.5px;
+  }
+  .folder-name {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .folder-x {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 100%;
+    padding-right: 4px;
+    color: var(--fg-2);
+    border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
+  }
+  .folder-x:hover:not(:disabled) {
+    color: var(--err);
   }
   .plan-toggle.on {
     color: var(--accent);
-    border-color: var(--accent-dim);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft);
   }
   .queue {
     list-style: none;
@@ -477,17 +582,20 @@
     background: none;
     border: none;
     outline: none;
-    padding: 10px 12px 4px;
-    font-size: 13px;
+    padding: 14px 18px 6px;
+    font-size: 14px;
     line-height: 1.5;
     color: var(--fg-0);
-    max-height: 180px;
+    max-height: 220px;
+  }
+  .composer textarea::placeholder {
+    color: var(--fg-3);
   }
   .composer-meta {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 4px 8px 6px 12px;
+    gap: 6px;
+    padding: 4px 8px 8px 10px;
   }
   .composer-meta > :global(.pop:not(.pop-left)) {
     flex: 0 1 auto;
@@ -498,24 +606,6 @@
     min-width: 0;
     max-width: 100%;
   }
-  .hint {
-    font-size: 10.5px;
-    color: var(--fg-3);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 0 1 auto;
-    min-width: 0;
-  }
-  kbd {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    padding: 1px 4px;
-    background: var(--bg-3);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    color: var(--fg-2);
-  }
   .spacer {
     flex: 1;
   }
@@ -523,19 +613,19 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 26px;
-    height: 26px;
-    border-radius: var(--radius);
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
     background: var(--accent);
     color: var(--accent-fg);
     flex: none;
   }
   .send:disabled {
-    opacity: 0.4;
+    opacity: 0.3;
     cursor: default;
   }
   .send.cancel {
-    background: var(--err);
-    color: #fff;
+    background: var(--fg-0);
+    color: var(--bg-0);
   }
 </style>

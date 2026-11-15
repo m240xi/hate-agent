@@ -126,6 +126,22 @@ pub fn read_image(path: &str, roots: &[PathBuf]) -> Result<String, String> {
     load(path, roots).map(|image| image.data_uri())
 }
 
+pub const DROP_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+pub fn load_dropped(path: &Path) -> Result<Image, String> {
+    let file = std::fs::File::open(path).map_err(|_| "Unable to open image")?;
+    let mut bytes = Vec::new();
+    file.take(DROP_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Unable to read image")?;
+    if bytes.len() as u64 > DROP_MAX_BYTES {
+        return Err("Images can be at most 8 MB".into());
+    }
+    let mime =
+        raster_mime(&bytes).ok_or("Only PNG, JPEG, WebP, GIF or BMP images can be attached")?;
+    Ok(Image { bytes, mime })
+}
+
 fn raster_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
@@ -181,5 +197,17 @@ mod tests {
         assert!(load("data:image/svg+xml;base64,PHN2Zz4=", &[]).is_err());
         assert!(load("data:image/png;base64,PHN2Zz4=", &[]).is_err());
         assert!(load("https://example.com/a.png", &[]).is_err());
+    }
+
+    #[test]
+    fn dropped_files_must_be_small_rasters() {
+        let dir = std::env::temp_dir().join(format!("hate-drop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ok.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"hello").unwrap();
+        assert_eq!(load_dropped(&dir.join("ok.png")).unwrap().mime, "image/png");
+        assert!(load_dropped(&dir.join("notes.txt")).is_err());
+        assert!(load_dropped(&dir.join("missing.png")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

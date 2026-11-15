@@ -63,10 +63,10 @@ function failureText(r: FailureReason): string {
   return 'unknown failure';
 }
 
-export type AppMode = 'home' | 'code' | 'chat' | 'settings';
-export type SessionMode = 'chat' | 'code';
+export type AppMode = 'home' | 'chat' | 'settings';
 
-const MODES: readonly AppMode[] = ['home', 'code', 'chat', 'settings'];
+const MODES: readonly AppMode[] = ['home', 'chat', 'settings'];
+const LAST_SESSION = 'hate:session:last';
 
 let nextBlockId = 2;
 
@@ -164,16 +164,30 @@ class SessionStore {
   planMode = $state(false);
   planReady = $state(false);
 
-  leftCollapsed = $state(false);
   rightCollapsed = $state(false);
-  leftWidth = $state(260);
+  sidebarCollapsed = $state(false);
+  panelTab = $state<'files' | 'activity'>('files');
+  chatPanelOpen = $state(false);
+
+  get panelOpen(): boolean {
+    return this.workspacePath ? !this.rightCollapsed : this.chatPanelOpen;
+  }
+
+  setPanel(open: boolean): void {
+    if (this.workspacePath) this.rightCollapsed = !open;
+    else this.chatPanelOpen = open;
+  }
+
+  openActivity(): void {
+    this.panelTab = 'activity';
+    this.setPanel(true);
+  }
   rightWidth = $state(300);
 
   sessionId = $state<string | null>(null);
   sessionMeta = $state<SessionMeta | null>(null);
   sessions = $state<SessionMeta[]>([]);
   sessionsState = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  pickerMode = $state<SessionMode | null>(null);
   sessionBusy = $state(false);
   providers = $state<ProviderInfo[]>([]);
 
@@ -243,7 +257,8 @@ class SessionStore {
 
   async start(): Promise<void> {
     const saved = localStorage.getItem('hate:mode');
-    if (MODES.includes(saved as AppMode)) this.mode = saved as AppMode;
+    if (saved === 'code') this.mode = 'chat';
+    else if (MODES.includes(saved as AppMode)) this.mode = saved as AppMode;
     const savedTheme = localStorage.getItem('hate:theme');
     if (isThemeId(savedTheme)) this.theme = savedTheme;
     const savedThinking = localStorage.getItem('hate:thinking');
@@ -251,8 +266,6 @@ class SessionStore {
     this.applyTheme();
     if (inTauri()) {
       const m = await import('./ipc');
-      this.workspacePath = await m.workspaceGet().catch(() => null);
-      void this.refreshIndex();
       void m
         .sessionSetOptions(
           null,
@@ -268,6 +281,7 @@ class SessionStore {
         this.model = def.model;
       }
       void this.refreshModels();
+      void this.refreshSessions();
       const { listen } = await import('@tauri-apps/api/event');
       this.unlisten = await listen<SessionEvent>('core-event', (e) => {
         this.handleEvent(e.payload);
@@ -624,6 +638,15 @@ class SessionStore {
     this.queue.splice(index, 1);
   }
 
+  lastReplyId = $derived.by(() => {
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      if (b?.kind === 'user') return null;
+      if (b?.kind === 'text' && !b.local) return b.id;
+    }
+    return null;
+  });
+
   lastUserText(): string | null {
     for (let i = this.blocks.length - 1; i >= 0; i--) {
       const b = this.blocks[i];
@@ -654,6 +677,24 @@ class SessionStore {
       }
     }
     this.send(text, last?.pins ?? []);
+  }
+
+  get lastUserBlock(): TranscriptBlock | undefined {
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      if (this.blocks[i]?.kind === 'user') return this.blocks[i];
+    }
+    return undefined;
+  }
+
+  get canRegenerate(): boolean {
+    const u = this.lastUserBlock;
+    return !!u?.text && !u.images?.length && !this.running;
+  }
+
+  async regenerate(): Promise<void> {
+    const u = this.lastUserBlock;
+    if (!u?.text || !this.canRegenerate) return;
+    await this.editUserMessage(u.id, u.text, false);
   }
 
   async copyLastReply(): Promise<void> {
@@ -904,6 +945,31 @@ class SessionStore {
     this.note(ok ? 'transcript copied to the clipboard as Markdown' : 'clipboard unavailable');
   }
 
+  dropping = $state(false);
+
+  async handleDrop(paths: string[]): Promise<void> {
+    this.dropping = false;
+    if (!inTauri() || paths.length === 0 || this.mode !== 'chat') return;
+    const m = await import('./ipc');
+    const items = await m.dropInspect(paths).catch(() => []);
+    const folders = items.filter((i) => i.kind === 'folder');
+    const images = items.filter((i) => i.kind === 'image' && i.mime && i.data);
+    const skipped = items.filter((i) => i.kind === 'other');
+    const room = Math.max(0, 4 - this.attachments.length);
+    for (const img of images.slice(0, room)) {
+      this.attachments = [
+        ...this.attachments,
+        { mime: img.mime!, data: img.data!, url: `data:${img.mime};base64,${img.data}` },
+      ];
+    }
+    if (folders[0]) await this.attachFolder(folders[0].path);
+    const notes: string[] = [];
+    if (images.length > room) notes.push('attach at most 4 images per message');
+    if (folders.length > 1) notes.push('only one folder per chat — used the first one');
+    if (skipped.length > 0) notes.push(skipped[0]?.error ?? "that file type can't be attached");
+    if (notes.length > 0) this.note(notes.join(' · '));
+  }
+
   addImage(file: File): Promise<void> {
     return new Promise((resolve) => {
       if (!/^image\/(png|jpeg|webp|gif|bmp)$/.test(file.type) || file.size > 8 * 1024 * 1024) {
@@ -996,7 +1062,7 @@ class SessionStore {
       this.blocks.push({
         id: nextBlockId++,
         kind: 'text',
-        text: `⏪ workspace rewound to checkpoint ${id.slice(0, 8)}`,
+        text: `⏪ files rewound to checkpoint ${id.slice(0, 8)}`,
         streaming: false,
       });
       void this.refreshIndex();
@@ -1139,38 +1205,70 @@ class SessionStore {
     await m.sessionCompact().catch(() => {});
   }
 
-  sessionMode(): SessionMode {
-    return this.mode === 'code' ? 'code' : 'chat';
-  }
-
-  async enterMode(mode: SessionMode): Promise<void> {
-    if (this.pickerMode === mode) {
-      void this.refreshSessions(mode);
-      return;
-    }
-    if (this.sessionId && this.sessionMeta?.mode === mode) {
-      this.pickerMode = null;
-      return;
-    }
-    const saved = inTauri() ? localStorage.getItem(`hate:session:${mode}`) : null;
+  async enterChat(): Promise<void> {
+    void this.refreshSessions();
+    if (this.sessionId || !inTauri()) return;
+    const saved =
+      localStorage.getItem(LAST_SESSION) ??
+      localStorage.getItem('hate:session:chat') ??
+      localStorage.getItem('hate:session:code');
+    localStorage.removeItem('hate:session:chat');
+    localStorage.removeItem('hate:session:code');
     if (saved) {
       try {
         await this.openSession(saved);
         return;
       } catch {
-        localStorage.removeItem(`hate:session:${mode}`);
+        localStorage.removeItem(LAST_SESSION);
       }
     }
-    this.pickerMode = mode;
-    void this.refreshSessions(mode);
+    this.clearActive();
   }
 
-  async refreshSessions(mode?: SessionMode): Promise<void> {
+  private clearActive(): void {
+    if (!inTauri()) return;
+    this.sessionId = null;
+    this.sessionMeta = null;
+    this.resetConversation();
+    this.setFolder(null);
+  }
+
+  startFresh(): void {
+    if (this.running) this.cancel();
+    localStorage.removeItem(LAST_SESSION);
+    this.clearActive();
+    if (!inTauri()) this.resetConversation();
+    if (this.mode !== 'chat') this.setMode('chat');
+  }
+
+  private setFolder(path: string | null): void {
+    if (path === this.workspacePath) return;
+    this.workspacePath = path;
+    this.closeViewer();
+    this.pinned = [];
+    void this.refreshIndex();
+  }
+
+  async openFromHistory(s: SessionMeta): Promise<void> {
+    if (s.id !== this.sessionId) {
+      try {
+        await this.openSession(s.id);
+      } catch (e) {
+        this.note(`couldn't open that session: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+      }
+    }
+    if (this.mode !== 'chat') this.setMode('chat');
+  }
+
+  async refreshSessions(): Promise<void> {
     if (!inTauri()) return;
     const m = await import('./ipc');
-    this.sessionsState = 'loading';
+    if (this.sessions.length === 0) this.sessionsState = 'loading';
     try {
-      this.sessions = await m.sessionsList(mode ?? this.pickerMode ?? undefined);
+      this.sessions = await m.sessionsList();
+      const cur = this.sessions.find((s) => s.id === this.sessionId);
+      if (cur && this.sessionMeta) this.sessionMeta.title = cur.title;
       this.sessionsState = 'ready';
     } catch {
       this.sessionsState = 'error';
@@ -1191,19 +1289,10 @@ class SessionStore {
         this.provider = res.meta.provider;
       }
       if (res.meta.model) this.model = res.meta.model;
-      if (
-        res.meta.mode === 'code' &&
-        res.meta.workspace &&
-        res.meta.workspace !== this.workspacePath
-      ) {
-        this.workspacePath = res.meta.workspace;
-        void m.workspaceSet(res.meta.workspace).catch(() => {});
-        void this.refreshIndex();
-      }
+      this.setFolder(res.meta.workspace ?? null);
       await this.syncSelection(m);
-      localStorage.setItem(`hate:session:${res.meta.mode}`, id);
-      this.pickerMode = null;
-      void this.refreshSessions(res.meta.mode as SessionMode);
+      localStorage.setItem(LAST_SESSION, id);
+      void this.refreshSessions();
     } finally {
       this.sessionBusy = false;
     }
@@ -1227,20 +1316,18 @@ class SessionStore {
   async newSession(): Promise<void> {
     if (!inTauri()) {
       this.resetConversation();
-      this.pickerMode = null;
       return;
     }
     const m = await import('./ipc');
     this.sessionBusy = true;
     try {
-      const meta = await m.sessionNew(this.sessionMode());
+      const meta = await m.sessionNew(this.workspacePath);
       this.sessionId = meta.id;
       this.sessionMeta = meta;
       this.resetConversation();
       await this.syncSelection(m);
-      localStorage.setItem(`hate:session:${meta.mode}`, meta.id);
-      this.pickerMode = null;
-      void this.refreshSessions(meta.mode);
+      localStorage.setItem(LAST_SESSION, meta.id);
+      void this.refreshSessions();
     } finally {
       this.sessionBusy = false;
     }
@@ -1251,13 +1338,8 @@ class SessionStore {
     const m = await import('./ipc');
     await m.sessionDelete(id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
-    if (this.sessionId === id) {
-      this.sessionId = null;
-      this.sessionMeta = null;
-      this.resetConversation();
-      this.pickerMode = this.sessionMode();
-      void this.refreshSessions(this.pickerMode);
-    }
+    if (localStorage.getItem(LAST_SESSION) === id) localStorage.removeItem(LAST_SESSION);
+    if (this.sessionId === id) this.clearActive();
   }
 
   private resetConversation(): void {
@@ -1389,6 +1471,13 @@ class SessionStore {
     this.planReady = false;
   }
 
+  settingsSection = $state('appearance');
+
+  openSettings(section?: string): void {
+    if (section) this.settingsSection = section;
+    this.setMode('settings');
+  }
+
   setMode(mode: AppMode): void {
     this.mode = mode;
     localStorage.setItem('hate:mode', mode);
@@ -1418,13 +1507,35 @@ class SessionStore {
     if (!inTauri()) return;
     const m = await import('./ipc');
     const p = await m.workspacePick().catch(() => null);
-    if (p) {
-      this.workspacePath = p;
-      this.closeViewer();
-      this.pinned = [];
-      await m.workspaceSet(p).catch(() => {});
-      void this.refreshIndex();
+    if (p) await this.attachFolder(p);
+  }
+
+  async attachFolder(path: string | null): Promise<void> {
+    if (!inTauri() || path === this.workspacePath) return;
+    if (this.running) {
+      this.note('wait for the reply to finish before changing the folder');
+      return;
     }
+    if (this.sessionId) {
+      const m = await import('./ipc');
+      try {
+        await m.sessionSetWorkspace(path);
+      } catch (e) {
+        this.note(`couldn't change the folder: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+      }
+      if (this.sessionMeta) this.sessionMeta.workspace = path;
+      const row = this.sessions.find((s) => s.id === this.sessionId);
+      if (row) row.workspace = path;
+      if (this.blocks.length > 0) {
+        this.note(
+          path
+            ? 'folder attached — hate-agent can use it from your next message'
+            : 'folder removed — the next message has no file access',
+        );
+      }
+    }
+    this.setFolder(path);
   }
 
   async refreshIndex(): Promise<void> {
@@ -1541,6 +1652,7 @@ class SessionStore {
         void this.refreshIndex();
         this.finishTurn(e.outcome);
         void this.attention();
+        setTimeout(() => void this.refreshSessions(), 600);
         break;
       case 'context_usage':
         this.ctxUsed = e.used;

@@ -4,6 +4,7 @@
   import TranscriptBlockView from './TranscriptBlock.svelte';
   import ToolGroup from './ToolGroup.svelte';
   import ImageStrip from './ImageStrip.svelte';
+  import LiveStatus from './LiveStatus.svelte';
   import { imageSources } from '../images';
   import type { TranscriptBlock } from '../types';
 
@@ -124,6 +125,7 @@
         <ImageStrip sources={row.sources} />
       {/if}
     {/each}
+    <LiveStatus />
     {#if session.blocks.length === 0}
       <div class="empty-hint">Send a message to start a session.</div>
     {/if}
@@ -146,10 +148,10 @@
   .transcript {
     flex: 1;
     overflow-y: auto;
-    padding: 16px 20px 8px;
+    padding: 16px max(24px, calc((100% - 768px) / 2)) 12px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 14px;
     overflow-x: hidden;
   }
   .transcript > :global(*) {
@@ -186,13 +188,15 @@
   }
   .jump {
     position: absolute;
-    bottom: 10px;
-    right: 16px;
-    padding: 4px 10px;
-    font-size: 11px;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 5px 12px;
+    font-size: 11.5px;
     background: var(--bg-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--shadow-md);
     color: var(--fg-1);
   }
   .jump:hover {

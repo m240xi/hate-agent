@@ -2,60 +2,43 @@
   import { onMount, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
   import { session } from './lib/store.svelte';
-  import Pane from './lib/components/Pane.svelte';
-  import FileTree from './lib/components/FileTree.svelte';
-  import FileViewer from './lib/components/FileViewer.svelte';
-  import Transcript from './lib/components/Transcript.svelte';
-  import Composer from './lib/components/Composer.svelte';
-  import PermissionBar from './lib/components/PermissionBar.svelte';
-  import Inspector from './lib/components/Inspector.svelte';
-  import EmptyState from './lib/components/EmptyState.svelte';
   import Landing from './lib/components/Landing.svelte';
-  import ChatView from './lib/components/ChatView.svelte';
   import SettingsView from './lib/components/SettingsView.svelte';
   import Notice from './lib/components/Notice.svelte';
-  import ModeSwitch from './lib/components/ModeSwitch.svelte';
-  import StatusBar from './lib/components/StatusBar.svelte';
-  import TurnStatus from './lib/components/TurnStatus.svelte';
   import CommandPalette from './lib/components/CommandPalette.svelte';
-  import SessionBrowser from './lib/components/SessionBrowser.svelte';
+  import Sidebar from './lib/components/Sidebar.svelte';
+  import SidePanel from './lib/components/SidePanel.svelte';
+  import Conversation from './lib/components/Conversation.svelte';
   import Icon from './lib/components/Icon.svelte';
   import { renderMarkdown } from './lib/markdown';
   import { trapFocus } from './lib/focus';
+  import { dragRegion, minimize, toggleMaximize, close } from './lib/window';
 
   let inTauri = $state(false);
 
   onMount(() => {
     inTauri = '__TAURI_INTERNALS__' in window;
     void session.start();
-    return () => session.destroy();
-  });
-
-  async function onTopbarDown(e: MouseEvent): Promise<void> {
-    if (!inTauri || e.button !== 0) return;
-    const el = e.target as HTMLElement;
-    if (el.closest('button, a, input, textarea, select, [role="button"]')) return;
-    const { getCurrentWindow } = await import('@tauri-apps/api/window');
-    const win = getCurrentWindow();
-    if (e.detail === 2) {
-      await win.toggleMaximize();
-    } else {
-      await win.startDragging();
+    let unlistenDrop: (() => void) | null = null;
+    let disposed = false;
+    if (inTauri) {
+      void import('@tauri-apps/api/webview').then(async ({ getCurrentWebview }) => {
+        const off = await getCurrentWebview().onDragDropEvent((e) => {
+          const p = e.payload;
+          if (p.type === 'enter') session.dropping = session.mode === 'chat';
+          else if (p.type === 'leave') session.dropping = false;
+          else if (p.type === 'drop') void session.handleDrop(p.paths);
+        });
+        if (disposed) off();
+        else unlistenDrop = off;
+      });
     }
-  }
-
-  async function winMin(): Promise<void> {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window');
-    await getCurrentWindow().minimize();
-  }
-  async function winMax(): Promise<void> {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window');
-    await getCurrentWindow().toggleMaximize();
-  }
-  async function winClose(): Promise<void> {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window');
-    await getCurrentWindow().close();
-  }
+    return () => {
+      disposed = true;
+      unlistenDrop?.();
+      session.destroy();
+    };
+  });
 
   function onWindowKeydown(e: KeyboardEvent): void {
     const mod = e.ctrlKey || e.metaKey;
@@ -74,7 +57,12 @@
     }
     if (mod && e.key.toLowerCase() === 'n' && !e.shiftKey) {
       e.preventDefault();
-      void session.newSession();
+      session.startFresh();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'b' && !e.shiftKey) {
+      e.preventDefault();
+      session.sidebarCollapsed = !session.sidebarCollapsed;
       return;
     }
     if (e.key === '?' && !typing && !mod) {
@@ -92,89 +80,55 @@
     document.documentElement.dataset.density = session.density;
   });
 
-  $effect(() => {
-    localStorage.setItem('hate:pane:left', String(session.leftWidth));
-    localStorage.setItem('hate:pane:right', String(session.rightWidth));
-    localStorage.setItem('hate:pane:leftCollapsed', String(session.leftCollapsed));
-    localStorage.setItem('hate:pane:rightCollapsed', String(session.rightCollapsed));
-  });
-
-  $effect(() => {
-    const l = Number(localStorage.getItem('hate:pane:left'));
+  {
     const r = Number(localStorage.getItem('hate:pane:right'));
-    if (l) session.leftWidth = l;
     if (r) session.rightWidth = r;
-    session.leftCollapsed = localStorage.getItem('hate:pane:leftCollapsed') === 'true';
     session.rightCollapsed = localStorage.getItem('hate:pane:rightCollapsed') === 'true';
+    session.sidebarCollapsed = localStorage.getItem('hate:sidebar:collapsed') === 'true';
+    session.chatPanelOpen = localStorage.getItem('hate:panel:chat') === 'true';
+  }
+
+  $effect(() => {
+    localStorage.setItem('hate:pane:right', String(session.rightWidth));
+    localStorage.setItem('hate:pane:rightCollapsed', String(session.rightCollapsed));
+    localStorage.setItem('hate:sidebar:collapsed', String(session.sidebarCollapsed));
+    localStorage.setItem('hate:panel:chat', String(session.chatPanelOpen));
   });
 
-  const workspaceName = $derived(
-    session.workspacePath?.split(/[\\/]/).filter(Boolean).pop() ?? null,
+  const title = $derived(
+    session.mode === 'settings'
+      ? 'Settings'
+      : session.sessionMeta?.title || 'New chat',
   );
 
   $effect(() => {
     const m = session.mode;
     untrack(() => {
-      if (m === 'chat' || m === 'code') void session.enterMode(m);
-      if (m !== 'code') session.closeViewer();
+      if (m === 'chat') void session.enterChat();
+      else session.closeViewer();
     });
   });
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
 
-<div class="shell">
-  <header class="topbar" role="presentation" onmousedown={onTopbarDown}>
-    <button class="brand" onclick={() => session.setMode('home')} title="Home">
-      hate-agent
-    </button>
-    <ModeSwitch />
-    {#if session.mode === 'code'}
-      <button
-        class="ws-chip mono"
-        class:set={!!session.workspacePath}
-        onclick={() => session.pickWorkspace()}
-        title={session.workspacePath ?? 'Attach a folder for code sessions'}
-      >
-        <Icon name="folder" size={12} />
-        {workspaceName ?? 'Attach folder'}
+{#snippet winControls()}
+  {#if inTauri}
+    <div class="win-controls">
+      <button class="win-btn" onclick={minimize} aria-label="Minimize" title="Minimize">
+        <Icon name="min" size={11} />
       </button>
-    {/if}
-    <span class="spacer"></span>
-    {#if session.mode === 'code' || session.mode === 'chat'}
-      <button
-        class="sess-btn mono"
-        onclick={() =>
-          (session.pickerMode = session.mode === 'code' ? 'code' : 'chat')}
-        title="Sessions — browse history or start a new one"
-      >
-        <Icon name="clock" size={12} />
-        <span class="sess-title">{session.sessionMeta?.title || 'Sessions'}</span>
+      <button class="win-btn" onclick={toggleMaximize} aria-label="Maximize" title="Maximize">
+        <Icon name="max" size={11} />
       </button>
-      <span class="state mono" class:running={session.running}>
-        {session.sessionState}
-      </span>
-    {/if}
-    {#if inTauri}
-      <div class="win-controls">
-        <button class="win-btn" onclick={winMin} aria-label="Minimize" title="Minimize">
-          <Icon name="min" size={11} />
-        </button>
-        <button class="win-btn" onclick={winMax} aria-label="Maximize" title="Maximize">
-          <Icon name="max" size={11} />
-        </button>
-        <button
-          class="win-btn close"
-          onclick={winClose}
-          aria-label="Close"
-          title="Close"
-        >
-          <Icon name="x" size={12} />
-        </button>
-      </div>
-    {/if}
-  </header>
+      <button class="win-btn close" onclick={close} aria-label="Close" title="Close">
+        <Icon name="x" size={12} />
+      </button>
+    </div>
+  {/if}
+{/snippet}
 
+{#snippet updateBar()}
   {#if session.updateAvailable}
     <div class="updatebar" role="status">
       <span class="mono">
@@ -204,6 +158,76 @@
           onclick={() => (session.updateAvailable = null)}
           aria-label="Dismiss">✕</button>
       {/if}
+    </div>
+  {/if}
+{/snippet}
+
+<div class="shell">
+  {#if session.mode === 'home'}
+    <header class="topbar" role="presentation" onmousedown={dragRegion}>
+      <span class="spacer"></span>
+      {@render winControls()}
+    </header>
+    {@render updateBar()}
+    <div class="body" in:fade={{ duration: 140 }}>
+      <Landing />
+    </div>
+  {:else}
+    <div class="frame">
+      {#if !session.sidebarCollapsed}
+        <Sidebar />
+      {/if}
+      <div class="main">
+        <header class="bar" role="presentation" onmousedown={dragRegion}>
+          {#if session.sidebarCollapsed}
+            <button
+              class="bar-btn"
+              onclick={() => (session.sidebarCollapsed = false)}
+              aria-label="Open sidebar"
+              title="Open sidebar (Ctrl+B)"
+            >
+              <Icon name="panel-left" size={16} />
+            </button>
+            <button
+              class="bar-btn"
+              onclick={() => session.startFresh()}
+              aria-label="New chat"
+              title="New chat (Ctrl+N)"
+            >
+              <Icon name="square-pen" size={16} />
+            </button>
+          {/if}
+          <span class="title" title={title}>{title}</span>
+          <span class="spacer"></span>
+          {#if session.mode === 'chat'}
+            <button
+              class="bar-btn"
+              class:on={session.panelOpen}
+              onclick={() => session.setPanel(!session.panelOpen)}
+              aria-label={session.workspacePath ? 'Toggle files & activity' : 'Toggle activity'}
+              title={session.workspacePath ? 'Files & activity' : 'Activity'}
+            >
+              <Icon name="panel-right" size={16} />
+            </button>
+          {/if}
+          {@render winControls()}
+        </header>
+        {@render updateBar()}
+        <div class="content">
+          {#key session.mode}
+            <div class="mode-view" in:fade={{ duration: 120 }}>
+              {#if session.mode === 'settings'}
+                <SettingsView />
+              {:else}
+                <Conversation />
+                {#if session.panelOpen}
+                  <SidePanel files={!!session.workspacePath} />
+                {/if}
+              {/if}
+            </div>
+          {/key}
+        </div>
+      </div>
     </div>
   {/if}
 
@@ -249,64 +273,6 @@
     </div>
   {/if}
 
-  <div class="body">
-    {#key session.mode}
-      <div class="mode-view" in:fade={{ duration: 140 }}>
-        {#if session.mode === 'home'}
-          <Landing />
-        {:else if session.mode === 'chat'}
-          <ChatView />
-        {:else if session.mode === 'settings'}
-          <SettingsView />
-        {:else}
-          <Pane
-            side="left"
-            title="Files"
-            collapsed={session.leftCollapsed}
-            width={session.leftWidth}
-            onToggle={() => (session.leftCollapsed = !session.leftCollapsed)}
-            onResize={(w) => (session.leftWidth = w)}
-          >
-            <FileTree />
-          </Pane>
-
-          <main class="center">
-            {#if session.viewer}
-              <FileViewer />
-            {:else if session.pickerMode === 'code' || session.sessionBusy}
-              {#if session.sessionBusy}
-                <div class="center-busy"><p>opening session…</p></div>
-              {:else}
-                <SessionBrowser mode="code" />
-              {/if}
-            {:else if session.blocks.length === 0}
-              <EmptyState />
-            {:else}
-              <Transcript />
-            {/if}
-
-            {#if session.pickerMode !== 'code' && !session.sessionBusy}
-              <TurnStatus />
-              <PermissionBar />
-              <Composer />
-            {/if}
-          </main>
-
-          <Pane
-            side="right"
-            title="Inspector"
-            collapsed={session.rightCollapsed}
-            width={session.rightWidth}
-            onToggle={() => (session.rightCollapsed = !session.rightCollapsed)}
-            onResize={(w) => (session.rightWidth = w)}
-          >
-            <Inspector />
-          </Pane>
-        {/if}
-      </div>
-    {/key}
-  </div>
-  <StatusBar />
   {#if session.paletteOpen}
     <CommandPalette onclose={() => (session.paletteOpen = false)} />
   {/if}
@@ -325,22 +291,77 @@
     min-height: 0;
     display: flex;
   }
+  .topbar {
+    display: flex;
+    align-items: center;
+    height: 36px;
+    flex: none;
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+  }
+  .frame {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+  .main {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-0);
+  }
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 48px;
+    padding-left: 12px;
+    flex: none;
+    user-select: none;
+  }
+  .bar .win-controls {
+    align-self: flex-start;
+    height: 36px;
+  }
+  .bar-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    color: var(--fg-2);
+    flex: none;
+  }
+  .bar-btn:hover,
+  .bar-btn.on {
+    background: var(--bg-2);
+    color: var(--fg-0);
+  }
+  .title {
+    min-width: 0;
+    max-width: 46ch;
+    padding: 0 6px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg-0);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
   .mode-view {
     flex: 1;
     min-width: 0;
     min-height: 0;
     display: flex;
-  }
-  .topbar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    height: 40px;
-    padding: 0 0 0 12px;
-    border-bottom: 1px solid var(--border);
-    flex: none;
-    background: var(--bg-1);
-    user-select: none;
   }
   .win-controls {
     display: flex;
@@ -417,7 +438,7 @@
     box-shadow:
       0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
       0 0 40px -8px color-mix(in srgb, var(--accent) 55%, transparent),
-      0 18px 40px -20px #000;
+      var(--shadow-lg);
   }
   .wn-head {
     display: flex;
@@ -500,90 +521,6 @@
   .win-btn.close:hover {
     background: var(--err);
     color: #fff;
-  }
-  .brand {
-    font-size: 13px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
-    color: var(--fg-0);
-    padding: 4px 6px;
-    border-radius: var(--radius-sm);
-  }
-  .brand:hover {
-    background: var(--bg-2);
-  }
-  .ws-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    max-width: 220px;
-    padding: 4px 10px;
-    font-size: 11px;
-    color: var(--fg-3);
-    background: var(--bg-2);
-    border: 1px dashed var(--border-strong);
-    border-radius: var(--radius-pill);
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-  .ws-chip.set {
-    color: var(--fg-1);
-    border-style: solid;
-    border-color: var(--border);
-  }
-  .ws-chip:hover {
-    color: var(--fg-0);
-    border-color: var(--accent-dim);
-  }
-  .center {
-    flex: 1;
-    min-width: 0;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-0);
-  }
-  .state {
-    font-size: 10.5px;
-    color: var(--fg-3);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .sess-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    max-width: 260px;
-    padding: 4px 10px;
-    font-size: 11px;
-    color: var(--fg-2);
-    background: var(--bg-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-pill);
-    overflow: hidden;
-    white-space: nowrap;
-  }
-  .sess-btn:hover {
-    color: var(--fg-0);
-    border-color: var(--border-strong);
-  }
-  .sess-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .center-busy {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .center-busy p {
-    font-size: 12px;
-    color: var(--fg-3);
-  }
-  .state.running {
-    color: var(--accent);
   }
   .spacer {
     flex: 1;

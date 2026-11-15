@@ -16,7 +16,11 @@
     list_dir: 'folder',
     glob: 'search',
     edit: 'edit',
-    write: 'edit',
+    edit_file: 'edit',
+    multi_edit: 'edit',
+    str_replace: 'edit',
+    write: 'file-pen',
+    write_file: 'file-pen',
     bash: 'terminal',
     grep: 'search',
     find: 'search',
@@ -122,7 +126,12 @@
     onkeydown={onHeadKey}
     aria-expanded={block.expanded}
   >
-    <span class="icon"><Icon name={TOOL_ICON[block.call?.name ?? ''] ?? 'terminal'} size={12} /></span>
+    <span class="icon"
+      ><Icon
+        name={TOOL_ICON[block.call?.name ?? ''] ?? (block.call?.name?.startsWith('mcp__') ? 'plug' : 'terminal')}
+        size={12}
+      /></span
+    >
     <span class="name" title={block.call?.name ?? ''}>{block.call?.name ?? 'tool'}</span>
     <span class="summary mono">{summary}</span>
     {#if savings}

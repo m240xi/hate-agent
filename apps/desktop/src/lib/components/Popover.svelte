@@ -19,9 +19,21 @@
 
   let open = $state(false);
   let root = $state<HTMLDivElement | null>(null);
+  let down = $state(false);
+  let room = $state(480);
+
+  function measure(): void {
+    if (!root) return;
+    const r = root.getBoundingClientRect();
+    const above = r.top - 16;
+    const below = window.innerHeight - r.bottom - 16;
+    down = below > above;
+    room = Math.max(160, Math.floor((down ? below : above) - 8));
+  }
 
   function setOpen(v: boolean): void {
     if (open === v) return;
+    if (v) measure();
     open = v;
     onOpenChange?.(v);
   }
@@ -42,7 +54,11 @@
   }
 </script>
 
-<svelte:window onclick={onWindowClick} onkeydowncapture={onKeydown} />
+<svelte:window
+  onclick={onWindowClick}
+  onkeydowncapture={onKeydown}
+  onresize={() => open && measure()}
+/>
 
 <div class="pop" class:pop-left={align === 'left'} bind:this={root}>
   <button
@@ -55,7 +71,13 @@
     {@render trigger()}
   </button>
   {#if open}
-    <div class="pop-panel" role="dialog" style:width={width}>
+    <div
+      class="pop-panel"
+      class:down
+      role="dialog"
+      style:width={width}
+      style:--pop-max="{room}px"
+    >
       {@render panel({ close: () => setOpen(false) })}
     </div>
   {/if}
@@ -96,13 +118,18 @@
     right: 0;
     z-index: 60;
     max-width: calc(100vw - 48px);
+    max-height: var(--pop-max, 70vh);
     display: flex;
     flex-direction: column;
     background: var(--bg-1);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
-    box-shadow: 0 12px 40px rgb(0 0 0 / 0.55);
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
+  }
+  .pop-panel.down {
+    bottom: auto;
+    top: calc(100% + 8px);
   }
   .pop-left .pop-panel {
     right: auto;

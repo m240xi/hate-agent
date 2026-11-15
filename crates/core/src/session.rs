@@ -731,7 +731,7 @@ impl Actor {
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| "New session".to_string());
+            .unwrap_or_else(|| "New chat".to_string());
         let usage = self.snapshot.read().expect("snapshot poisoned").usage;
         p.journal.save(&PersistedSession {
             key: p.key.clone(),

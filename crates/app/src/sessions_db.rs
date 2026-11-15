@@ -159,6 +159,21 @@ impl SessionDb {
         Ok(())
     }
 
+    pub fn set_workspace(
+        &self,
+        key: &str,
+        workspace: Option<&str>,
+        mode: &str,
+    ) -> Result<(), String> {
+        self.conn()?
+            .execute(
+                "UPDATE sessions SET workspace = ?1, mode = ?2 WHERE id = ?3",
+                params![workspace, mode, key],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn delete(&self, key: &str) -> Result<(), String> {
         self.conn()?
             .execute("DELETE FROM sessions WHERE id = ?1", params![key])

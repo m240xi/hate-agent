@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.release.outputs.id }}
+      notes: ${{ steps.release.outputs.notes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,6 +28,11 @@ jobs:
           prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           if [ -n "$prev" ]; then range="${prev}..HEAD"; else range="HEAD"; fi
           git log $range --no-merges --pretty=format:'- %s' | head -40 > notes.md
+          {
+            echo "notes<<NOTES_EOF"
+            cat notes.md
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --title "hate-agent $GITHUB_REF_NAME" --notes-file notes.md
           fi
@@ -83,5 +89,6 @@ jobs:
         with:
           projectPath: crates/app
           releaseId: ${{ needs.create-release.outputs.release_id }}
+          releaseBody: ${{ needs.create-release.outputs.notes }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           args: ${{ matrix.args }}

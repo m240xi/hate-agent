@@ -103,8 +103,7 @@ impl Connection {
             }
             let drained: Vec<_> = pending_r
                 .lock()
-                .map(|mut p| p.drain().map(|(_, tx)| tx).collect())
-                .unwrap_or_default();
+                .map_or_default(|mut p| p.drain().map(|(_, tx)| tx).collect());
             for tx in drained {
                 let _ = tx.send(Err(RpcError::closed()));
             }

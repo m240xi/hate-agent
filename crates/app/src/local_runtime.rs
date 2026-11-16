@@ -1529,8 +1529,7 @@ async fn spawn_and_wait(
             let msg = tail
                 .lock()
                 .ok()
-                .map(|q| q.iter().cloned().collect::<Vec<_>>().join(" | "))
-                .unwrap_or_default();
+                .map_or_default(|q| q.iter().cloned().collect::<Vec<_>>().join(" | "));
             return Err(format!(
                 "llama-server exited ({status}) while loading model: {msg}"
             ));

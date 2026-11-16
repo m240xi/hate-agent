@@ -239,8 +239,7 @@ async fn auth(cmd: AuthCommands) -> i32 {
                             "{name}: {}{}",
                             s.kind,
                             s.expires_at
-                                .map(|e| format!(" (token expires {e})"))
-                                .unwrap_or_default()
+                                .map_or_default(|e| format!(" (token expires {e})"))
                         );
                     }
                     Err(e) => {

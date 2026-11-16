@@ -425,8 +425,7 @@ impl Provider for OpenAiCompatProvider {
                             reasoning_efforts: m
                                 .reasoning
                                 .as_ref()
-                                .map(|r| r.supported_efforts.clone())
-                                .unwrap_or_default(),
+                                .map_or_default(|r| r.supported_efforts.clone()),
                             default_effort: m
                                 .reasoning
                                 .as_ref()

@@ -221,8 +221,7 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
     let signals = cfg
         .tools
         .as_ref()
-        .map(|t| skills::workspace_signals(t.root()))
-        .unwrap_or_default();
+        .map_or_default(|t| skills::workspace_signals(t.root()));
 
     let actor = Actor {
         cfg,
@@ -383,12 +382,7 @@ impl Actor {
             return;
         }
         let system = self.system_prompt();
-        let mut specs = self
-            .cfg
-            .tools
-            .as_ref()
-            .map(|t| t.specs())
-            .unwrap_or_default();
+        let mut specs = self.cfg.tools.as_ref().map_or_default(|t| t.specs());
         if let Some(hub) = self.cfg.mcp.as_ref() {
             hub.kick_refresh();
             specs.extend(hub.specs());
@@ -948,7 +942,7 @@ async fn run_turn(
         t.reset_read_memo();
     }
 
-    let mut specs = tools.as_ref().map(|t| t.specs()).unwrap_or_default();
+    let mut specs = tools.as_ref().map_or_default(|t| t.specs());
     if let Some(hub) = mcp.as_ref() {
         hub.kick_refresh();
         specs.extend(hub.specs());
@@ -1253,8 +1247,7 @@ async fn run_turn(
                     .get("name")
                     .and_then(|v| v.as_str())
                     .or_else(|| call.args.get("title").and_then(|v| v.as_str()))
-                    .map(skills::slugify)
-                    .unwrap_or_default();
+                    .map_or_default(skills::slugify);
                 if let Some(skill) = store.get(&name) {
                     let _ = events.send(Event::SkillSaved {
                         name: skill.name,

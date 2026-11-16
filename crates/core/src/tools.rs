@@ -510,10 +510,7 @@ impl WorkspaceTools {
             }
             count += 1;
             let indent = "  ".repeat(rel.components().count().saturating_sub(1));
-            let name = rel
-                .file_name()
-                .map(|n| n.to_string_lossy())
-                .unwrap_or_default();
+            let name = rel.file_name().map_or_default(|n| n.to_string_lossy());
             let slash = if is_dir { "/" } else { "" };
             let _ = writeln!(out, "{indent}{name}{slash}");
         });
@@ -570,10 +567,7 @@ impl WorkspaceTools {
             }
             let rel_s = rel.to_string_lossy().replace('\\', "/");
             if let Some(g) = glob_filter {
-                let name = rel
-                    .file_name()
-                    .map(|n| n.to_string_lossy())
-                    .unwrap_or_default();
+                let name = rel.file_name().map_or_default(|n| n.to_string_lossy());
                 if !glob_match(g, &rel_s) && !glob_match(g, &name) {
                     return;
                 }

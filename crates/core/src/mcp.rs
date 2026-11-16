@@ -294,9 +294,8 @@ impl McpHub {
         if read_only {
             return None;
         }
-        let detail = serde_json::to_string(&call.args)
-            .map(|s| s.chars().take(200).collect())
-            .unwrap_or_default();
+        let detail =
+            serde_json::to_string(&call.args).map_or_default(|s| s.chars().take(200).collect());
         Some((format!("calls MCP tool {server}.{orig}"), Some(detail)))
     }
 

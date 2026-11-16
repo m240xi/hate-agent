@@ -234,6 +234,10 @@
     font-size: clamp(24px, 3.4vw, 34px);
     letter-spacing: 0.02em;
     color: var(--fg-0);
+    text-wrap: balance;
+    /* Hard one-pixel drop shadow instead of a blur: pixel type wants a pixel
+       shadow, and it separates the glyphs from the starfield behind them. */
+    text-shadow: 0 2px 0 color-mix(in srgb, var(--bg-0) 75%, transparent);
   }
   .callout {
     display: inline-flex;
@@ -244,12 +248,15 @@
     font-size: 12.5px;
     color: var(--fg-1);
     text-align: left;
-    background: var(--bg-1);
+    background-color: color-mix(in srgb, var(--accent) 6%, var(--bg-1));
+    background-image: var(--noise);
+    background-blend-mode: soft-light;
     border: 1px solid var(--border-strong);
     border-radius: 12px;
+    box-shadow: var(--el-1);
   }
   .callout:hover {
-    border-color: color-mix(in srgb, var(--accent) 40%, var(--border-strong));
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
     color: var(--fg-0);
   }
   .dock {

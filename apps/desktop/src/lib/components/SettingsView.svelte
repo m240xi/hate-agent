@@ -1587,7 +1587,7 @@ ${preset.key_url ?? ''}`}
     backdrop-filter: blur(12px);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-pill);
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--el-2);
   }
   .dock::-webkit-scrollbar {
     display: none;
@@ -1652,7 +1652,7 @@ ${preset.key_url ?? ''}`}
     );
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--el-1);
   }
   .density-row {
     display: flex;

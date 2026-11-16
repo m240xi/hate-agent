@@ -124,7 +124,7 @@
     background: var(--bg-1);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--el-3);
     overflow: hidden;
   }
   .pop-panel.down {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { session } from '../store.svelte';
   import ToolCard from './ToolCard.svelte';
   import Icon from './Icon.svelte';
@@ -18,6 +19,17 @@
   let detailsOpen = $state(false);
   const isLatest = $derived(block.kind === 'text' && block.id === session.lastReplyId);
   let editing = $state(false);
+
+  // The context menu lives at the app root, so it asks the block to open its
+  // editor rather than reaching into component state.
+  onMount(() => {
+    const onEdit = (e: Event): void => {
+      const detail = (e as CustomEvent<{ id: number }>).detail;
+      if (detail?.id === block.id) startEdit();
+    };
+    window.addEventListener('hate:edit-message', onEdit);
+    return () => window.removeEventListener('hate:edit-message', onEdit);
+  });
   let editText = $state('');
   let editBusy = $state(false);
   let editArea = $state<HTMLTextAreaElement | null>(null);
@@ -53,7 +65,8 @@
   async function onMessageClick(e: MouseEvent): Promise<void> {
     const btn = (e.target as HTMLElement | null)?.closest('.copy-code');
     if (!btn) return;
-    const code = btn.parentElement?.querySelector('code')?.textContent ?? '';
+    const host = btn.closest('.code-block') ?? btn.parentElement;
+    const code = host?.querySelector('code')?.textContent ?? '';
     if (await copyText(code)) {
       btn.textContent = 'copied';
       setTimeout(() => (btn.textContent = 'copy'), 1200);
@@ -62,7 +75,7 @@
 </script>
 
 {#if block.kind === 'user'}
-  <div class="user-msg rise">
+  <div class="user-msg rise" data-ctx="message" data-kind="user" data-block={block.id}>
     <div class="user-tag">you{#if block.plan}<span class="plan-tag">plan</span>{/if}</div>
     {#if block.images && block.images.length > 0}
       <div class="user-images">
@@ -133,7 +146,7 @@
   </div>
 {:else if block.kind === 'text'}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="assistant-msg" class:local={block.local}>
+  <div class="assistant-msg" class:local={block.local} data-ctx="message" data-kind="text" data-block={block.id}>
     <div class="assistant-text" class:streaming={block.streaming} onclick={onMessageClick}>
       <!-- eslint-disable-next-line svelte/no-at-html-tags -->
       {@html renderMarkdown(block.text ?? '')}
@@ -181,7 +194,7 @@
     {/if}
   </div>
 {:else if block.kind === 'thinking'}
-  <div class="thinking">
+  <div class="thinking" data-ctx="message" data-kind="thinking" data-block={block.id}>
     <button
       class="thinking-head"
       onclick={() => (thinkingOpen = !thinkingOpen)}
@@ -213,7 +226,7 @@
 {:else if block.kind === 'tool' && block.call}
   <ToolCard {block} />
 {:else if block.kind === 'error'}
-  <div class="error-msg rise">{block.text}</div>
+  <div class="error-msg rise" data-ctx="message" data-kind="error" data-block={block.id}>{block.text}</div>
 {/if}
 
 <style>
@@ -395,6 +408,7 @@
     white-space: pre;
   }
   .assistant-text {
+    text-wrap: pretty;
     color: var(--fg-0);
     font-size: 14px;
     line-height: 1.65;
@@ -405,14 +419,38 @@
     position: relative;
     max-width: 100%;
   }
+  .assistant-text :global(.code-block) {
+    margin: 0 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-0);
+  }
+  .assistant-text :global(.code-block pre) {
+    margin: 0;
+    padding: 8px 10px;
+    max-height: 340px;
+    overflow: auto;
+  }
+  .assistant-text :global(.code-head) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 3px 4px 3px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-1);
+  }
+  .assistant-text :global(.code-lang) {
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    color: var(--fg-3);
+  }
   .assistant-text :global(:not(pre) > code) {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
   .assistant-text :global(.copy-code) {
-    position: absolute;
-    top: 4px;
-    right: 6px;
     padding: 1px 6px;
     font-family: var(--font-mono);
     font-size: 10px;
@@ -423,7 +461,7 @@
     opacity: 0;
     transition: opacity var(--motion);
   }
-  .assistant-text :global(pre:hover .copy-code),
+  .assistant-text :global(.code-block:hover .copy-code),
   .assistant-text :global(.copy-code:focus-visible) {
     opacity: 1;
   }
@@ -502,18 +540,29 @@
   .assistant-text :global(del) {
     color: var(--fg-2);
   }
+  /* A soft underline that breathes, instead of a hard blinking block: it reads
+     as "still being written" rather than a terminal cursor. */
   .caret {
     display: inline-block;
-    width: 7px;
-    height: 13px;
-    margin-left: 2px;
-    vertical-align: -2px;
+    width: 10px;
+    height: 2px;
+    margin-left: 3px;
+    vertical-align: baseline;
+    border-radius: 1px;
+    transform-origin: left center;
     background: var(--accent);
-    animation: blink 1s steps(2) infinite;
+    box-shadow: 0 0 7px color-mix(in srgb, var(--accent) 65%, transparent);
+    animation: writing 1.15s ease-in-out infinite;
   }
-  @keyframes blink {
+  @keyframes writing {
+    0%,
+    100% {
+      opacity: 0.3;
+      transform: scaleX(0.45);
+    }
     50% {
-      opacity: 0;
+      opacity: 1;
+      transform: scaleX(1);
     }
   }
   .thinking {
@@ -554,6 +603,10 @@
     font-size: 12px;
     line-height: 1.5;
     color: var(--err);
+    background-image: var(--noise);
+    background-color: color-mix(in srgb, var(--err) 7%, var(--bg-1));
+    background-blend-mode: soft-light;
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--err) 22%, transparent);
     white-space: pre-wrap;
     word-break: break-word;
     padding: 6px 10px;

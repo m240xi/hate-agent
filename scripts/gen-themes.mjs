@@ -109,7 +109,13 @@ function render(data) {
   const parts = [HEADER];
   for (const theme of data.themes) {
     if (!theme.tokens) continue;
-    const decls = Object.entries(theme.tokens)
+    // Every raised surface gets a 1px top highlight; the colour depends on the
+    // scheme, so it is emitted per palette (a root-level token would freeze the
+    // dark value and ignore the theme override).
+    const hairline =
+      theme.tokens['--hairline'] ??
+      (theme.scheme === 'light' ? 'rgba(0, 0, 0, 0.05)' : 'rgba(255, 255, 255, 0.06)');
+    const decls = Object.entries({ '--hairline': hairline, ...theme.tokens })
       .map(([k, v]) => `  ${k}: ${v};`)
       .join('\n');
     parts.push(`:root[data-theme='${theme.id}'] {\n  color-scheme: ${theme.scheme};\n${decls}\n}\n`);

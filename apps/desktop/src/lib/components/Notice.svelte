@@ -40,7 +40,7 @@
     background: var(--bg-2);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--el-2);
   }
   .body {
     display: flex;

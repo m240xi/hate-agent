@@ -108,7 +108,7 @@
     background: var(--bg-1);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
-    box-shadow: 0 8px 30px rgb(0 0 0 / 0.4);
+    box-shadow: var(--el-3);
     overflow: hidden;
   }
   .filter-wrap {

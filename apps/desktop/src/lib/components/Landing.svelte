@@ -3,11 +3,34 @@
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
   import NightScene from './NightScene.svelte';
+  import { motionReduced } from '../motion';
   import type { ProviderInfo } from '../ipc';
 
   let providers = $state<ProviderInfo[]>([]);
   let version = $state('0.1.0');
   let inTauri = $state(false);
+
+  let landingEl = $state<HTMLElement | null>(null);
+  let raf = 0;
+  let nextX = 0;
+  let nextY = 0;
+
+  // One rAF-coalesced write per pointer move; a no-op when decorative motion is
+  // settled, so the scene never fights a reduced-motion preference.
+  function trackPointer(e: PointerEvent): void {
+    if (motionReduced()) return;
+    const el = landingEl;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    nextX = ((e.clientX - r.left) / r.width - 0.5) * 2;
+    nextY = ((e.clientY - r.top) / r.height - 0.5) * 2;
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      el.style.setProperty('--lx', nextX.toFixed(3));
+      el.style.setProperty('--ly', nextY.toFixed(3));
+    });
+  }
 
   onMount(async () => {
     try {
@@ -59,8 +82,18 @@
   ];
 </script>
 
-<div class="landing">
+<div
+  class="landing"
+  role="presentation"
+  onpointermove={trackPointer}
+  onpointerleave={() => {
+    landingEl?.style.setProperty('--lx', '0');
+    landingEl?.style.setProperty('--ly', '0');
+  }}
+  bind:this={landingEl}
+>
   <NightScene />
+  <div class="aurora" aria-hidden="true"></div>
 
   <div class="hero">
     <div class="version pixel">v{version}</div>
@@ -113,7 +146,12 @@
 </div>
 
 <style>
+  /* The scene leans away from the pointer by a few pixels. Coalesced into one
+     animation frame, and it simply stops writing when decorative motion is off
+     (the explicit Reduces setting, or a settled system preference). */
   .landing {
+    --lx: 0;
+    --ly: 0;
     position: relative;
     flex: 1;
     min-width: 0;
@@ -131,6 +169,40 @@
     padding: 24px;
     text-align: center;
   }
+  /* the palette's own accent, breathing over the horizon: the night scene and
+     the UI are lit by the same colour */
+  .aurora {
+    position: absolute;
+    left: 50%;
+    bottom: -8%;
+    width: min(1200px, 130%);
+    height: 48%;
+    transform: translateX(-50%);
+    pointer-events: none;
+    background: radial-gradient(
+      62% 100% at 50% 100%,
+      color-mix(in srgb, var(--accent) 26%, transparent),
+      transparent 70%
+    );
+    mix-blend-mode: screen;
+    opacity: 0.45;
+    animation: aurora-breathe 17s steps(24, end) infinite alternate;
+  }
+  @keyframes aurora-breathe {
+    from {
+      opacity: 0.26;
+      transform: translateX(-50%) scaleY(0.92);
+    }
+    to {
+      opacity: 0.52;
+      transform: translateX(-50%) scaleY(1.06);
+    }
+  }
+  :global(:root[data-ambient-motion='off']) .aurora {
+    animation: none;
+    opacity: 0.34;
+    transform: translateX(-50%);
+  }
   .pixel {
     font-family: 'm5x7', var(--font-mono);
     font-size: 16px;
@@ -147,6 +219,7 @@
     color: color-mix(in srgb, var(--accent) 55%, #f0eee9);
     margin: 0 0 14px;
     line-height: 1;
+    text-shadow: 0 3px 0 rgba(0, 0, 0, 0.45);
     text-shadow: 0 3px 0 rgba(0, 0, 0, 0.9), 0 8px 24px rgba(0, 0, 0, 0.8);
   }
   .tagline {
@@ -155,6 +228,7 @@
     margin: 0 auto 30px;
     line-height: 1.5;
     text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
+    text-wrap: pretty;
   }
 
   .plates {

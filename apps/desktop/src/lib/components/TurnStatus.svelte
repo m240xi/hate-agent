@@ -165,12 +165,19 @@
   .ctx-hot {
     color: var(--warn);
   }
+  /* a 2-frame block cursor: the pixel-art equivalent of a spinner */
   .pulse {
     width: 6px;
-    height: 6px;
-    border-radius: 50%;
+    height: 8px;
+    border-radius: 1px;
     background: var(--accent);
-    animation: status-pulse 1.4s ease-in-out infinite;
+    box-shadow: 0 0 8px -1px color-mix(in srgb, var(--accent) 70%, transparent);
+    animation: status-blip 1s steps(2, end) infinite;
+  }
+  @keyframes status-blip {
+    50% {
+      opacity: 0.25;
+    }
   }
   .meter {
     flex: none;

@@ -109,7 +109,7 @@
 
 <div class="transcript-wrap">
   <p class="sr-only" role="status" aria-live="polite">{announce}</p>
-  <div class="transcript" bind:this={scrollEl} onscroll={onScroll}>
+  <div class="transcript" bind:this={scrollEl} onscroll={onScroll} data-ctx="transcript">
     {#if hiddenCount > 0}
       <div class="earlier">
         {hiddenCount} earlier blocks hidden
@@ -196,7 +196,7 @@
     background: var(--bg-2);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-pill);
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--el-2);
     color: var(--fg-1);
   }
   .jump:hover {

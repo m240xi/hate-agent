@@ -4,6 +4,7 @@
 
 :root[data-theme='dark'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #000000;
   --bg-1: #0a0a0c;
   --bg-2: #121215;
@@ -26,6 +27,7 @@
 
 :root[data-theme='light'] {
   color-scheme: light;
+  --hairline: rgba(0, 0, 0, 0.05);
   --sky-stars: none;
   --shadow-sm: 0 1px 2px rgba(30, 25, 18, 0.08);
   --shadow-md: 0 8px 28px rgba(30, 25, 18, 0.12);
@@ -52,6 +54,7 @@
 
 :root[data-theme='phosphor'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #020604;
   --bg-1: #071009;
   --bg-2: #0c1810;
@@ -74,6 +77,7 @@
 
 :root[data-theme='ember'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #0b0605;
   --bg-1: #140d09;
   --bg-2: #1d130d;
@@ -96,6 +100,7 @@
 
 :root[data-theme='sakura'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #0a0710;
   --bg-1: #110c18;
   --bg-2: #181024;
@@ -118,6 +123,7 @@
 
 :root[data-theme='kanagawa'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #111117;
   --bg-1: #16161d;
   --bg-2: #1f1f28;
@@ -140,6 +146,7 @@
 
 :root[data-theme='carbon'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #07080a;
   --bg-1: #0c0d10;
   --bg-2: #14161b;
@@ -162,6 +169,7 @@
 
 :root[data-theme='graphite'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #0a0b0d;
   --bg-1: #111316;
   --bg-2: #181b20;
@@ -184,6 +192,7 @@
 
 :root[data-theme='alpine'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #040a0c;
   --bg-1: #081215;
   --bg-2: #0e1c21;
@@ -206,6 +215,7 @@
 
 :root[data-theme='tide'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #040911;
   --bg-1: #07101c;
   --bg-2: #0d192b;
@@ -228,6 +238,7 @@
 
 :root[data-theme='after-rain'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #060b0c;
   --bg-1: #0b1214;
   --bg-2: #121c1f;
@@ -250,6 +261,7 @@
 
 :root[data-theme='aurora'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #04080f;
   --bg-1: #080f1a;
   --bg-2: #0f1928;
@@ -272,6 +284,7 @@
 
 :root[data-theme='seafoam'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #030b09;
   --bg-1: #061311;
   --bg-2: #0b1e1b;
@@ -294,6 +307,7 @@
 
 :root[data-theme='orbit'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #04050d;
   --bg-1: #080917;
   --bg-2: #101226;
@@ -316,6 +330,7 @@
 
 :root[data-theme='nebula'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #07040d;
   --bg-1: #0e0818;
   --bg-2: #170e28;
@@ -338,6 +353,7 @@
 
 :root[data-theme='violet-hour'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #090612;
   --bg-1: #100b1e;
   --bg-2: #19122e;
@@ -360,6 +376,7 @@
 
 :root[data-theme='dusk'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #0a0710;
   --bg-1: #120d1a;
   --bg-2: #1b1427;
@@ -382,6 +399,7 @@
 
 :root[data-theme='mirage'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #0a0805;
   --bg-1: #120f0a;
   --bg-2: #1c1710;
@@ -404,6 +422,7 @@
 
 :root[data-theme='dune'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #0c0804;
   --bg-1: #150e08;
   --bg-2: #20160d;
@@ -426,6 +445,7 @@
 
 :root[data-theme='streak-fire'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #0a0302;
   --bg-1: #130705;
   --bg-2: #1e0c09;
@@ -448,6 +468,7 @@
 
 :root[data-theme='plasma'] {
   color-scheme: dark;
+  --hairline: rgba(255, 255, 255, 0.06);
   --bg-0: #05030c;
   --bg-1: #0a0616;
   --bg-2: #130c26;
@@ -470,6 +491,7 @@
 
 :root[data-theme='paper'] {
   color-scheme: light;
+  --hairline: rgba(0, 0, 0, 0.05);
   --sky-stars: none;
   --shadow-sm: 0 1px 2px rgba(30, 25, 18, 0.08);
   --shadow-md: 0 8px 28px rgba(30, 25, 18, 0.12);
@@ -496,6 +518,7 @@
 
 :root[data-theme='shine'] {
   color-scheme: light;
+  --hairline: rgba(0, 0, 0, 0.05);
   --sky-stars: none;
   --shadow-sm: 0 1px 2px rgba(30, 25, 18, 0.08);
   --shadow-md: 0 8px 28px rgba(30, 25, 18, 0.12);
@@ -522,6 +545,7 @@
 
 :root[data-theme='daybreak'] {
   color-scheme: light;
+  --hairline: rgba(0, 0, 0, 0.05);
   --sky-stars: none;
   --shadow-sm: 0 1px 2px rgba(30, 25, 18, 0.08);
   --shadow-md: 0 8px 28px rgba(30, 25, 18, 0.12);
@@ -548,6 +572,7 @@
 
 :root[data-theme='frost'] {
   color-scheme: light;
+  --hairline: rgba(0, 0, 0, 0.05);
   --sky-stars: none;
   --shadow-sm: 0 1px 2px rgba(30, 25, 18, 0.08);
   --shadow-md: 0 8px 28px rgba(30, 25, 18, 0.12);
@@ -574,6 +599,7 @@
 
 :root[data-theme='blossom'] {
   color-scheme: light;
+  --hairline: rgba(0, 0, 0, 0.05);
   --sky-stars: none;
   --shadow-sm: 0 1px 2px rgba(30, 25, 18, 0.08);
   --shadow-md: 0 8px 28px rgba(30, 25, 18, 0.12);
@@ -600,6 +626,7 @@
 
 :root[data-theme='peach'] {
   color-scheme: light;
+  --hairline: rgba(0, 0, 0, 0.05);
   --sky-stars: none;
   --shadow-sm: 0 1px 2px rgba(30, 25, 18, 0.08);
   --shadow-md: 0 8px 28px rgba(30, 25, 18, 0.12);
@@ -626,6 +653,7 @@
 
 :root[data-theme='lilac'] {
   color-scheme: light;
+  --hairline: rgba(0, 0, 0, 0.05);
   --sky-stars: none;
   --shadow-sm: 0 1px 2px rgba(30, 25, 18, 0.08);
   --shadow-md: 0 8px 28px rgba(30, 25, 18, 0.12);
@@ -652,6 +680,7 @@
 
 :root[data-theme='sherbet'] {
   color-scheme: light;
+  --hairline: rgba(0, 0, 0, 0.05);
   --sky-stars: none;
   --shadow-sm: 0 1px 2px rgba(30, 25, 18, 0.08);
   --shadow-md: 0 8px 28px rgba(30, 25, 18, 0.12);

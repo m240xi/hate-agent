@@ -143,7 +143,7 @@
   .tabs button.on {
     background: var(--bg-0);
     color: var(--fg-0);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--el-1);
   }
   .title {
     padding-left: 4px;

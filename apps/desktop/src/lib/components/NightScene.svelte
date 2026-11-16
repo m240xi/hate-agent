@@ -383,5 +383,13 @@
     width: 100%;
     height: 100%;
     image-rendering: pixelated;
+    /* leans against the pointer; the small overscale hides the edge it reveals */
+    transform: translate3d(calc(var(--lx, 0) * -7px), calc(var(--ly, 0) * -4px), 0) scale(1.03);
+    transition: transform 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+    will-change: transform;
+  }
+  :global(:root[data-ambient-motion='off']) .scene {
+    transform: none;
+    transition: none;
   }
 </style>

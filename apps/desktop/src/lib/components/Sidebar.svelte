@@ -3,6 +3,7 @@
   import type { SessionMeta } from '../ipc';
   import Icon from './Icon.svelte';
   import { dragRegion } from '../window';
+  import { onMount } from 'svelte';
   import { fly, slide } from 'svelte/transition';
   import { SETTINGS_SECTIONS } from '../settings';
   import { cubicOut } from 'svelte/easing';
@@ -93,6 +94,17 @@
 
   const active = (s: SessionMeta) =>
     s.id === session.sessionId && session.mode !== 'settings';
+
+  // Renaming lives here, so the app-wide context menu asks for it by event.
+  onMount(() => {
+    const onRename = (e: Event): void => {
+      const id = (e as CustomEvent<{ id: string }>).detail?.id;
+      const target = id ? session.sessions.find((s) => s.id === id) : undefined;
+      if (target) startRename(target);
+    };
+    window.addEventListener('hate:rename-session', onRename);
+    return () => window.removeEventListener('hate:rename-session', onRename);
+  });
 </script>
 
 <aside
@@ -193,7 +205,13 @@
           <h3 class="group-label">{g.label}</h3>
           <ul>
             {#each g.items as s (s.id)}
-              <li class="row" class:active={active(s)}>
+              <li
+                class="row"
+                class:active={active(s)}
+                data-ctx="session"
+                data-id={s.id}
+                data-title={s.title || 'Untitled'}
+              >
                 {#if renaming === s.id}
                   <input
                     class="rename"
@@ -536,13 +554,24 @@
   }
   .skel {
     height: 10px;
-    border-radius: 5px;
-    background: var(--bg-3);
-    animation: pulse 1.4s ease-in-out infinite;
+    border-radius: 3px;
+    /* a scan that steps instead of gliding: reads as pixel art, and a stepped
+       animation is cheaper than a per-frame gradient for a list of bars */
+    background-image: linear-gradient(
+      90deg,
+      var(--bg-3) 0%,
+      color-mix(in srgb, var(--fg-0) 9%, var(--bg-3)) 50%,
+      var(--bg-3) 100%
+    );
+    background-size: 220% 100%;
+    animation: skel-scan 1.8s steps(14, end) infinite;
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.45;
+  @keyframes skel-scan {
+    from {
+      background-position: 130% 0;
+    }
+    to {
+      background-position: -30% 0;
     }
   }
   .foot {

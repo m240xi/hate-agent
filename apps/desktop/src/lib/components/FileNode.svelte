@@ -31,6 +31,9 @@
       class:selected
       onclick={() => (openOverride = !open)}
       aria-expanded={open}
+      data-ctx="file"
+      data-kind="dir"
+      data-path={node.path}
     >
       <span class="twisty"><Icon name={open ? 'chevron-down' : 'chevron-right'} size={11} /></span>
       <Icon name="folder" size={13} />
@@ -49,6 +52,9 @@
         class:pinned
         onclick={() => session.openFile(node.path)}
         title={node.path}
+        data-ctx="file"
+        data-kind="file"
+        data-path={node.path}
       >
         <span class="twisty"></span>
         <Icon name="file" size={13} />

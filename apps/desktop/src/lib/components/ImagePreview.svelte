@@ -75,7 +75,12 @@
   title={name}
 >
   {#if src}
-    <img {src} alt={thumb ? name : 'AI-generated result'} onerror={() => (error = 'The image could not be decoded.')} />
+    <img
+      {src}
+      alt={thumb ? name : 'AI-generated result'}
+      data-ctx="image"
+      onerror={() => (error = 'The image could not be decoded.')}
+    />
   {:else if error}
     <span class="fail" title={error}>preview unavailable</span>
   {:else}
@@ -112,7 +117,7 @@
         </button>
       </div>
       {#if src}
-        <img class="full" {src} alt="AI-generated result" />
+        <img class="full" {src} alt="AI-generated result" data-ctx="image" />
       {:else}
         <p class="err">{error || 'Loading…'}</p>
       {/if}
@@ -177,7 +182,7 @@
     background: var(--bg-1);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--el-3);
   }
   .bar {
     display: flex;

@@ -224,7 +224,7 @@
     background: var(--bg-1);
     border: 1px solid var(--border-strong);
     border-radius: 16px;
-    box-shadow: 0 24px 60px -20px rgb(0 0 0 / 70%);
+    box-shadow: var(--el-3);
   }
   .sheet-head {
     display: flex;

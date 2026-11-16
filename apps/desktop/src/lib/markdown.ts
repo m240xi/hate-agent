@@ -64,9 +64,17 @@ function renderBlocks(md: string): string {
         i++;
       }
       i++;
-      const lang = fence[1] ? ` class="lang-${esc(fence[1])}"` : '';
+      const langName = fence[1] ?? '';
+      const lang = langName ? ` class="lang-${esc(langName)}"` : '';
+      // A header bar carrying the language and the copy control, so a fence reads
+      // as a code block that belongs to the app instead of pasted HTML. The copy
+      // button lives outside <code>, so copying is unchanged.
+      const chip = langName
+        ? `<span class="code-lang mono">${esc(langName)}</span>`
+        : '<span></span>';
+      const body = esc(buf.join('\n'));
       out.push(
-        `<pre><button type="button" class="copy-code" aria-label="Copy code">copy</button><code${lang}>${esc(buf.join('\n'))}</code></pre>`,
+        `<div class="code-block" data-lines="${buf.length}" data-ctx="code" data-lang="${esc(langName)}"><div class="code-head">${chip}<button type="button" class="copy-code" aria-label="Copy code">copy</button></div><pre><code${lang}>${body}</code></pre></div>`,
       );
       continue;
     }

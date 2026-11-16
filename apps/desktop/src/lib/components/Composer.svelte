@@ -345,7 +345,7 @@
     background: var(--bg-1);
     border: 1px solid var(--border-strong);
     border-radius: 22px;
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--el-2);
     transition:
       border-color var(--motion),
       box-shadow var(--motion);

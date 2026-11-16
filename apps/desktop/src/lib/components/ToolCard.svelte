@@ -6,29 +6,53 @@
 
   interface Props {
     block: TranscriptBlock;
+    /** position inside a group: drives the cascade on insert */
+    index?: number;
   }
 
-  let { block }: Props = $props();
+  let { block, index = 0 }: Props = $props();
 
-  const TOOL_ICON: Record<string, string> = {
-    read: 'file',
-    read_file: 'file',
-    list_dir: 'folder',
-    glob: 'search',
-    edit: 'edit',
-    edit_file: 'edit',
-    multi_edit: 'edit',
-    str_replace: 'edit',
-    write: 'file-pen',
-    write_file: 'file-pen',
-    bash: 'terminal',
-    grep: 'search',
-    find: 'search',
-    symbol: 'search',
-    apply_patch: 'diff',
-    git_diff: 'diff',
-    git_log: 'branch',
+  type Tone = 'read' | 'write' | 'exec' | 'net';
+
+  // glyph + tone per tool family: reads are safe, writes are the palette accent,
+  // shell is caution, network is neutral. Identity without inventing hues.
+  const TOOLS: Record<string, { icon: string; tone: Tone }> = {
+    read: { icon: 'file', tone: 'read' },
+    read_file: { icon: 'file', tone: 'read' },
+    read_image: { icon: 'image', tone: 'read' },
+    list_dir: { icon: 'folder', tone: 'read' },
+    glob: { icon: 'search', tone: 'read' },
+    edit: { icon: 'edit', tone: 'write' },
+    edit_file: { icon: 'edit', tone: 'write' },
+    multi_edit: { icon: 'edit', tone: 'write' },
+    str_replace: { icon: 'edit', tone: 'write' },
+    write: { icon: 'file-pen', tone: 'write' },
+    write_file: { icon: 'file-pen', tone: 'write' },
+    apply_patch: { icon: 'diff', tone: 'write' },
+    bash: { icon: 'terminal', tone: 'exec' },
+    shell: { icon: 'terminal', tone: 'exec' },
+    run: { icon: 'terminal', tone: 'exec' },
+    grep: { icon: 'search', tone: 'exec' },
+    find: { icon: 'search', tone: 'exec' },
+    symbol: { icon: 'search', tone: 'exec' },
+    git_diff: { icon: 'diff', tone: 'exec' },
+    git_log: { icon: 'branch', tone: 'exec' },
+    web_search: { icon: 'sparkles', tone: 'net' },
+    web_fetch: { icon: 'link', tone: 'net' },
+    fetch: { icon: 'link', tone: 'net' },
   };
+
+  const tool = $derived.by(() => {
+    const name = block.call?.name ?? '';
+    return (
+      TOOLS[name] ??
+      (name.startsWith('mcp__')
+        ? { icon: 'plug', tone: 'net' as Tone }
+        : { icon: 'terminal', tone: 'exec' as Tone })
+    );
+  });
+
+  const toolState = $derived(block.ok === undefined ? 'run' : block.ok ? 'ok' : 'fail');
 
   const summary = $derived.by(() => {
     const call = block.call;
@@ -116,7 +140,17 @@
   );
 </script>
 
-<div class="tool-card rise" class:expanded={block.expanded}>
+<div
+  class="tool-card rise"
+  class:expanded={block.expanded}
+  data-state={toolState}
+  data-ctx="tool"
+  data-name={block.call?.name ?? ''}
+  data-copy={summary}
+  data-path={linkPath}
+  data-writer={isWriter}
+  style:--i={index}
+>
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="head"
@@ -126,15 +160,14 @@
     onkeydown={onHeadKey}
     aria-expanded={block.expanded}
   >
-    <span class="icon"
-      ><Icon
-        name={TOOL_ICON[block.call?.name ?? ''] ?? (block.call?.name?.startsWith('mcp__') ? 'plug' : 'terminal')}
-        size={12}
-      /></span
-    >
+    <span class="icon" data-tone={tool.tone}><Icon name={tool.icon} size={11} /></span>
     <span class="name" title={block.call?.name ?? ''}>{block.call?.name ?? 'tool'}</span>
     <span class="summary mono">{summary}</span>
-    {#if savings}
+    {#if diff && block.ok !== false}
+      <span class="fp mono" title="lines added and removed by this edit">
+        <span class="add">+{diff.added}</span><span class="del">−{diff.removed}</span>
+      </span>
+    {:else if savings}
       <span class="savings mono" title="full tokens → sent tokens">{savings} tok</span>
     {/if}
     {#if linkPath}
@@ -191,13 +224,39 @@
 </div>
 
 <style>
+  /* A burst of calls cascades instead of popping in one frame. Capped so a
+     long group never takes more than ~a fifth of a second to settle. */
+  .tool-card.rise {
+    animation-delay: calc(min(var(--i, 0), 10) * 22ms);
+  }
   .tool-card {
+    position: relative;
     flex: none;
     min-width: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--bg-1);
     overflow: hidden;
+    box-shadow: var(--el-1);
+    /* outcome rail: the fastest way to scan a long transcript */
+    --rail: var(--border);
+  }
+  .tool-card[data-state='run'] {
+    --rail: color-mix(in srgb, var(--accent) 55%, var(--border));
+  }
+  .tool-card[data-state='ok'] {
+    --rail: color-mix(in srgb, var(--ok) 65%, var(--border));
+  }
+  .tool-card[data-state='fail'] {
+    --rail: color-mix(in srgb, var(--err) 80%, var(--border));
+  }
+  .tool-card::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 2px;
+    background: var(--rail);
+    pointer-events: none;
   }
   .head {
     display: flex;
@@ -254,13 +313,19 @@
     font-size: 10.5px;
     line-height: 1.5;
   }
+  /* git's rails: a tinted band plus a 2px rule, so a diff reads by shape
+     before a single line is read. */
   .diff-body .add {
     color: var(--ok);
     display: block;
+    background: color-mix(in srgb, var(--ok) 9%, transparent);
+    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--ok) 65%, transparent);
   }
   .diff-body .del {
     color: var(--err);
     display: block;
+    background: color-mix(in srgb, var(--err) 9%, transparent);
+    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--err) 70%, transparent);
   }
   .diff-body .meta {
     color: var(--info);
@@ -295,9 +360,43 @@
     color: var(--fg-0);
   }
   .icon {
-    color: var(--fg-2);
     display: inline-flex;
+    align-items: center;
+    justify-content: center;
     flex: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    color: var(--fg-2);
+    background: color-mix(in srgb, var(--fg-2) 10%, transparent);
+  }
+  .icon[data-tone='read'] {
+    color: var(--ok);
+    background: color-mix(in srgb, var(--ok) 14%, transparent);
+  }
+  .icon[data-tone='write'] {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .icon[data-tone='exec'] {
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 14%, transparent);
+  }
+  .icon[data-tone='net'] {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .fp {
+    display: inline-flex;
+    gap: 5px;
+    font-size: 10px;
+    flex: none;
+  }
+  .fp .add {
+    color: var(--ok);
+  }
+  .fp .del {
+    color: var(--err);
   }
   .name {
     font-family: var(--font-mono);

@@ -3,6 +3,7 @@
   import { fade } from 'svelte/transition';
   import { session } from './lib/store.svelte';
   import Landing from './lib/components/Landing.svelte';
+  import ContextMenu from './lib/components/ContextMenu.svelte';
   import SettingsView from './lib/components/SettingsView.svelte';
   import Notice from './lib/components/Notice.svelte';
   import CommandPalette from './lib/components/CommandPalette.svelte';
@@ -341,6 +342,7 @@
   {#if session.paletteOpen}
     <CommandPalette onclose={() => (session.paletteOpen = false)} />
   {/if}
+  <ContextMenu />
   <Notice />
 </div>
 
@@ -361,8 +363,14 @@
     align-items: center;
     height: 36px;
     flex: none;
-    background: var(--bg-1);
+    /* light from above: a lit top edge over a slightly deeper base */
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--fg-0) 3%, var(--bg-1)),
+      var(--bg-1)
+    );
     border-bottom: 1px solid var(--border);
+    box-shadow: inset 0 1px 0 var(--hairline);
     user-select: none;
   }
   .frame {
@@ -386,6 +394,7 @@
     padding-left: 12px;
     flex: none;
     user-select: none;
+    box-shadow: inset 0 1px 0 var(--hairline);
   }
   .bar .win-controls {
     align-self: flex-start;
@@ -444,8 +453,12 @@
       color var(--motion);
   }
   .win-btn:hover {
-    background: var(--bg-3);
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg-3));
     color: var(--fg-0);
+  }
+  .win-btn.close:hover {
+    background: var(--err);
+    color: #fff;
   }
   .updatebar {
     display: flex;

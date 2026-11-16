@@ -651,6 +651,9 @@ fn probe_hardware_blocking() -> HardwareSpecs {
     let mut vram_mb: u32 = 0;
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut unified_memory = false;
+    // Each platform block overwrites this before anything reads it; on Linux
+    // the initial `false` is dead, which stable clippy now rejects.
+    #[allow(unused_assignments)]
     let mut vulkan_ok = false;
     let mut nvidia_detected = false;
 

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
+  import ProviderLogo from './ProviderLogo.svelte';
   import type { UsageTotalsInfo } from '../ipc';
 
   const RANGES = [7, 30, 90] as const;
@@ -154,7 +155,12 @@
     <ul class="model-list">
       {#each models.slice(0, 6) as m (m.model + m.provider)}
         <li class="model-row">
-          <span class="model-name mono" title={`${m.provider} / ${m.model}`}>{m.model}</span>
+          <span class="model-name mono" title={`${m.provider} / ${m.model}`}>
+            <span class="model-prov-logo" aria-hidden="true">
+              <ProviderLogo provider={m.provider} size={11} fallbackFontSize={12} />
+            </span>
+            <span class="model-id-text">{m.model}</span>
+          </span>
           <span class="model-bar" aria-hidden="true">
             <span style:width={`${Math.round((m.totals.cost_usd / maxModelCost) * 100)}%`}></span>
           </span>
@@ -321,10 +327,23 @@
   }
   .model-name {
     grid-area: name;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    color: var(--fg-1);
+  }
+  .model-prov-logo {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    color: var(--fg-2);
+  }
+  .model-id-text {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--fg-1);
   }
   .model-bar {
     grid-area: bar;

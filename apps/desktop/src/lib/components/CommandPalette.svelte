@@ -3,6 +3,7 @@
   import { session } from '../store.svelte';
   import { THEMES } from '../themes';
   import Icon from './Icon.svelte';
+  import ProviderLogo from './ProviderLogo.svelte';
   import { trapFocus } from '../focus';
 
   interface Props {
@@ -15,6 +16,7 @@
     name: string;
     hint: string;
     group: 'session' | 'model' | 'view' | 'export' | 'settings';
+    provider?: string | undefined;
     keys?: string;
     run?: () => void;
     disabled?: string;
@@ -113,6 +115,7 @@
       name: m.id,
       hint: `${m.provider}${m.context_tokens ? ` · ${Math.round(m.context_tokens / 1000)}k ctx` : ''}`,
       group: 'model' as const,
+      provider: m.provider ?? undefined,
       run: () => {
         void session.setModel(m.id, m.provider);
         session.paletteOpen = false;
@@ -221,6 +224,11 @@
             aria-selected={i === sel}
             disabled={!!c.disabled}
           >
+            {#if c.provider}
+              <span class="cprov" aria-hidden="true">
+                <ProviderLogo provider={c.provider} size={12} fallbackFontSize={13} />
+              </span>
+            {/if}
             <span class="cname mono">{c.name}</span>
             <span class="chint">{c.disabled ?? c.hint}</span>
             <span class="cgroup mono">
@@ -311,6 +319,13 @@
   .cmd.disabled {
     opacity: 0.45;
     cursor: default;
+  }
+  .cprov {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    color: var(--fg-2);
   }
   .cname {
     font-size: 12px;

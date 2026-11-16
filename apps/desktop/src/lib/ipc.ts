@@ -475,3 +475,97 @@ export async function updateCheck(): Promise<UpdateInfo | null> {
 export async function updateInstall(): Promise<void> {
   return invoke('update_install');
 }
+
+export interface HardwareSpecs {
+  os: string;
+  arch: string;
+  cpu_name: string;
+  cpu_cores: number;
+  ram_mb: number;
+  gpu_name: string | null;
+  vram_mb: number;
+  unified_memory: boolean;
+  effective_gpu_mb: number;
+  recommended_backend: string;
+  available_backends: string[];
+  disk_free_mb: number;
+}
+
+export interface LocalModelStatus {
+  id: string;
+  name: string;
+  params: string;
+  quant: string;
+  size_mb: number;
+  default_ctx: number;
+  recommended_ctx: number;
+  tool_calling: boolean;
+  summary: string;
+  fit: 'gpu' | 'hybrid' | 'cpu' | 'too_heavy' | string;
+  fit_note: string;
+  recommended: boolean;
+  downloaded: boolean;
+  partial_mb: number;
+  active: boolean;
+  custom: boolean;
+}
+
+export interface LocalRuntimeStatus {
+  specs: HardwareSpecs;
+  runtime_installed: string | null;
+  runtime_backend: string | null;
+  preferred_backend: string;
+  context_tokens: number;
+  models_dir: string;
+  server_running: boolean;
+  server_port: number | null;
+  active_model: string | null;
+  active_backend_used: string | null;
+  downloading_model: string | null;
+  downloading_runtime: boolean;
+  models: LocalModelStatus[];
+}
+
+export async function localRuntimeStatus(): Promise<LocalRuntimeStatus> {
+  return invoke<LocalRuntimeStatus>('local_runtime_status');
+}
+
+export async function localRuntimeSetPrefs(
+  preferred_backend: string | null,
+  context_tokens: number | null,
+): Promise<LocalRuntimeStatus> {
+  return invoke<LocalRuntimeStatus>('local_runtime_set_prefs', {
+    preferredBackend: preferred_backend,
+    contextTokens: context_tokens,
+  });
+}
+
+export async function localRuntimeInstall(backend?: string | null): Promise<LocalRuntimeStatus> {
+  return invoke<LocalRuntimeStatus>('local_runtime_install', { backend: backend ?? null });
+}
+
+export async function localModelDownload(model_id: string): Promise<LocalRuntimeStatus> {
+  return invoke<LocalRuntimeStatus>('local_model_download', { modelId: model_id });
+}
+
+export async function localModelDownloadCancel(): Promise<void> {
+  return invoke<void>('local_model_download_cancel');
+}
+
+export async function localModelDelete(model_id: string): Promise<LocalRuntimeStatus> {
+  return invoke<LocalRuntimeStatus>('local_model_delete', { modelId: model_id });
+}
+
+export async function localModelStart(
+  model_id: string,
+  make_default = true,
+): Promise<LocalRuntimeStatus> {
+  return invoke<LocalRuntimeStatus>('local_model_start', {
+    modelId: model_id,
+    makeDefault: make_default,
+  });
+}
+
+export async function localRuntimeStop(): Promise<LocalRuntimeStatus> {
+  return invoke<LocalRuntimeStatus>('local_runtime_stop');
+}

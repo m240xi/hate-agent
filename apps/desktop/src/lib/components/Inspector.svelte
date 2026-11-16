@@ -1,6 +1,7 @@
 <script lang="ts">
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
+  import ProviderLogo from './ProviderLogo.svelte';
 
   function fmt(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -90,7 +91,12 @@
       <span>${session.costUsd.toFixed(4)}</span>
     </div>
     <div class="model-row mono">
-      <span class="dim">{session.provider}</span>
+      <span class="prov-chip dim">
+        {#if session.providerName || session.provider}
+          <ProviderLogo provider={session.providerName || session.provider} size={11} fallbackFontSize={12} />
+        {/if}
+        <span>{session.provider}</span>
+      </span>
       <span class="model-name">{session.model}</span>
     </div>
     <div class="sess-row mono" title="session stats">
@@ -282,11 +288,18 @@
   .cost-row,
   .model-row {
     display: flex;
+    align-items: center;
     justify-content: space-between;
     gap: 8px;
     font-size: 10.5px;
     color: var(--fg-1);
     margin-top: 6px;
+  }
+  .prov-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
   }
   .model-name {
     overflow: hidden;

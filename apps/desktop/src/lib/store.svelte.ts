@@ -1215,11 +1215,21 @@ class SessionStore {
       this.provider = target;
       this.providers = this.providers.map((p) => ({ ...p, is_default: p.name === target }));
     }
+    const prevModel = this.model;
     this.model = id;
-    await m.providerSetModel(target, id).catch(() => {});
-    await m
-      .sessionSetOptions(id, null, this.selectedModel?.context_tokens ?? null)
-      .catch(() => {});
+    try {
+      await m.sessionSetOptions(id, null, this.selectedModel?.context_tokens ?? null);
+      await m.providerSetModel(target, id).catch(() => {});
+    } catch (e) {
+      this.model = prevModel;
+      if (target === 'local') {
+        this.blocks.push({
+          id: nextBlockId++,
+          kind: 'error',
+          text: `couldn't load local model ${id}: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+    }
     if (crossProvider) {
       this.blocks.push({
         id: nextBlockId++,

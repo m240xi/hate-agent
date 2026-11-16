@@ -1,26 +1,17 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { UnlistenFn } from '@tauri-apps/api/event';
   import { session } from '../store.svelte';
   import Icon from './Icon.svelte';
-  import AddProviderSheet from './AddProviderSheet.svelte';
+  import ProvidersPanel from './ProvidersPanel.svelte';
   import UsagePanel from './UsagePanel.svelte';
   import Popover from './Popover.svelte';
   import type {
-    AntigravityStatus,
     AppInfo,
-    ClaudeLoginInfo,
     McpServerConfig,
     McpServerInfo,
-    NousLoginInfo,
-    ProviderInfo,
-    ProviderModel,
-    ProviderPreset,
     SkillInfo,
   } from '../ipc';
 
-  let providers = $state<ProviderInfo[]>([]);
-  let presets = $state<ProviderPreset[]>([]);
   let skills = $state<SkillInfo[]>([]);
   let skillAuto = $state(true);
   let discordOn = $state(true);
@@ -29,28 +20,6 @@
   let appInfo = $state<AppInfo | null>(null);
   let inTauri = $state(false);
   let error = $state<string | null>(null);
-
-  let login = $state<NousLoginInfo | null>(null);
-  let loginBusy = $state(false);
-  let loginError = $state<string | null>(null);
-  let unlisten: UnlistenFn | null = null;
-
-  let claudeLogin = $state<ClaudeLoginInfo | null>(null);
-  let claudeCode = $state('');
-  let claudeBusy = $state(false);
-  let claudeError = $state<string | null>(null);
-  let presetBusy = $state<string | null>(null);
-
-  let agStatus = $state<AntigravityStatus | null>(null);
-  let agBusy = $state<'install' | 'login' | 'refresh' | 'logout' | null>(null);
-  let agError = $state<string | null>(null);
-  let agProgress = $state<{ downloaded: number; total: number | null } | null>(null);
-  let agLoginUrl = $state<string | null>(null);
-  let agCopied = $state(false);
-  let agUnlisten: UnlistenFn | null = null;
-
-  let keyDrafts = $state<Record<string, string>>({});
-  let keyBusy = $state<string | null>(null);
 
   import { THEMES } from '../themes';
   import { SETTINGS_SECTIONS } from '../settings';
@@ -76,17 +45,11 @@
   async function refresh(): Promise<void> {
     if (!inTauri) return;
     const m = await import('../ipc');
-    providers = await m.providersList().catch(() => []);
-    presets = await m.providerPresets().catch(() => []);
     skills = await m.skillsList().catch(() => []);
     skillAuto = await m.skillsAutoGet().catch(() => true);
     discordOn = await m.presenceGet().catch(() => true);
     appInfo = await m.appInfo().catch(() => null);
-    if (providers.some((p) => p.kind === 'acp')) {
-      agStatus = await m.antigravityStatus().catch(() => null);
-    }
     await loadMcp();
-    void session.refreshModels();
   }
 
   onMount(async () => {
@@ -95,49 +58,11 @@
       await m.appInfo();
       inTauri = true;
       await refresh();
-      const { listen } = await import('@tauri-apps/api/event');
-      agUnlisten = await listen<{
-        kind: string;
-        downloaded?: number;
-        total?: number | null;
-        url?: string;
-      }>('antigravity-event', (e) => {
-        if (e.payload.kind === 'download') {
-          agProgress = { downloaded: e.payload.downloaded ?? 0, total: e.payload.total ?? null };
-        } else if (e.payload.kind === 'login_url' && e.payload.url) {
-          agLoginUrl = e.payload.url;
-        }
-      });
-      unlisten = await listen<{ type: string; ok: boolean; error?: string }>(
-        'auth-event',
-        (e) => {
-          if (e.payload.type === 'nous_login') {
-            loginBusy = false;
-            if (e.payload.ok) {
-              login = null;
-              void refresh();
-            } else {
-              loginError = e.payload.error ?? 'login failed';
-            }
-          } else if (e.payload.type === 'claude_login') {
-            claudeBusy = false;
-            if (e.payload.ok) {
-              claudeLogin = null;
-              claudeCode = '';
-              void refresh();
-            } else {
-              claudeError = e.payload.error ?? 'login failed';
-            }
-          }
-        },
-      );
     } catch {
     }
   });
 
   onDestroy(() => {
-    unlisten?.();
-    agUnlisten?.();
     if (mcpSaveTimer) {
       clearTimeout(mcpSaveTimer);
       mcpSaveTimer = null;
@@ -148,171 +73,6 @@
       mcpPoll = null;
     }
   });
-
-  async function connectNous(): Promise<void> {
-    loginBusy = true;
-    loginError = null;
-    try {
-      const m = await import('../ipc');
-      login = await m.authNousLogin();
-    } catch (e) {
-      loginBusy = false;
-      loginError = e instanceof Error ? e.message : String(e);
-    }
-  }
-
-  async function cancelLogin(): Promise<void> {
-    const m = await import('../ipc');
-    await m.authNousCancel().catch(() => {});
-    login = null;
-    loginBusy = false;
-  }
-
-  let presetQuery = $state('');
-
-  const PRESET_GROUPS = [
-    { key: 'first-party', label: 'First-party' },
-    { key: 'router', label: 'Routers' },
-    { key: 'hosted', label: 'Hosted inference' },
-    { key: 'local', label: 'Local' },
-    { key: 'custom', label: 'Custom' },
-  ] as const;
-
-  // The custom row is a form, not a fixed provider: it stays available no
-  // matter how many endpoints were already added under their own names.
-  const addablePresets = $derived(
-    presets.filter(
-      (p) => p.group === 'custom' || !providers.some((q) => q.name === p.name),
-    ),
-  );
-
-  const filteredPresets = $derived.by(() => {
-    const q = presetQuery.trim().toLowerCase();
-    if (!q) return addablePresets;
-    return addablePresets.filter(
-      (p) =>
-        p.label.toLowerCase().includes(q) ||
-        p.name.toLowerCase().includes(q) ||
-        p.base_url.toLowerCase().includes(q) ||
-        p.model.toLowerCase().includes(q),
-    );
-  });
-
-  const presetGroupCount = $derived(
-    PRESET_GROUPS.filter((g) => filteredPresets.some((p) => p.group === g.key)).length,
-  );
-
-  function presetsInGroup(key: string): ProviderPreset[] {
-    return filteredPresets.filter((p) => p.group === key);
-  }
-
-  const presetLabels = $derived(new Map(presets.map((p) => [p.name, p.label])));
-
-  function providerLabel(name: string): string {
-    return presetLabels.get(name) ?? name;
-  }
-
-  async function addPreset(preset: ProviderPreset): Promise<void> {
-    presetBusy = preset.name;
-    error = null;
-    try {
-      const m = await import('../ipc');
-      await m.providerUpsert(preset.name, preset.kind, preset.base_url, preset.model);
-      await refresh();
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      presetBusy = null;
-    }
-  }
-
-  let adding = $state<ProviderPreset | null>(null);
-  let justAdded = $state<string | null>(null);
-  let modelLists = $state<Record<string, ProviderModel[]>>({});
-  let modelBusy = $state<string | null>(null);
-
-  function openAdd(preset: ProviderPreset): void {
-    // Local servers and the ACP agent need no key or model decision, so they
-    // stay one click.
-    if (preset.auth === 'none' || preset.auth === 'agent') {
-      void addPreset(preset);
-      return;
-    }
-    error = null;
-    adding = preset;
-  }
-
-  async function addedProvider(name: string, model: string, useNow: boolean): Promise<void> {
-    adding = null;
-    justAdded = name;
-    await refresh();
-    if (useNow) await session.setModel(model, name).catch(() => {});
-    setTimeout(() => (justAdded = null), 2600);
-  }
-
-  async function loadProviderModels(name: string): Promise<void> {
-    modelBusy = name;
-    try {
-      const m = await import('../ipc');
-      const list = await m.modelsList(name);
-      modelLists = { ...modelLists, [name]: list };
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      modelBusy = null;
-    }
-  }
-
-  function onModelChange(provider: string, value: string): void {
-    if (value === '__load') void loadProviderModels(provider);
-    else if (value) void pickModel(provider, value);
-  }
-
-  async function pickModel(provider: string, model: string): Promise<void> {
-    await session.setModel(model, provider).catch((e: unknown) => {
-      error = e instanceof Error ? e.message : String(e);
-    });
-    await refresh();
-  }
-
-  /** Two-step remove: the first click asks, the second takes it off the account. */
-  let confirmRemove = $state<string | null>(null);
-  let confirmTimer: ReturnType<typeof setTimeout> | null = null;
-
-  async function removeProvider(p: ProviderInfo): Promise<void> {
-    if (confirmRemove !== p.name) {
-      confirmRemove = p.name;
-      if (confirmTimer) clearTimeout(confirmTimer);
-      confirmTimer = setTimeout(() => (confirmRemove = null), 4000);
-      return;
-    }
-    confirmRemove = null;
-    if (confirmTimer) clearTimeout(confirmTimer);
-    const m = await import('../ipc');
-    error = null;
-    try {
-      // The Google agent keeps its sign-in outside the keychain, so sign out
-      // first; provider_remove clears stored keys and OAuth tokens itself.
-      if (p.kind === 'acp') await m.antigravityLogout().catch(() => {});
-      await m.providerRemove(p.name);
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    }
-    await refresh();
-    void session.refreshModels();
-  }
-
-  async function connectClaude(): Promise<void> {
-    claudeBusy = true;
-    claudeError = null;
-    try {
-      const m = await import('../ipc');
-      claudeLogin = await m.authClaudeBegin();
-    } catch (e) {
-      claudeBusy = false;
-      claudeError = e instanceof Error ? e.message : String(e);
-    }
-  }
 
   async function toggleSkill(name: string): Promise<void> {
     if (skillOpen === name) {
@@ -348,99 +108,6 @@
     await m.skillsSetAuto(enabled).catch((e: unknown) => {
       error = String(e);
     });
-  }
-
-  async function finishClaudeLogin(): Promise<void> {
-    const code = claudeCode.trim();
-    if (!code) return;
-    claudeBusy = true;
-    claudeError = null;
-    try {
-      const m = await import('../ipc');
-      await m.authClaudeComplete(code);
-      claudeCode = '';
-    } catch (e) {
-      claudeBusy = false;
-      claudeError = e instanceof Error ? e.message : String(e);
-    }
-  }
-
-  async function saveKey(name: string): Promise<void> {
-    const key = keyDrafts[name]?.trim();
-    if (!key) return;
-    keyBusy = name;
-    error = null;
-    try {
-      const m = await import('../ipc');
-      await m.authSetKey(name, key);
-      keyDrafts[name] = '';
-      await refresh();
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      keyBusy = null;
-    }
-  }
-
-  async function agRun(
-    kind: 'install' | 'login' | 'refresh' | 'logout',
-    call: (m: typeof import('../ipc')) => Promise<AntigravityStatus>,
-  ): Promise<void> {
-    agBusy = kind;
-    agError = null;
-    try {
-      const m = await import('../ipc');
-      agStatus = await call(m);
-      if (kind !== 'install') await refresh();
-    } catch (e) {
-      agError = e instanceof Error ? e.message : String(e);
-    } finally {
-      agBusy = null;
-      agProgress = null;
-      agLoginUrl = null;
-      agCopied = false;
-    }
-  }
-
-  async function agCancelLogin(): Promise<void> {
-    const m = await import('../ipc');
-    await m.antigravityLoginCancel().catch(() => {});
-  }
-
-  async function agCopyLink(): Promise<void> {
-    if (!agLoginUrl) return;
-    agCopied = await navigator.clipboard
-      .writeText(agLoginUrl)
-      .then(() => true)
-      .catch(() => false);
-  }
-
-  function agProgressLabel(): string {
-    if (!agProgress) return 'Downloading…';
-    const mb = (n: number) => (n / 1048576).toFixed(0);
-    return agProgress.total
-      ? `Downloading… ${Math.round((agProgress.downloaded / agProgress.total) * 100)}%`
-      : `Downloading… ${mb(agProgress.downloaded)} MB`;
-  }
-
-  function authLabel(p: ProviderInfo): string {
-    if (p.kind === 'acp') return p.auth_kind === 'oauth' ? 'google sign-in' : 'not signed in';
-    if (p.auth_kind === 'oauth') return 'subscription';
-    if (p.auth_kind === 'api_key') return 'api key';
-    if (p.auth_kind === 'env') return 'env key';
-    return 'not connected';
-  }
-
-  /** What the endpoint speaks, in words rather than the internal kind. */
-  function kindLabel(p: ProviderInfo): string {
-    if (p.kind === 'acp') return 'Google Antigravity';
-    if (p.kind === 'anthropic') return 'Anthropic-compatible';
-    return 'OpenAI-compatible';
-  }
-
-  /** One letter for the tile, uppercase. */
-  function initial(p: ProviderInfo): string {
-    return (providerLabel(p.name).trim().charAt(0) || '?').toUpperCase();
   }
 
   let mcpRows = $state<McpServerInfo[]>([]);
@@ -693,7 +360,7 @@
       {/each}
     </nav>
   {/if}
-  <div class="settings-inner">
+  <div class="settings-inner" class:wide={active === 'providers'}>
 
     <section class="group" id="appearance" hidden={active !== 'appearance'}>
       <h2 class="group-title">Appearance</h2>
@@ -781,289 +448,8 @@
     </section>
 
     <section class="group" id="providers" hidden={active !== 'providers'}>
-      <div class="prov-hud">
-        <h2 class="group-title">Providers</h2>
-        <span class="grow"></span>
-        <span class="prov-count mono">
-          {providers.length} installed · {providers.filter((p) => p.auth_kind !== 'none').length} connected
-        </span>
-      </div>
-      <p class="group-hint">
-        Connect a provider to start chatting. Keys stay in the OS keychain;
-        Remove forgets a provider, its key and its sign-in.
-      </p>
-
-      {#if !inTauri}
-        <p class="muted">Provider management needs the desktop app.</p>
-      {:else}
-        {#if providers.length === 0}
-          <p class="muted">No providers yet — pick one below to get started.</p>
-        {/if}
-        <div class="conn-list">
-          {#each providers as p (p.name)}
-            {@const connected = p.auth_kind !== 'none'}
-            {@const isAcp = p.kind === 'acp'}
-            <article
-              class="conn"
-              class:live={connected}
-              class:is-default={p.is_default}
-              class:fresh={justAdded === p.name}
-            >
-              <div class="conn-top">
-                <span class="tile-mark" aria-hidden="true">{initial(p)}</span>
-                <div class="conn-id">
-                  <span class="conn-name">{providerLabel(p.name)}</span>
-                  {#if providerLabel(p.name) !== p.name}
-                    <span class="conn-slug mono">{p.name}</span>
-                  {/if}
-                </div>
-                <div class="conn-state">
-                  <span class="badge" class:connected={connected}>{authLabel(p)}</span>
-                  {#if p.is_default}
-                    <span class="badge">default</span>
-                  {/if}
-                  <button
-                    class="remove-btn"
-                    class:confirming={confirmRemove === p.name}
-                    onclick={() => removeProvider(p)}
-                    title="Remove this provider and forget its key or sign-in"
-                  >
-                    {confirmRemove === p.name ? 'Confirm remove' : 'Remove'}
-                  </button>
-                </div>
-              </div>
-
-              <p class="conn-url mono" title={p.base_url}>
-                {kindLabel(p)}{#if p.base_url} · {p.base_url}{/if}
-              </p>
-
-              {#if isAcp}
-                {#if agStatus && !agStatus.supported}
-                  <p class="provider-hint conn-actions">Google doesn't publish Antigravity for this platform.</p>
-                {:else if !agStatus?.installed}
-                  <div class="conn-actions">
-                    <button
-                      class="btn primary"
-                      onclick={() => agRun('install', (m) => m.antigravityInstall())}
-                      disabled={agBusy !== null}
-                    >
-                      {agBusy === 'install' ? agProgressLabel() : 'Install Antigravity'}
-                    </button>
-                    <span class="provider-hint">~100 MB from Google, checksum-verified</span>
-                  </div>
-                {:else if agBusy === 'login'}
-                  <div class="login-box">
-                    <p class="login-line">Finish signing in with Google in your browser…</p>
-                    <div class="conn-actions">
-                      {#if agLoginUrl}
-                        <button class="btn" onclick={agCopyLink}>
-                          {agCopied ? 'Copied' : 'Copy sign-in link'}
-                        </button>
-                      {/if}
-                      <button class="btn ghost" onclick={agCancelLogin}>Cancel</button>
-                    </div>
-                  </div>
-                {:else if !agStatus.signed_in}
-                  <div class="conn-actions">
-                    <button
-                      class="btn primary"
-                      onclick={() => agRun('login', (m) => m.antigravityLogin())}
-                      disabled={agBusy !== null}
-                    >
-                      Sign in with Google
-                    </button>
-                    <span class="provider-hint">Free / Pro / Ultra plan</span>
-                  </div>
-                {:else}
-                  <p class="provider-hint conn-actions">
-                    Signed in · {agStatus.models} model{agStatus.models === 1 ? '' : 's'} · v{agStatus.installed}
-                  </p>
-                {/if}
-                {#if agError}
-                  <p class="error-text">{agError}</p>
-                {/if}
-              {:else}
-                <div class="conn-actions">
-                  <select
-                    class="input model-select"
-                    aria-label="Model for {providerLabel(p.name)}"
-                    value={p.model}
-                    onchange={(e) => onModelChange(p.name, e.currentTarget.value)}
-                  >
-                    {#if !(modelLists[p.name] ?? []).some((x) => x.id === p.model)}
-                      <option value={p.model}>{p.model || 'no model'}</option>
-                    {/if}
-                    {#if modelBusy === p.name}
-                      <option disabled>loading models…</option>
-                    {:else if !modelLists[p.name]?.length}
-                      <option value="__load">Load models…</option>
-                    {/if}
-                    {#each modelLists[p.name] ?? [] as m (m.id)}
-                      <option value={m.id}>{m.id}</option>
-                    {/each}
-                  </select>
-
-                  {#if p.name === 'nous' && !login}
-                    <button
-                      class="btn primary"
-                      onclick={connectNous}
-                      disabled={loginBusy || (p.auth_kind !== 'none' && p.auth_kind !== 'env')}
-                    >
-                      {p.auth_kind === 'none' ? 'Connect Nous Portal' : 'Reconnect'}
-                    </button>
-                  {/if}
-
-                  {#if p.name === 'claude' && !claudeLogin}
-                    <button class="btn primary" onclick={connectClaude} disabled={claudeBusy}>
-                      {p.auth_kind === 'oauth' ? 'Reconnect' : 'Sign in with Claude'}
-                    </button>
-                  {/if}
-
-                  {#if (p.auth_kind === 'none' || p.auth_kind === 'env' || p.auth_kind === 'api_key') && !(p.name === 'nous' && login) && !(p.name === 'claude' && claudeLogin)}
-                    <input
-                      class="input"
-                      type="password"
-                      placeholder={p.auth_kind === 'api_key' ? 'replace key…' : 'API key…'}
-                      bind:value={keyDrafts[p.name]}
-                      onkeydown={(e) => e.key === 'Enter' && saveKey(p.name)}
-                    />
-                    <button
-                      class="btn"
-                      onclick={() => saveKey(p.name)}
-                      disabled={!keyDrafts[p.name]?.trim() || keyBusy === p.name}
-                    >
-                      {keyBusy === p.name ? 'Saving…' : 'Save key'}
-                    </button>
-                  {/if}
-                </div>
-
-                {#if p.name === 'nous' && login}
-                  <div class="login-box">
-                    <p class="login-line">
-                      Approve at
-                      <a href={login.verification_url} target="_blank" rel="noreferrer">
-                        {login.verification_url}
-                      </a>
-                      — code <code>{login.user_code}</code>
-                    </p>
-                    <div class="conn-actions">
-                      <button class="btn ghost" onclick={cancelLogin}>Cancel</button>
-                    </div>
-                  </div>
-                {/if}
-                {#if p.name === 'nous' && loginError}
-                  <p class="error-text">{loginError}</p>
-                {/if}
-
-                {#if p.name === 'claude' && claudeLogin}
-                  <div class="login-box">
-                    <p class="login-line">
-                      Approve at
-                      <a href={claudeLogin.authorize_url} target="_blank" rel="noreferrer">
-                        {claudeLogin.authorize_url}
-                      </a>
-                    </p>
-                    <div class="conn-actions">
-                      <input
-                        class="input"
-                        type="text"
-                        placeholder="paste the code shown…"
-                        bind:value={claudeCode}
-                        onkeydown={(e) => e.key === 'Enter' && finishClaudeLogin()}
-                      />
-                      <button
-                        class="btn primary"
-                        onclick={finishClaudeLogin}
-                        disabled={!claudeCode.trim() || claudeBusy}
-                      >
-                        {claudeBusy ? 'Signing in…' : 'Finish sign-in'}
-                      </button>
-                      <button
-                        class="btn ghost"
-                        onclick={() => {
-                          claudeLogin = null;
-                          claudeCode = '';
-                          claudeError = null;
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                {/if}
-                {#if p.name === 'claude' && claudeError}
-                  <p class="error-text">{claudeError}</p>
-                {/if}
-              {/if}
-            </article>
-          {/each}
-        </div>
-
-        {#if addablePresets.length > 0}
-          <div class="catalog">
-            <div class="catalog-head">
-              <span class="catalog-title">Add a provider</span>
-              <span class="catalog-count mono">{addablePresets.length} available</span>
-              {#if addablePresets.length > 6}
-                <input
-                  class="input catalog-filter"
-                  type="search"
-                  placeholder="Filter providers…"
-                  aria-label="Filter providers"
-                  bind:value={presetQuery}
-                />
-              {/if}
-            </div>
-            {#each PRESET_GROUPS as group (group.key)}
-              {@const items = presetsInGroup(group.key)}
-              {#if items.length > 0}
-                <p class="catalog-sub mono">{group.label}</p>
-                <div class="catalog-rows">
-                  {#each items as preset (preset.name)}
-                    <button
-                      class="cat-row"
-                      class:custom={preset.group === 'custom'}
-                      onclick={() => openAdd(preset)}
-                      disabled={presetBusy === preset.name}
-                      title={`${preset.base_url}
-${preset.key_url ?? ''}`}
-                    >
-                      <span class="cat-plus" aria-hidden="true">+</span>
-                      <span class="cat-name">{preset.label}</span>
-                      <span class="cat-meta mono">
-                        {preset.auth === 'none'
-                          ? 'local · no key'
-                          : preset.auth === 'agent'
-                            ? 'Google sign-in'
-                            : preset.auth === 'oauth'
-                              ? 'subscription or key'
-                              : (preset.env_hint ?? 'api key')}
-                      </span>
-                      <span class="cat-go" aria-hidden="true">add</span>
-                    </button>
-                  {/each}
-                </div>
-              {/if}
-            {/each}
-            {#if filteredPresets.length === 0}
-              <p class="muted">No provider matches “{presetQuery}”.</p>
-            {/if}
-          </div>
-        {/if}
-      {/if}
-      {#if error}
-        <p class="error-text">{error}</p>
-      {/if}
+      <ProvidersPanel active={active === 'providers'} />
     </section>
-
-    {#if adding}
-      <AddProviderSheet
-        preset={adding}
-        existingNames={providers.map((p) => p.name)}
-        onClose={() => (adding = null)}
-        onAdded={addedProvider}
-      />
-    {/if}
 
     <section class="group" id="skills" hidden={active !== 'skills'}>
       <h2 class="group-title">Skills</h2>
@@ -1623,6 +1009,10 @@ ${preset.key_url ?? ''}`}
     max-width: 720px;
     margin: 0 auto;
     padding: 28px 36px 88px;
+    transition: max-width var(--motion);
+  }
+  .settings-inner.wide {
+    max-width: 1020px;
   }
   .group[hidden] {
     display: none;
@@ -1754,11 +1144,7 @@ ${preset.key_url ?? ''}`}
     padding: 0;
   }
 
-  .conn-slug,
-  .conn-url,
-  .about-grid dd,
-  .login-line,
-  .login-line code {
+  .about-grid dd {
     font-family: var(--font-mono);
   }
   .seg {
@@ -1848,114 +1234,6 @@ ${preset.key_url ?? ''}`}
   .theme-card.active .theme-name {
     color: var(--accent);
   }
-  /* ---- Providers: connection ports ------------------------------------
-     Same tokens and soft depth as the rest of the app, but a layout no
-     other harness uses: a monogram tile on the left, identity on top, the
-     model and credentials in a footer row. */
-  /* ---- Providers: connection rows + a catalog, not a card grid --------
-     A different page structure rather than a reskin: installed providers
-     are full-width rows with a monogram and a left accent on the default,
-     and adding one is a scannable list instead of a shelf of tiles. */
-  .prov-hud {
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    margin: 0 0 6px;
-  }
-  .prov-count {
-    font-size: 11px;
-    color: var(--fg-3);
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-pill);
-    background: var(--bg-2);
-  }
-  .grow {
-    flex: 1 1 auto;
-  }
-  .conn-list {
-    display: flex;
-    flex-direction: column;
-    margin-top: 16px;
-  }
-  .conn {
-    position: relative;
-    padding: 16px 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .conn:last-child {
-    border-bottom: none;
-  }
-  .conn.is-default {
-    padding-left: 14px;
-  }
-  .conn.is-default::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 16px;
-    bottom: 16px;
-    width: 3px;
-    border-radius: 2px;
-    background: var(--accent);
-    opacity: 0.85;
-  }
-  .conn.fresh {
-    animation: conn-flash 2.4s ease-out;
-  }
-  @keyframes conn-flash {
-    0%,
-    40% {
-      background: var(--accent-dim);
-    }
-    100% {
-      background: transparent;
-    }
-  }
-  .conn-top {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .tile-mark {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    flex: none;
-    font-family: 'm5x7', var(--font-mono);
-    font-size: 18px;
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
-    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
-    border-radius: 10px;
-    box-shadow: inset 0 1px 0 var(--hairline);
-  }
-  .conn-id {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-  .conn-name {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--fg-0);
-    overflow-wrap: anywhere;
-  }
-  .conn-slug {
-    font-size: 10.5px;
-    color: var(--fg-3);
-  }
-  .conn-state {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-left: auto;
-    flex-wrap: wrap;
-  }
   .badge {
     font-family: var(--font-mono);
     font-size: 10px;
@@ -1973,195 +1251,6 @@ ${preset.key_url ?? ''}`}
     vertical-align: 1px;
     background: var(--accent-soft);
     color: var(--accent);
-  }
-  .badge.connected {
-    background: color-mix(in srgb, var(--ok) 14%, var(--bg-3));
-    color: var(--ok, #4ade80);
-  }
-  .remove-btn {
-    flex: none;
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 8px;
-    border: 1px solid transparent;
-    color: var(--fg-3);
-    transition:
-      color var(--motion),
-      background var(--motion),
-      border-color var(--motion);
-  }
-  .remove-btn:hover {
-    color: var(--err);
-    border-color: color-mix(in srgb, var(--err) 35%, transparent);
-    background: color-mix(in srgb, var(--err) 10%, transparent);
-  }
-  .remove-btn.confirming {
-    color: #fff;
-    background: var(--err);
-    border-color: var(--err);
-  }
-  .conn-url {
-    font-size: 11px;
-    color: var(--fg-3);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    margin: 4px 0 0 48px;
-  }
-  .conn-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-top: 12px;
-    margin-left: 48px;
-  }
-  .conn-actions .input {
-    flex: 1 1 200px;
-    min-width: 150px;
-    width: auto;
-  }
-  .model-select {
-    flex: 0 1 250px;
-    min-width: 150px;
-    padding: 5px 8px;
-    font-size: 11.5px;
-  }
-  .provider-hint {
-    font-size: 11px;
-    color: var(--fg-3);
-    align-self: center;
-  }
-  .login-box {
-    margin: 12px 0 0 48px;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg-0);
-  }
-  .login-box .conn-actions {
-    margin-top: 8px;
-    margin-left: 0;
-  }
-  .login-line {
-    font-size: 12px;
-    color: var(--fg-1);
-    margin: 0 0 8px;
-    line-height: 1.65;
-    overflow-wrap: anywhere;
-  }
-  .login-line a {
-    color: var(--fg-0);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-  .login-line code {
-    background: var(--bg-2);
-    padding: 1px 6px;
-    border-radius: var(--radius-sm);
-  }
-
-  /* ---- Add a provider: catalog rows --------------------------------- */
-  .catalog {
-    margin-top: 26px;
-  }
-  .catalog-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-    margin-bottom: 4px;
-  }
-  .catalog-title {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--fg-2);
-  }
-  .catalog-count {
-    font-size: 11px;
-    color: var(--fg-3);
-  }
-  .catalog-filter {
-    margin-left: auto;
-    width: 200px;
-    padding: 4px 10px;
-    font-size: 11.5px;
-  }
-  .catalog-sub {
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--fg-3);
-    margin: 16px 0 2px;
-  }
-  .catalog-rows {
-    display: flex;
-    flex-direction: column;
-  }
-  .cat-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    padding: 10px 6px;
-    border-bottom: 1px solid var(--border);
-    background: transparent;
-    text-align: left;
-    cursor: pointer;
-    transition:
-      background var(--motion),
-      border-color var(--motion);
-  }
-  .cat-row:hover:not(:disabled) {
-    background: var(--bg-2);
-  }
-  .cat-row:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-  .cat-row.custom .cat-name {
-    color: var(--accent);
-  }
-  .cat-plus {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    flex: none;
-    font-family: var(--font-mono);
-    font-size: 13px;
-    color: var(--fg-3);
-    border: 1px solid var(--border-strong);
-    border-radius: 5px;
-  }
-  .cat-row:hover .cat-plus {
-    color: var(--accent);
-    border-color: var(--accent);
-  }
-  .cat-name {
-    font-size: 12.5px;
-    color: var(--fg-0);
-    overflow-wrap: anywhere;
-  }
-  .cat-meta {
-    margin-left: auto;
-    font-size: 10.5px;
-    color: var(--fg-3);
-  }
-  .cat-go {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--accent);
-    opacity: 0;
-    flex: none;
-  }
-  .cat-row:hover .cat-go {
-    opacity: 1;
   }
   .skill-toggle {
     display: flex;
@@ -2267,13 +1356,6 @@ ${preset.key_url ?? ''}`}
   }
   .spacer {
     flex: 1;
-  }
-
-  .error-text {
-    margin: 10px 0 0;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--err);
   }
   .muted {
     font-family: var(--font-mono);
@@ -2596,15 +1678,6 @@ ${preset.key_url ?? ''}`}
   @media (max-width: 640px) {
     .settings-inner {
       padding: 24px 16px 64px;
-    }
-    .catalog-filter {
-      width: 100%;
-      margin-left: 0;
-    }
-    .conn-url,
-    .conn-actions,
-    .login-box {
-      margin-left: 0;
     }
     .mcp-add-grid {
       grid-template-columns: 1fr;

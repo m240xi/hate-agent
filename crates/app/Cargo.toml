@@ -41,5 +41,11 @@ thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 webbrowser = "1"
-tokio = { version = "1", features = ["sync", "time", "net", "io-util", "macros", "rt"] }
+tokio = { version = "1", features = ["sync", "time", "net", "io-util", "macros", "rt", "process", "fs"] }
 tokio-util = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+futures-util = "0.3"
+sha2 = "0.10"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"

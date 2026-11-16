@@ -3,6 +3,7 @@
 mod antigravity;
 mod commands;
 mod images;
+mod local_runtime;
 mod presence;
 mod sessions_db;
 
@@ -72,6 +73,14 @@ pub fn run() {
         antigravity::antigravity_login,
         antigravity::antigravity_login_cancel,
         antigravity::antigravity_logout,
+        local_runtime::local_runtime_status,
+        local_runtime::local_runtime_set_prefs,
+        local_runtime::local_runtime_install,
+        local_runtime::local_model_download,
+        local_runtime::local_model_download_cancel,
+        local_runtime::local_model_delete,
+        local_runtime::local_model_start,
+        local_runtime::local_runtime_stop,
         commands::presence_get,
         commands::presence_set,
     ]);
@@ -103,6 +112,7 @@ pub fn run() {
             app.manage(commands::AuthState::default());
             app.manage(commands::UpdateState::default());
             app.manage(antigravity::AntigravityState::default());
+            app.manage(local_runtime::LocalRuntimeState::default());
             let discord_on =
                 hate_auth::AuthContext::load().map_or(true, |c| c.config.discord_presence);
             let presence = presence::Presence::start(discord_on);
@@ -119,6 +129,11 @@ pub fn run() {
             builder.mount_events(app);
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running hate-agent");
+        .build(tauri::generate_context!())
+        .expect("error while building hate-agent")
+        .run(|app, ev| {
+            if let tauri::RunEvent::Exit = ev {
+                local_runtime::shutdown_sync(&app.state::<local_runtime::LocalRuntimeState>());
+            }
+        });
 }

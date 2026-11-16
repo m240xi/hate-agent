@@ -313,6 +313,17 @@ pub const PRESETS: &[Preset] = &[
         "https://app.hyperbolic.ai/settings",
     ),
     // -- local servers -------------------------------------------------------
+    Preset {
+        name: "local",
+        label: "Built-in Local",
+        group: "local",
+        kind: "openai_compat",
+        base_url: "http://127.0.0.1:11435/v1",
+        model: "qwen3.5-9b",
+        auth: "none",
+        env: None,
+        keys: None,
+    },
     local("ollama", "Ollama", "http://localhost:11434/v1"),
     local("lmstudio", "LM Studio", "http://localhost:1234/v1"),
     local("llamacpp", "llama.cpp", "http://localhost:8080/v1"),

@@ -2,6 +2,8 @@
   import { session } from '../store.svelte';
   import Popover from './Popover.svelte';
   import Icon from './Icon.svelte';
+  import ProviderLogo from './ProviderLogo.svelte';
+  import { getProviderLogo } from '../provider-logos';
   import type { ProviderModel } from '../ipc';
 
   let query = $state('');
@@ -43,6 +45,7 @@
     google: 'Gemini',
     groq: 'Groq',
     mistral: 'Mistral',
+    local: 'Built-in Local',
     ollama: 'Ollama',
     lmstudio: 'LM Studio',
   };
@@ -199,6 +202,11 @@
 
 <Popover width="440px" onOpenChange={(o) => (panelOpen = o)}>
   {#snippet trigger()}
+    {#if session.providerName || session.provider}
+      <span class="mp-trigger-logo" aria-hidden="true">
+        <ProviderLogo provider={session.providerName || session.provider} size={12} fallbackFontSize={13} />
+      </span>
+    {/if}
     <span class="mp-trigger-label" title={triggerTitle}>{triggerLabel}</span>
     <Icon name="chevron-down" size={10} />
   {/snippet}
@@ -217,12 +225,20 @@
       <div class="mp-list" role="listbox" aria-label="Models">
         {#each sections as sec (sec.key)}
           <div class="mp-group">
+            <span class="mp-group-logo" aria-hidden="true">
+              <ProviderLogo provider={sec.key} label={sec.label} size={11} fallbackFontSize={12} />
+            </span>
             <span class="mp-group-name">{sec.label}</span>
             <span class="mp-group-count mono">{sec.count}</span>
           </div>
           {#each sec.vendors as vg (vg.title)}
             {#if sec.vendors.length > 1}
               <div class="mp-subgroup">
+                {#if vg.title && getProviderLogo(vg.title)}
+                  <span class="mp-group-logo" aria-hidden="true">
+                    <ProviderLogo provider={vg.title} size={10} />
+                  </span>
+                {/if}
                 <span class="mp-subgroup-name">{vg.title || 'other'}</span>
                 <span class="mp-group-count mono">{vg.items.length}</span>
               </div>
@@ -288,6 +304,14 @@
 </Popover>
 
 <style>
+  .mp-trigger-logo,
+  .mp-group-logo {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    color: var(--fg-2);
+  }
   .mp-trigger-label {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -324,7 +348,7 @@
   }
   .mp-group {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 6px;
     padding: 8px 12px 3px;
     font-size: 10px;
@@ -343,7 +367,7 @@
   }
   .mp-subgroup {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 6px;
     padding: 6px 12px 2px 20px;
     font-size: 9.5px;

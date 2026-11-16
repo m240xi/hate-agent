@@ -1,0 +1,942 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>hate-agent</title>
+    <meta
+      name="description"
+      content="hate-agent is a local-first coding agent that spends fewer tokens per task - small prompt, lazy tools, verified work."
+    />
+    <style>
+      @font-face {
+        font-family: 'Alagard';
+        src: url('assets/fonts/alagard.ttf') format('truetype');
+        font-display: block;
+      }
+      @font-face {
+        font-family: 'm5x7';
+        src: url('assets/fonts/m5x7.ttf') format('truetype');
+        font-display: block;
+      }
+
+      :root {
+        color-scheme: dark;
+        --bg-0: #000000;
+        --bg-1: #0a0a0c;
+        --bg-2: #121215;
+        --bg-3: #1a1a1e;
+        --fg-0: #f0eee9;
+        --fg-1: #c3c0b8;
+        --fg-2: #8d8a82;
+        --fg-3: #5f5d57;
+        --border: rgba(255, 255, 255, 0.08);
+        --border-strong: rgba(255, 255, 255, 0.16);
+        --accent: #efede6;
+        --accent-dim: rgba(239, 237, 230, 0.14);
+        --hairline: rgba(255, 255, 255, 0.06);
+        --el-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+        --el-2: 0 8px 28px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.3);
+        --el-3: 0 24px 60px -20px rgba(0, 0, 0, 0.7);
+        --radius: 12px;
+        --radius-lg: 18px;
+        --mono: 'm5x7', 'Cascadia Mono', Consolas, monospace;
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html { scroll-behavior: smooth; }
+
+      body {
+        background: var(--bg-0);
+        color: var(--fg-0);
+        font-family: var(--mono);
+        font-size: 15px;
+        line-height: 1.6;
+        overflow-x: hidden;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .pixel, .mono { font-family: var(--mono); }
+      .dim { color: var(--fg-2); }
+      a { color: var(--fg-0); text-decoration: none; }
+      a:hover { color: var(--accent); }
+
+      /* ---------- backdrop ---------- */
+      #scene {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        image-rendering: pixelated;
+        z-index: 0;
+        pointer-events: none;
+        transform: translate3d(calc(var(--lx, 0) * -7px), calc(var(--ly, 0) * -4px), 0) scale(1.03);
+        transition: transform 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+        will-change: transform;
+      }
+      .aurora {
+        position: fixed;
+        left: 50%;
+        bottom: -10%;
+        width: min(1200px, 130vw);
+        height: 44vh;
+        transform: translateX(-50%);
+        pointer-events: none;
+        z-index: 0;
+        background: radial-gradient(
+          62% 100% at 50% 100%,
+          color-mix(in srgb, var(--accent) 14%, transparent),
+          transparent 70%
+        );
+        mix-blend-mode: screen;
+        opacity: 0.4;
+        animation: aurora-breathe 17s steps(24, end) infinite alternate;
+      }
+      @keyframes aurora-breathe {
+        from { opacity: 0.22; transform: translateX(-50%) scaleY(0.92); }
+        to { opacity: 0.5; transform: translateX(-50%) scaleY(1.06); }
+      }
+
+      main, nav, footer { position: relative; z-index: 1; }
+
+      /* ---------- nav ---------- */
+      .nav {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: 56px;
+        padding: 0 28px;
+        background: linear-gradient(
+          180deg,
+          color-mix(in srgb, var(--fg-0) 3%, rgba(10, 10, 12, 0.82)),
+          rgba(10, 10, 12, 0.55)
+        );
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--hairline);
+      }
+      .nav nav { display: flex; gap: 22px; font-size: 12px; }
+      .nav nav a { color: var(--fg-2); }
+      .nav nav a:hover { color: var(--fg-0); }
+      .nav .brand {
+        font-family: 'Alagard', var(--mono);
+        font-size: 17px;
+        color: var(--fg-0);
+        letter-spacing: 0.02em;
+      }
+      .nav-gh {
+        border: 1px solid var(--border-strong);
+        border-radius: 999px;
+        padding: 3px 12px;
+      }
+      .nav-gh:hover { background: var(--accent-dim); color: var(--fg-0); }
+
+      /* ---------- hero ---------- */
+      .hero {
+        position: relative;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 96px 24px 180px;
+      }
+      .hero-copy { position: relative; z-index: 2; }
+
+      .version {
+        display: inline-block;
+        font-size: 12px;
+        color: var(--accent);
+        border: 1px solid var(--border-strong);
+        border-radius: 999px;
+        padding: 3px 14px;
+        margin-bottom: 22px;
+        background: rgba(10, 10, 12, 0.55);
+        backdrop-filter: blur(4px);
+      }
+
+      .wordmark {
+        font-family: 'Alagard', var(--mono);
+        font-weight: 400;
+        font-size: clamp(44px, 9vw, 104px);
+        line-height: 1;
+        color: var(--accent);
+        text-shadow: 0 3px 0 rgba(0, 0, 0, 0.45), 0 8px 24px rgba(0, 0, 0, 0.8);
+        margin-bottom: 18px;
+      }
+      .tagline {
+        font-size: clamp(15px, 2.4vw, 20px);
+        color: var(--fg-1);
+        margin-bottom: 14px;
+        text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9);
+      }
+      .sub {
+        max-width: 520px;
+        margin: 0 auto 34px;
+        color: var(--fg-1);
+        font-size: 14px;
+      }
+      .cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+      .btn {
+        display: inline-block;
+        font-family: var(--mono);
+        font-size: 13px;
+        padding: 11px 26px;
+        border-radius: 10px;
+        border: 1px solid var(--border-strong);
+        background: var(--bg-2);
+        color: var(--fg-0);
+        box-shadow: var(--el-1);
+        transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+      }
+      .btn:hover {
+        color: var(--fg-0);
+        background: var(--bg-3);
+        border-color: var(--accent);
+        transform: translateY(-1px);
+      }
+      .btn.primary {
+        background: var(--accent);
+        color: #0a0a0c;
+        border-color: var(--accent);
+        font-weight: 700;
+      }
+      .btn.primary:hover { background: var(--fg-0); border-color: var(--fg-0); color: #0a0a0c; }
+      .hint {
+        margin-top: 16px;
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        color: var(--fg-2);
+        text-transform: uppercase;
+      }
+
+      /* ---------- voxel cat ---------- */
+      .cat-stage {
+        position: absolute;
+        left: 50%;
+        bottom: 9%;
+        width: min(340px, 60vw);
+        aspect-ratio: 1;
+        transform: translateX(-50%);
+        z-index: 1;
+        pointer-events: none;
+      }
+      #cat3d { width: 100%; height: 100%; display: block; }
+      .cat-glow {
+        position: absolute;
+        left: 50%;
+        top: 46%;
+        width: 70%;
+        height: 60%;
+        transform: translate(-50%, -50%);
+        background: radial-gradient(closest-side, rgba(255, 150, 60, 0.12), transparent);
+        z-index: -1;
+      }
+      .z {
+        position: absolute;
+        font-family: var(--mono);
+        font-size: 15px;
+        color: var(--fg-2);
+        opacity: 0;
+        animation: zfloat 3.4s ease-out infinite;
+      }
+      .z1 { top: 12%; right: 30%; }
+      .z2 { top: 4%; right: 38%; animation-delay: 1.4s; font-size: 18px; }
+      .z3 { top: 16%; right: 22%; animation-delay: 2.5s; font-size: 12px; }
+      @keyframes zfloat {
+        0% { transform: translate(0, 0); opacity: 0; }
+        20% { opacity: 0.85; }
+        100% { transform: translate(10px, -42px); opacity: 0; }
+      }
+
+      /* ---------- marquee ---------- */
+      .marquee {
+        position: relative;
+        z-index: 2;
+        overflow: hidden;
+        border-top: 1px solid var(--hairline);
+        border-bottom: 1px solid var(--hairline);
+        background: rgba(5, 5, 7, 0.6);
+        backdrop-filter: blur(6px);
+        padding: 12px 0;
+      }
+      .marquee-track {
+        display: flex;
+        gap: 26px;
+        white-space: nowrap;
+        width: max-content;
+        animation: marquee 36s linear infinite;
+        font-size: 12.5px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--fg-2);
+      }
+      .marquee-track i { font-style: normal; color: var(--accent-dim); }
+      @keyframes marquee { to { transform: translateX(-50%); } }
+
+      /* ---------- sections ---------- */
+      section {
+        position: relative;
+        z-index: 1;
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 96px 28px;
+      }
+      .section-title {
+        font-size: 17px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--accent);
+        text-align: center;
+        margin-bottom: 14px;
+        text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+      }
+      .section-title::before,
+      .section-title::after {
+        content: '·';
+        color: var(--fg-3);
+        margin: 0 14px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 14px;
+        margin-top: 44px;
+      }
+      .card {
+        background: linear-gradient(180deg, rgba(26, 26, 30, 0.92), rgba(10, 10, 12, 0.94));
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius);
+        padding: 22px 22px 20px;
+        box-shadow: var(--el-2);
+        backdrop-filter: blur(6px);
+        transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+      }
+      .card:hover {
+        transform: translateY(-2px);
+        border-color: var(--accent);
+        box-shadow: var(--el-3);
+      }
+      .card h3 {
+        font-family: var(--mono);
+        font-size: 14.5px;
+        font-weight: 700;
+        color: var(--fg-0);
+        margin-bottom: 9px;
+        letter-spacing: 0.02em;
+      }
+      .card p { font-size: 13.5px; color: var(--fg-1); line-height: 1.7; }
+
+      /* ---------- download ---------- */
+      .download { text-align: center; }
+      .download-sub { color: var(--fg-1); font-size: 13.5px; margin-bottom: 36px; }
+      .dl-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 14px;
+        max-width: 760px;
+        margin: 0 auto;
+      }
+      .dl-card {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        align-items: center;
+        padding: 26px 18px;
+        background: linear-gradient(180deg, rgba(26, 26, 30, 0.92), rgba(10, 10, 12, 0.94));
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--el-2);
+        backdrop-filter: blur(6px);
+        transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+      }
+      .dl-card:hover {
+        transform: translateY(-2px);
+        border-color: var(--accent);
+        box-shadow: var(--el-3);
+        color: var(--fg-0);
+      }
+      .dl-os { font-size: 15px; font-weight: 700; color: var(--fg-0); }
+      .dl-file { font-size: 11.5px; color: var(--fg-2); }
+
+      /* ---------- footer ---------- */
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        padding: 34px 24px 44px;
+        border-top: 1px solid var(--hairline);
+        background: rgba(5, 5, 7, 0.7);
+        font-size: 12px;
+        color: var(--fg-2);
+      }
+      .footer a { color: var(--fg-2); }
+      .footer a:hover { color: var(--fg-0); }
+
+      /* ---------- responsive ---------- */
+      @media (max-width: 720px) {
+        .hero { padding-bottom: 220px; }
+        .cat-stage { bottom: 4%; width: min(260px, 72vw); }
+        .nav { padding: 0 16px; }
+        .nav nav { gap: 14px; }
+      }
+      @media (max-height: 720px) {
+        .cat-stage { width: min(240px, 50vw); bottom: 6%; }
+        .hero { padding-top: 72px; padding-bottom: 150px; }
+      }
+
+      /* ---------- reduced motion ---------- */
+      @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
+        #scene { transform: none; transition: none; }
+        .aurora, .marquee-track, .z { animation: none; }
+        .z { opacity: 0.5; }
+        .btn, .card, .dl-card { transition: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="scene" aria-hidden="true"></canvas>
+    <div class="aurora" aria-hidden="true"></div>
+
+    <header class="nav">
+      <a class="brand" href="#top">hate-agent</a>
+      <nav>
+        <a href="#features">Features</a>
+        <a href="#download">Download</a>
+        <a class="nav-gh" href="https://github.com/m240xi/hate-agent" rel="noopener">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy">
+          <h1 class="wordmark">hate-agent</h1>
+          <p class="tagline pixel">Built for the 3am club.</p>
+          <p class="sub">
+            A local-first coding agent that spends fewer tokens per task -
+            small prompt, lazy tools, verified work.
+          </p>
+          <div class="cta">
+            <a class="btn primary" id="dl-primary" href="https://github.com/m240xi/hate-agent/releases/latest" rel="noopener">
+              Download
+            </a>
+            <a class="btn" href="https://github.com/m240xi/hate-agent" rel="noopener">Source</a>
+          </div>
+          <p class="hint pixel">windows · macos · linux</p>
+        </div>
+
+        <div class="cat-stage" aria-hidden="true">
+          <canvas id="cat3d"></canvas>
+          <span class="z z1">z</span>
+          <span class="z z2">z</span>
+          <span class="z z3">z</span>
+          <div class="cat-glow"></div>
+        </div>
+      </section>
+
+      <div class="marquee" aria-hidden="true">
+        <div class="marquee-track pixel">
+          <span>small prompt</span><i>·</i><span>lazy tools</span><i>·</i>
+          <span>verified work</span><i>·</i><span>local-first</span><i>·</i>
+          <span>provider-agnostic</span><i>·</i><span>mcp native</span><i>·</i>
+          <span>29 palettes</span><i>·</i><span>checkpoints</span><i>·</i>
+          <span>token ledger</span><i>·</i>
+          <span>small prompt</span><i>·</i><span>lazy tools</span><i>·</i>
+          <span>verified work</span><i>·</i><span>local-first</span><i>·</i>
+          <span>provider-agnostic</span><i>·</i><span>mcp native</span><i>·</i>
+          <span>29 palettes</span><i>·</i><span>checkpoints</span><i>·</i>
+          <span>token ledger</span><i>·</i>
+        </div>
+      </div>
+
+      <section class="features" id="features">
+        <h2 class="section-title pixel">why it exists</h2>
+        <div class="grid">
+          <article class="card">
+            <h3>fewer tokens, honestly</h3>
+            <p>
+              A tight system prompt, lazy tool definitions, and output shaping
+              mean every turn costs less. The ledger shows the receipts —
+              tokens, cache hits, latency, and dollars per task.
+            </p>
+          </article>
+          <article class="card">
+            <h3>local-first</h3>
+            <p>
+              Sessions, checkpoints, skills, and the usage ledger live on your
+              machine. No account wall between you and your repo - sign in
+              only for the provider you choose.
+            </p>
+          </article>
+          <article class="card">
+            <h3>provider-agnostic</h3>
+            <p>
+              OpenAI-compatible and Anthropic adapters, Nous Portal OAuth,
+              Claude, Gemini, OpenRouter, or a model on localhost. Switch
+              mid-chat; the app keeps up.
+            </p>
+          </article>
+          <article class="card">
+            <h3>mcp native</h3>
+            <p>
+              Connect Blender, Godot, or any MCP server from Settings and its
+              tools join the same transcript, permissions, and ledger as
+              built-in ones.
+            </p>
+          </article>
+          <article class="card">
+            <h3>29 palettes + glass</h3>
+            <p>
+              From phosphor green to sakura night, every palette ships with the
+              app - plus an experimental frosted-glass mode.
+            </p>
+          </article>
+          <article class="card">
+            <h3>checkpoints &amp; rewind</h3>
+            <p>
+              Every turn is journaled. Rewind a bad edit, regenerate a reply,
+              or compact a bloated context without losing the thread.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="download" id="download">
+        <h2 class="section-title pixel">take it home</h2>
+        <p class="download-sub">Free and open source.</p>
+        <div class="dl-grid">
+          <a class="dl-card" id="dl-windows" href="https://github.com/m240xi/hate-agent/releases/latest" rel="noopener">
+            <span class="dl-os">Windows</span>
+            <span class="dl-file mono" id="dl-windows-file">installer</span>
+          </a>
+          <a class="dl-card" id="dl-macos" href="https://github.com/m240xi/hate-agent/releases/latest" rel="noopener">
+            <span class="dl-os">macOS</span>
+            <span class="dl-file mono" id="dl-macos-file">disk image</span>
+          </a>
+          <a class="dl-card" id="dl-linux" href="https://github.com/m240xi/hate-agent/releases/latest" rel="noopener">
+            <span class="dl-os">Linux</span>
+            <span class="dl-file mono" id="dl-linux-file">appimage · deb</span>
+          </a>
+        </div>
+        <p class="hint pixel">or grab it from <a href="https://github.com/m240xi/hate-agent/releases/latest" rel="noopener">GitHub releases</a></p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span class="pixel">hate-agent</span>
+    </footer>
+
+    <script>
+      (function () {
+        'use strict';
+        var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+        /* ---------------- pointer parallax ---------------- */
+        if (!reduced) {
+          var root = document.documentElement;
+          var raf = 0, nx = 0, ny = 0;
+          window.addEventListener('pointermove', function (e) {
+            nx = (e.clientX / window.innerWidth - 0.5) * 2;
+            ny = (e.clientY / window.innerHeight - 0.5) * 2;
+            if (raf) return;
+            raf = requestAnimationFrame(function () {
+              raf = 0;
+              root.style.setProperty('--lx', nx.toFixed(3));
+              root.style.setProperty('--ly', ny.toFixed(3));
+            });
+          }, { passive: true });
+          window.addEventListener('pointerleave', function () {
+            root.style.setProperty('--lx', '0');
+            root.style.setProperty('--ly', '0');
+          });
+        }
+
+        /* ---------------- night scene ---------------- */
+        var L_H = 220;
+        var FPS_MS = 125;
+        var MOON = { cx: 135, cy: 39 };
+        var MEADOW_Y = 157;
+        var OPEN_SKY = { '9,11,24': 1, '18,23,51': 1 };
+        var FILES = {
+          sky: 'assets/scene/sky.png',
+          skyMoonless: 'assets/scene/sky-moonless.png',
+          mountainsFar: 'assets/scene/mountains-far.png',
+          mountains: 'assets/scene/mountains.png',
+          trees: 'assets/scene/trees.png',
+          treesFront: 'assets/scene/trees-front.png'
+        };
+
+        function mulberry(seed) {
+          var s = seed >>> 0;
+          return function () {
+            s = (s + 0x6d2b79f5) >>> 0;
+            var t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+          };
+        }
+
+        var layers = {};
+
+        function loadImage(src) {
+          return new Promise(function (resolve) {
+            var img = new Image();
+            img.onload = function () { resolve(img); };
+            img.onerror = function () { resolve(null); };
+            img.src = src;
+          });
+        }
+
+        function buffer(w) {
+          var c = document.createElement('canvas');
+          c.width = w;
+          c.height = L_H;
+          var ctx = c.getContext('2d', { willReadFrequently: true });
+          if (!ctx) return null;
+          ctx.imageSmoothingEnabled = false;
+          return [c, ctx];
+        }
+
+        function tile(ctx, img, origin, w) {
+          var start = origin - Math.ceil(origin / img.width) * img.width;
+          for (var x = start; x < w; x += img.width) ctx.drawImage(img, x, 0);
+        }
+
+        function paintBack(w, moonX) {
+          var sky = layers.sky, plain = layers.skyMoonless;
+          var made = buffer(w);
+          if (!sky || !plain || !made) return null;
+          var c = made[0], ctx = made[1];
+          ctx.fillStyle = '#090b18';
+          ctx.fillRect(0, 0, w, L_H);
+          var origin = moonX - MOON.cx;
+          tile(ctx, plain, origin, w);
+          ctx.drawImage(sky, origin, 0);
+          var glow = ctx.createRadialGradient(moonX, MOON.cy, 20, moonX, MOON.cy, 64);
+          glow.addColorStop(0, 'rgba(170, 185, 255, 0.10)');
+          glow.addColorStop(1, 'rgba(170, 185, 255, 0)');
+          ctx.fillStyle = glow;
+          ctx.fillRect(moonX - 64, 0, 128, MOON.cy + 64);
+          return c;
+        }
+
+        function paintFront(w, rnd) {
+          var made = buffer(w);
+          if (!made) return null;
+          var c = made[0], ctx = made[1];
+          var centre = Math.round((w - 544) / 2);
+          ['mountainsFar', 'mountains', 'trees', 'treesFront'].forEach(function (id) {
+            if (layers[id]) tile(ctx, layers[id], centre, w);
+          });
+          ctx.fillStyle = '#04060c';
+          ctx.fillRect(0, MEADOW_Y, w, L_H - MEADOW_Y);
+          for (var x = 0; x < w; x++) {
+            var tip = Math.floor(rnd() * 3);
+            if (tip > 0) ctx.fillRect(x, MEADOW_Y - tip, 1, tip);
+          }
+          ctx.fillStyle = '#070a13';
+          for (var y = MEADOW_Y; y < MEADOW_Y + 5; y++) {
+            for (var x2 = (y % 2) * 2; x2 < w; x2 += 4) ctx.fillRect(x2, y, 1, 1);
+          }
+          for (var i = 0; i < w * 0.9; i++) {
+            var gx = Math.floor(rnd() * w);
+            var gy = MEADOW_Y + 3 + Math.floor(rnd() * (L_H - MEADOW_Y - 5));
+            var lit = rnd() < 0.25;
+            ctx.fillStyle = lit ? '#141c2c' : '#0b0f1a';
+            ctx.fillRect(gx, gy, 1, 1);
+            if (lit && rnd() < 0.5) {
+              ctx.fillRect(gx - 1, gy + 1, 1, 1);
+              ctx.fillRect(gx + 1, gy + 1, 1, 1);
+            }
+          }
+          return c;
+        }
+
+        function buildScene(w) {
+          var rnd = mulberry(0x3a7);
+          var moonX = Math.round(w * 0.78);
+          var back = paintBack(w, moonX);
+          var front = paintFront(w, rnd);
+
+          // Reading the sky back to avoid placing stars on clouds taints the
+          // canvas under file://; fall back to placing them everywhere.
+          var open = null;
+          try {
+            open = back.getContext('2d').getImageData(0, 0, w, 112).data;
+          } catch (e) { open = null; }
+
+          var stars = [];
+          for (var i = 0; i < Math.round(w * 0.55); i++) {
+            var x = Math.floor(rnd() * w);
+            var y = Math.floor(rnd() * 110);
+            var b = 0.35 + rnd() * 0.65;
+            var ph = rnd() * Math.PI * 2;
+            var sp = 0.4 + rnd() * 1.4;
+            var big = rnd() < 0.05;
+            if (open) {
+              var o = (y * w + x) * 4;
+              if (!OPEN_SKY[open[o] + ',' + open[o + 1] + ',' + open[o + 2]]) continue;
+            }
+            stars.push({ x: x, y: y, b: y > 80 ? b * 0.6 : b, ph: ph, sp: sp, big: big });
+          }
+
+          var flies = [];
+          for (var f = 0; f < 7; f++) {
+            flies.push({
+              x0: w * 0.12 + rnd() * w * 0.76,
+              y0: MEADOW_Y + 6 + rnd() * (L_H - MEADOW_Y - 18),
+              rx: 6 + rnd() * 14,
+              ry: 2 + rnd() * 5,
+              ph: rnd() * Math.PI * 2,
+              sp: 0.25 + rnd() * 0.5
+            });
+          }
+          return { w: w, stars: stars, flies: flies, back: back, front: front };
+        }
+
+        function drawScene(ctx, s, t) {
+          var w = s.w, i;
+          ctx.imageSmoothingEnabled = false;
+          if (s.back) ctx.drawImage(s.back, 0, 0);
+          else { ctx.fillStyle = '#090b18'; ctx.fillRect(0, 0, w, L_H); }
+
+          for (i = 0; i < s.stars.length; i++) {
+            var st = s.stars[i];
+            var a = st.b * (0.55 + 0.45 * Math.sin(t * 0.001 * st.sp + st.ph));
+            ctx.fillStyle = 'rgba(226, 230, 245, ' + a.toFixed(3) + ')';
+            ctx.fillRect(st.x, st.y, 1, 1);
+            if (st.big) {
+              ctx.fillRect(st.x - 1, st.y, 1, 1);
+              ctx.fillRect(st.x + 1, st.y, 1, 1);
+              ctx.fillRect(st.x, st.y - 1, 1, 1);
+              ctx.fillRect(st.x, st.y + 1, 1, 1);
+            }
+          }
+
+          var cycle = 17000;
+          var n = Math.floor(t / cycle);
+          var k = (t % cycle) / 650;
+          if (k < 1) {
+            var sx = Math.round(w * (0.12 + ((n * 37) % 50) / 100) + k * 46);
+            var sy = Math.round(8 + ((n * 13) % 22) + k * 17);
+            for (i = 0; i < 7; i++) {
+              ctx.fillStyle = 'rgba(236, 240, 255, ' + ((1 - i / 7) * (1 - k) * 0.9).toFixed(3) + ')';
+              ctx.fillRect(sx - i * 2, sy - Math.round(i * 0.74), 1, 1);
+            }
+          }
+
+          if (s.front) ctx.drawImage(s.front, 0, 0);
+
+          for (i = 0; i < s.flies.length; i++) {
+            var f = s.flies[i];
+            var blink = Math.sin(t * 0.0016 * f.sp * 6 + f.ph * 3);
+            if (blink < -0.2) continue;
+            var fx = Math.round(f.x0 + Math.cos(t * 0.0006 * f.sp + f.ph) * f.rx);
+            var fy = Math.round(f.y0 + Math.sin(t * 0.0009 * f.sp + f.ph * 1.7) * f.ry);
+            ctx.fillStyle = 'rgba(232, 200, 106, ' + (0.4 + 0.6 * blink).toFixed(3) + ')';
+            ctx.fillRect(fx, fy, 1, 1);
+          }
+        }
+
+        function initScene() {
+          var canvas = document.getElementById('scene');
+          if (!canvas) return;
+          var ctx = canvas.getContext('2d');
+          if (!ctx) return;
+
+          var scene = buildScene(300);
+          var resize = function () {
+            var rect = canvas.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return;
+            var width = Math.max(200, Math.round((rect.width / rect.height) * L_H));
+            if (canvas.width === width && canvas.height === L_H && scene.w === width) return;
+            canvas.width = width;
+            canvas.height = L_H;
+            scene = buildScene(width);
+            drawScene(ctx, scene, performance.now());
+          };
+          new ResizeObserver(resize).observe(canvas);
+          resize();
+
+          if (reduced) { drawScene(ctx, scene, performance.now()); return; }
+          setInterval(function () {
+            if (!document.hidden) drawScene(ctx, scene, performance.now());
+          }, FPS_MS);
+        }
+
+        /* ---------------- voxel cat (canvas 2D, no dependencies) ---------------- */
+        var CAT_SPRITE = 'data:image/png;base64,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';
+        var FRAME = 64;
+        var DEPTH = 7;
+        var SPIN = 0.1;
+
+        function initCat() {
+          var canvas = document.getElementById('cat3d');
+          if (!canvas) return;
+          var ctx = canvas.getContext('2d');
+          if (!ctx) return;
+
+          var img = new Image();
+          img.onload = function () {
+            var off = document.createElement('canvas');
+            off.width = FRAME;
+            off.height = FRAME;
+            var octx = off.getContext('2d', { willReadFrequently: true });
+            octx.drawImage(img, 0, 0, FRAME, FRAME, 0, 0, FRAME, FRAME);
+
+            var data;
+            try { data = octx.getImageData(0, 0, FRAME, FRAME).data; } catch (e) { return; }
+
+            var px = [];
+            var minX = FRAME, maxX = -1, minY = FRAME, maxY = -1;
+            for (var y = 0; y < FRAME; y++) {
+              for (var x = 0; x < FRAME; x++) {
+                var o = (y * FRAME + x) * 4;
+                if (data[o + 3] < 128) continue;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+                px.push({ x: x, y: y, r: data[o], g: data[o + 1], b: data[o + 2] });
+              }
+            }
+            if (px.length === 0) return;
+
+            var cx = (minX + maxX + 1) / 2;
+            var cy = (minY + maxY + 1) / 2;
+            var bodyH = maxY - minY + 1;
+
+            // Extrude each pixel into a slab of DEPTH voxels, shading the back
+            // layers darker so the sculpture reads in 3D as it turns.
+            var voxels = [];
+            for (var p = 0; p < px.length; p++) {
+              var v = px[p];
+              for (var d = 0; d < DEPTH; d++) {
+                var shade = 1 - (d / (DEPTH - 1)) * 0.42;
+                voxels.push({
+                  x: v.x - cx,
+                  y: cy - v.y - 1,
+                  z: d - (DEPTH - 1) / 2,
+                  c: 'rgb(' + Math.round(v.r * shade) + ',' + Math.round(v.g * shade) + ',' + Math.round(v.b * shade) + ')',
+                  sx: 0,
+                  sy: 0,
+                  zr: 0
+                });
+              }
+            }
+
+            var dpr = Math.min(window.devicePixelRatio || 1, 2);
+            var W = 0, H = 0, cell = 4;
+
+            function fit() {
+              var rect = canvas.getBoundingClientRect();
+              if (rect.width === 0 || rect.height === 0) return;
+              W = rect.width;
+              H = rect.height;
+              if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+                canvas.width = Math.round(W * dpr);
+                canvas.height = Math.round(H * dpr);
+              }
+              ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+              cell = Math.max(2, Math.round((H * 0.62) / bodyH));
+            }
+            new ResizeObserver(fit).observe(canvas);
+            fit();
+
+            function render(t) {
+              if (W === 0) return;
+              var theta = reduced ? 0.5 : t * 0.001 * SPIN;
+              var cos = Math.cos(theta), sin = Math.sin(theta);
+              var ox = W / 2;
+              var oy = H / 2 + (reduced ? 0 : Math.sin(t * 0.0009) * 3);
+              var i, vx;
+              for (i = 0; i < voxels.length; i++) {
+                vx = voxels[i];
+                var xr = vx.x * cos - vx.z * sin;
+                var zr = vx.x * sin + vx.z * cos;
+                vx.sx = Math.round(ox + xr * cell);
+                vx.sy = Math.round(oy - vx.y * cell);
+                vx.zr = zr;
+              }
+              voxels.sort(function (a, b) { return a.zr - b.zr; });
+              ctx.clearRect(0, 0, W, H);
+              for (i = 0; i < voxels.length; i++) {
+                vx = voxels[i];
+                ctx.fillStyle = vx.c;
+                ctx.fillRect(vx.sx, vx.sy, cell, cell);
+              }
+            }
+
+            if (reduced) { render(0); return; }
+            (function loop(now) {
+              requestAnimationFrame(loop);
+              if (!document.hidden) render(now);
+            })(performance.now());
+          };
+          img.src = CAT_SPRITE;
+        }
+
+        /* ---------------- downloads ---------------- */
+        function wireDownloads() {
+          var RELEASES = 'https://github.com/m240xi/hate-agent/releases';
+          var primary = document.getElementById('dl-primary');
+          var versionEl = document.getElementById('version');
+          var footEl = document.getElementById('foot-version');
+          var map = {
+            windows: ['dl-windows', 'dl-windows-file'],
+            macos: ['dl-macos', 'dl-macos-file'],
+            linux: ['dl-linux', 'dl-linux-file']
+          };
+          var preferred = {
+            windows: ['windows-x86_64-nsis', 'windows-x86_64'],
+            macos: ['darwin-aarch64', 'darwin-x86_64'],
+            linux: ['linux-x86_64-appimage', 'linux-x86_64-deb', 'linux-x86_64']
+          };
+          fetch(RELEASES + '/latest/download/latest.json', { cache: 'no-store' })
+            .then(function (res) { return res.ok ? res.json() : null; })
+            .then(function (m) {
+              if (!m) return;
+              if (m.version && versionEl) versionEl.textContent = 'v' + m.version;
+              if (m.version && footEl) footEl.textContent = 'v' + m.version;
+              var platforms = m.platforms || {};
+              var resolved = {};
+              Object.keys(map).forEach(function (os) {
+                var key = preferred[os].find(function (k) { return platforms[k] && platforms[k].url; });
+                if (!key) {
+                  var prefix = os === 'macos' ? 'darwin' : os;
+                  key = Object.keys(platforms).find(function (k) { return k.indexOf(prefix) === 0; });
+                }
+                if (key) resolved[os] = platforms[key].url;
+              });
+              Object.keys(map).forEach(function (os) {
+                var url = resolved[os];
+                if (!url) return;
+                var a = document.getElementById(map[os][0]);
+                var f = document.getElementById(map[os][1]);
+                if (a) a.href = url;
+                if (f && os !== 'linux') {
+                  var name = decodeURIComponent(url.split('/').pop() || '');
+                  f.textContent = name.replace(/^hate-agent_?/, '').replace(/\.(exe|dmg|AppImage|deb|msi|tar\.gz)$/i, '') || name;
+                }
+                if (os === 'windows' && primary) primary.href = url;
+              });
+            })
+            .catch(function () { /* offline or file:// — releases page fallback stands */ });
+        }
+
+        initScene();
+        initCat();
+        wireDownloads();
+      })();
+    </script>
+  </body>
+</html>

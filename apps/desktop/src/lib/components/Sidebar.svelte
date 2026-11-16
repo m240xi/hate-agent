@@ -9,6 +9,7 @@
   import { cubicOut } from 'svelte/easing';
   import { ms } from '../motion';
   import PixelCat from './PixelCat.svelte';
+  import ProviderLogo from './ProviderLogo.svelte';
 
   let query = $state('');
   let searching = $state(false);
@@ -270,6 +271,11 @@
     {/if}
     <div class="who">
       <span class="dot" class:on={session.providers.length > 0}></span>
+      {#if session.providerName || session.provider}
+        <span class="who-logo" aria-hidden="true">
+          <ProviderLogo provider={session.providerName || session.provider} size={12} fallbackFontSize={13} />
+        </span>
+      {/if}
       <span class="who-text">
         {session.providerName || session.provider || 'No provider yet'}
       </span>
@@ -590,6 +596,13 @@
     font-size: 11.5px;
     color: var(--fg-3);
     min-width: 0;
+  }
+  .who-logo {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    color: var(--fg-2);
   }
   .who-text {
     overflow: hidden;

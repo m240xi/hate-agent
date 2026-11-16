@@ -12,6 +12,7 @@ use specta::Type;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::antigravity;
+use crate::local_runtime;
 use crate::sessions_db::{SessionDb, SqliteJournal, StoredSession};
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -67,6 +68,7 @@ fn provider_entry(
 fn resolve_target(
     ctx: &AuthContext,
     name_override: Option<&str>,
+    live_local_url: Option<&str>,
 ) -> Result<(String, String, std::sync::Arc<dyn hate_core::Provider>), String> {
     let mut config = ctx.config.clone();
     config.ensure_default_provider();
@@ -76,10 +78,15 @@ fn resolve_target(
 
     warn_if_unknown(&pconf.kind);
     let credential = ctx.credential(name).map_err(|e| e.to_string())?;
-    let base_url = ctx
-        .base_url_override(name)
-        .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| pconf.base_url.clone());
+    let base_url = if name == local_runtime::LOCAL_PROVIDER
+        && let Some(live) = live_local_url
+    {
+        live.to_string()
+    } else {
+        ctx.base_url_override(name)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(|| pconf.base_url.clone())
+    };
     let provider = build(ProviderSpec {
         kind: ProviderKind::parse(&pconf.kind),
         base_url,
@@ -88,7 +95,44 @@ fn resolve_target(
     Ok((name.to_string(), pconf.model.clone(), provider))
 }
 
-fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, String> {
+async fn ensure_session(
+    state: &Sessions,
+    local: &local_runtime::LocalRuntimeState,
+    app: &AppHandle,
+) -> Result<SessionHandle, String> {
+    let (provider_override, model_override, restore_model) = {
+        let guard = state
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        if let Some(h) = guard.handle.as_ref() {
+            return Ok(h.clone());
+        }
+        (
+            guard
+                .provider
+                .clone()
+                .or_else(|| guard.restore.as_ref().map(|r| r.provider.clone()))
+                .filter(|p| !p.is_empty()),
+            guard.model.clone(),
+            guard.restore.as_ref().map(|r| r.model.clone()),
+        )
+    };
+
+    let pre_ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let mut live_local_url: Option<String> = None;
+    if let Some((name, pconf)) = provider_entry(&pre_ctx, provider_override.as_deref())
+        && name == local_runtime::LOCAL_PROVIDER
+    {
+        let desired_model = model_override
+            .or(restore_model)
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| pconf.model.clone());
+        let (port, _) =
+            local_runtime::ensure_model_running(app, local, &desired_model, false).await?;
+        live_local_url = Some(format!("http://127.0.0.1:{port}/v1"));
+    }
+
     let mut guard = state
         .inner
         .lock()
@@ -98,18 +142,17 @@ fn ensure_session(state: &Sessions, app: &AppHandle) -> Result<SessionHandle, St
     }
 
     let ctx = AuthContext::load().map_err(|e| e.to_string())?;
-    let provider_override = guard
-        .provider
-        .clone()
-        .or_else(|| guard.restore.as_ref().map(|r| r.provider.clone()))
-        .filter(|p| !p.is_empty());
     if let Some((name, pconf)) = provider_entry(&ctx, provider_override.as_deref())
         && pconf.kind == antigravity::KIND
     {
         let handle = spawn_antigravity(&mut guard, app, name, pconf.model)?;
         return Ok(forward_events(&mut guard, app, handle, true));
     }
-    let (name, configured_model, provider) = resolve_target(&ctx, provider_override.as_deref())?;
+    let (name, configured_model, provider) = resolve_target(
+        &ctx,
+        provider_override.as_deref(),
+        live_local_url.as_deref(),
+    )?;
 
     let (model, thinking) = match guard.restore.as_ref() {
         Some(r) => (
@@ -279,12 +322,13 @@ fn ledger_handle() -> Option<std::sync::Arc<Ledger>> {
 #[specta::specta]
 pub async fn session_send(
     state: State<'_, Sessions>,
+    local: State<'_, local_runtime::LocalRuntimeState>,
     app: AppHandle,
     text: String,
     pins: Option<Vec<PinRef>>,
     images: Option<Vec<ImageAttachment>>,
 ) -> Result<(), String> {
-    let handle = ensure_session(&state, &app)?;
+    let handle = ensure_session(&state, &local, &app).await?;
     let wire = match pins.as_deref() {
         Some(list) if !list.is_empty() => {
             let root = workspace_root(&state)?;
@@ -404,13 +448,40 @@ pub fn session_respond_permission(
 
 #[tauri::command]
 #[specta::specta]
-pub fn session_set_options(
+pub async fn session_set_options(
     state: State<'_, Sessions>,
+    local: State<'_, local_runtime::LocalRuntimeState>,
+    app: AppHandle,
     model: Option<String>,
     thinking: Option<String>,
     context_window: Option<u32>,
 ) -> Result<(), String> {
     let thinking = thinking.map(|t| ThinkingLevel::parse(&t)).transpose()?;
+    let current_provider = {
+        let slot = state
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        slot.provider.clone()
+    };
+
+    let mut local_swap: Option<(String, std::sync::Arc<dyn hate_core::Provider>)> = None;
+    if let Some(ref m) = model
+        && !m.trim().is_empty()
+        && let Ok(ctx) = AuthContext::load()
+        && let Some((name, _)) = provider_entry(&ctx, current_provider.as_deref())
+        && name == local_runtime::LOCAL_PROVIDER
+    {
+        let (port, _) = local_runtime::ensure_model_running(&app, &local, m, false).await?;
+        let live_url = format!("http://127.0.0.1:{port}/v1");
+        let fresh = AuthContext::load().map_err(|e| e.to_string())?;
+        if let Ok((n, _, adapter)) =
+            resolve_target(&fresh, Some(local_runtime::LOCAL_PROVIDER), Some(&live_url))
+        {
+            local_swap = Some((n, adapter));
+        }
+    }
+
     let mut slot = state
         .inner
         .lock()
@@ -425,6 +496,14 @@ pub fn session_set_options(
         slot.context_window = u64::from(w);
     }
     if let Some(h) = slot.handle.as_ref() {
+        if let Some((lname, adapter)) = local_swap {
+            h.command(Command::SetProvider {
+                provider: adapter,
+                provider_name: lname,
+                model: model.clone(),
+            })
+            .map_err(|e| e.to_string())?;
+        }
         h.command(Command::SetOptions {
             model,
             thinking,
@@ -437,8 +516,10 @@ pub fn session_set_options(
 
 #[tauri::command]
 #[specta::specta]
-pub fn session_set_provider(
+pub async fn session_set_provider(
     state: State<'_, Sessions>,
+    local: State<'_, local_runtime::LocalRuntimeState>,
+    app: AppHandle,
     provider: String,
     model: Option<String>,
 ) -> Result<(), String> {
@@ -469,7 +550,20 @@ pub fn session_set_provider(
             return config.save().map_err(|e| e.to_string());
         }
     }
-    let (name, configured_model, adapter) = resolve_target(&ctx, Some(&provider))?;
+
+    let mut live_local_url: Option<String> = None;
+    if target == local_runtime::LOCAL_PROVIDER {
+        let desired = model
+            .clone()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| target_conf.model.clone());
+        let (port, _) = local_runtime::ensure_model_running(&app, &local, &desired, true).await?;
+        live_local_url = Some(format!("http://127.0.0.1:{port}/v1"));
+    }
+
+    let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    let (name, configured_model, adapter) =
+        resolve_target(&ctx, Some(&provider), live_local_url.as_deref())?;
     let model = model.unwrap_or(configured_model);
     let mut slot = state
         .inner
@@ -665,8 +759,30 @@ pub struct ProviderModel {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn models_list(provider: Option<String>) -> Result<Vec<ProviderModel>, String> {
+pub async fn models_list(
+    local: State<'_, local_runtime::LocalRuntimeState>,
+    provider: Option<String>,
+) -> Result<Vec<ProviderModel>, String> {
     let ctx = AuthContext::load().map_err(|e| e.to_string())?;
+    if provider_entry(&ctx, provider.as_deref())
+        .is_some_and(|(n, _)| n == local_runtime::LOCAL_PROVIDER)
+    {
+        return Ok(local_runtime::downloaded_models()
+            .into_iter()
+            .map(|(id, name, ctx_tokens)| ProviderModel {
+                id,
+                name: Some(name),
+                context_tokens: Some(ctx_tokens),
+                price_in_mtok: Some(0.0),
+                price_out_mtok: Some(0.0),
+                price_cache_mtok: None,
+                reasoning_efforts: Vec::new(),
+                default_effort: None,
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+            })
+            .collect());
+    }
     if provider_entry(&ctx, provider.as_deref()).is_some_and(|(_, p)| p.kind == antigravity::KIND) {
         return Ok(antigravity::models()
             .into_iter()
@@ -684,7 +800,9 @@ pub async fn models_list(provider: Option<String>) -> Result<Vec<ProviderModel>,
             })
             .collect());
     }
-    let (_name, _model, provider) = resolve_target(&ctx, provider.as_deref())?;
+    let live_local = local_runtime::live_base_url(&local).await;
+    let (_name, _model, provider) =
+        resolve_target(&ctx, provider.as_deref(), live_local.as_deref())?;
     let models = provider.list_models().await.map_err(|e| e.to_string())?;
     Ok(models.into_iter().map(provider_model).collect())
 }
@@ -866,7 +984,13 @@ pub fn provider_upsert(
 
 #[tauri::command]
 #[specta::specta]
-pub fn provider_remove(name: String) -> Result<(), String> {
+pub async fn provider_remove(
+    local: State<'_, local_runtime::LocalRuntimeState>,
+    name: String,
+) -> Result<(), String> {
+    if name == local_runtime::LOCAL_PROVIDER {
+        let _ = local_runtime::local_runtime_stop(local).await;
+    }
     let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
     if !ctx.config.providers.contains_key(&name) {
         return Err(format!("unknown provider {name:?}"));

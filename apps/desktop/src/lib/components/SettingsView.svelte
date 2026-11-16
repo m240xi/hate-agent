@@ -799,41 +799,49 @@
         {#if providers.length === 0}
           <p class="muted">No providers yet — pick one below to get started.</p>
         {/if}
-        <div class="provider-list">
+        <div class="conn-list">
           {#each providers as p (p.name)}
             {@const connected = p.auth_kind !== 'none'}
             {@const isAcp = p.kind === 'acp'}
-            <article class="provider" class:live={connected} class:fresh={justAdded === p.name}>
-              <header class="provider-head">
+            <article
+              class="conn"
+              class:live={connected}
+              class:is-default={p.is_default}
+              class:fresh={justAdded === p.name}
+            >
+              <div class="conn-top">
                 <span class="tile-mark" aria-hidden="true">{initial(p)}</span>
-                <span class="provider-name">{providerLabel(p.name)}</span>
-                {#if providerLabel(p.name) !== p.name}
-                  <span class="provider-slug mono">{p.name}</span>
-                {/if}
-                {#if p.is_default}
-                  <span class="badge">default</span>
-                {/if}
-                <span class="badge" class:connected>{authLabel(p)}</span>
-                <span class="grow"></span>
-                <button
-                  class="remove-btn"
-                  class:confirming={confirmRemove === p.name}
-                  onclick={() => removeProvider(p)}
-                  title="Remove this provider and forget its key or sign-in"
-                >
-                  {confirmRemove === p.name ? 'Confirm remove' : 'Remove'}
-                </button>
-              </header>
+                <div class="conn-id">
+                  <span class="conn-name">{providerLabel(p.name)}</span>
+                  {#if providerLabel(p.name) !== p.name}
+                    <span class="conn-slug mono">{p.name}</span>
+                  {/if}
+                </div>
+                <div class="conn-state">
+                  <span class="badge" class:connected={connected}>{authLabel(p)}</span>
+                  {#if p.is_default}
+                    <span class="badge">default</span>
+                  {/if}
+                  <button
+                    class="remove-btn"
+                    class:confirming={confirmRemove === p.name}
+                    onclick={() => removeProvider(p)}
+                    title="Remove this provider and forget its key or sign-in"
+                  >
+                    {confirmRemove === p.name ? 'Confirm remove' : 'Remove'}
+                  </button>
+                </div>
+              </div>
 
-              <p class="provider-meta mono" title={p.base_url}>
+              <p class="conn-url mono" title={p.base_url}>
                 {kindLabel(p)}{#if p.base_url} · {p.base_url}{/if}
               </p>
 
               {#if isAcp}
                 {#if agStatus && !agStatus.supported}
-                  <p class="provider-hint">Google doesn't publish Antigravity for this platform.</p>
+                  <p class="provider-hint conn-actions">Google doesn't publish Antigravity for this platform.</p>
                 {:else if !agStatus?.installed}
-                  <div class="provider-actions">
+                  <div class="conn-actions">
                     <button
                       class="btn primary"
                       onclick={() => agRun('install', (m) => m.antigravityInstall())}
@@ -846,7 +854,7 @@
                 {:else if agBusy === 'login'}
                   <div class="login-box">
                     <p class="login-line">Finish signing in with Google in your browser…</p>
-                    <div class="provider-actions">
+                    <div class="conn-actions">
                       {#if agLoginUrl}
                         <button class="btn" onclick={agCopyLink}>
                           {agCopied ? 'Copied' : 'Copy sign-in link'}
@@ -856,7 +864,7 @@
                     </div>
                   </div>
                 {:else if !agStatus.signed_in}
-                  <div class="provider-actions">
+                  <div class="conn-actions">
                     <button
                       class="btn primary"
                       onclick={() => agRun('login', (m) => m.antigravityLogin())}
@@ -867,7 +875,7 @@
                     <span class="provider-hint">Free / Pro / Ultra plan</span>
                   </div>
                 {:else}
-                  <p class="provider-hint">
+                  <p class="provider-hint conn-actions">
                     Signed in · {agStatus.models} model{agStatus.models === 1 ? '' : 's'} · v{agStatus.installed}
                   </p>
                 {/if}
@@ -875,7 +883,7 @@
                   <p class="error-text">{agError}</p>
                 {/if}
               {:else}
-                <div class="provider-actions">
+                <div class="conn-actions">
                   <select
                     class="input model-select"
                     aria-label="Model for {providerLabel(p.name)}"
@@ -938,7 +946,7 @@
                       </a>
                       — code <code>{login.user_code}</code>
                     </p>
-                    <div class="provider-actions">
+                    <div class="conn-actions">
                       <button class="btn ghost" onclick={cancelLogin}>Cancel</button>
                     </div>
                   </div>
@@ -955,7 +963,7 @@
                         {claudeLogin.authorize_url}
                       </a>
                     </p>
-                    <div class="provider-actions">
+                    <div class="conn-actions">
                       <input
                         class="input"
                         type="text"
@@ -989,16 +997,16 @@
               {/if}
             </article>
           {/each}
+        </div>
 
-          {#if addablePresets.length > 0}
-            <div class="preset-head">
-              <p class="preset-title">
-                Add a provider
-                <span class="preset-count mono">{addablePresets.length} available</span>
-              </p>
+        {#if addablePresets.length > 0}
+          <div class="catalog">
+            <div class="catalog-head">
+              <span class="catalog-title">Add a provider</span>
+              <span class="catalog-count mono">{addablePresets.length} available</span>
               {#if addablePresets.length > 6}
                 <input
-                  class="input preset-filter"
+                  class="input catalog-filter"
                   type="search"
                   placeholder="Filter providers…"
                   aria-label="Filter providers"
@@ -1009,20 +1017,20 @@
             {#each PRESET_GROUPS as group (group.key)}
               {@const items = presetsInGroup(group.key)}
               {#if items.length > 0}
-                {#if presetGroupCount > 1}
-                  <p class="preset-sub mono">{group.label}</p>
-                {/if}
-                <div class="preset-grid">
+                <p class="catalog-sub mono">{group.label}</p>
+                <div class="catalog-rows">
                   {#each items as preset (preset.name)}
                     <button
-                      class="preset-card"
+                      class="cat-row"
+                      class:custom={preset.group === 'custom'}
                       onclick={() => openAdd(preset)}
                       disabled={presetBusy === preset.name}
                       title={`${preset.base_url}
 ${preset.key_url ?? ''}`}
                     >
-                      <span class="preset-name">{preset.label}</span>
-                      <span class="preset-meta">
+                      <span class="cat-plus" aria-hidden="true">+</span>
+                      <span class="cat-name">{preset.label}</span>
+                      <span class="cat-meta mono">
                         {preset.auth === 'none'
                           ? 'local · no key'
                           : preset.auth === 'agent'
@@ -1031,6 +1039,7 @@ ${preset.key_url ?? ''}`}
                               ? 'subscription or key'
                               : (preset.env_hint ?? 'api key')}
                       </span>
+                      <span class="cat-go" aria-hidden="true">add</span>
                     </button>
                   {/each}
                 </div>
@@ -1039,8 +1048,8 @@ ${preset.key_url ?? ''}`}
             {#if filteredPresets.length === 0}
               <p class="muted">No provider matches “{presetQuery}”.</p>
             {/if}
-          {/if}
-        </div>
+          </div>
+        {/if}
       {/if}
       {#if error}
         <p class="error-text">{error}</p>
@@ -1635,8 +1644,7 @@ ${preset.key_url ?? ''}`}
     line-height: 1.6;
   }
 
-  .card,
-  .provider {
+  .card {
     background: linear-gradient(
       180deg,
       color-mix(in srgb, var(--fg-0) 2.5%, var(--bg-1)),
@@ -1746,8 +1754,8 @@ ${preset.key_url ?? ''}`}
     padding: 0;
   }
 
-  .provider-name,
-  .provider-meta,
+  .conn-slug,
+  .conn-url,
   .about-grid dd,
   .login-line,
   .login-line code {
@@ -1844,6 +1852,10 @@ ${preset.key_url ?? ''}`}
      Same tokens and soft depth as the rest of the app, but a layout no
      other harness uses: a monogram tile on the left, identity on top, the
      model and credentials in a footer row. */
+  /* ---- Providers: connection rows + a catalog, not a card grid --------
+     A different page structure rather than a reskin: installed providers
+     are full-width rows with a monogram and a left accent on the default,
+     and adding one is a scannable list instead of a shelf of tiles. */
   .prov-hud {
     display: flex;
     align-items: baseline;
@@ -1858,62 +1870,91 @@ ${preset.key_url ?? ''}`}
     border-radius: var(--radius-pill);
     background: var(--bg-2);
   }
-  .provider-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
-    gap: 12px;
-    margin-top: 14px;
+  .grow {
+    flex: 1 1 auto;
   }
-  .provider {
-    position: relative;
+  .conn-list {
     display: flex;
     flex-direction: column;
-    padding: 14px 16px 13px;
-    background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--el-1);
-    transition:
-      border-color var(--motion),
-      box-shadow var(--motion);
+    margin-top: 16px;
   }
-  .provider:hover {
-    border-color: var(--border-strong);
-    box-shadow: var(--el-2);
+  .conn {
+    position: relative;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border);
   }
-  .provider.live {
-    border-color: color-mix(in srgb, var(--ok) 26%, var(--border));
+  .conn:last-child {
+    border-bottom: none;
   }
-  .provider.fresh {
-    border-color: var(--accent-dim);
-    box-shadow: 0 0 0 1px var(--accent-dim);
+  .conn.is-default {
+    padding-left: 14px;
   }
-  .provider-head {
+  .conn.is-default::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 16px;
+    bottom: 16px;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--accent);
+    opacity: 0.85;
+  }
+  .conn.fresh {
+    animation: conn-flash 2.4s ease-out;
+  }
+  @keyframes conn-flash {
+    0%,
+    40% {
+      background: var(--accent-dim);
+    }
+    100% {
+      background: transparent;
+    }
+  }
+  .conn-top {
     display: flex;
     align-items: center;
+    gap: 12px;
     flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 7px;
   }
   .tile-mark {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 34px;
-    height: 34px;
+    width: 36px;
+    height: 36px;
     flex: none;
     font-family: 'm5x7', var(--font-mono);
-    font-size: 17px;
+    font-size: 18px;
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
     border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
     border-radius: 10px;
     box-shadow: inset 0 1px 0 var(--hairline);
   }
-  .provider-name {
-    font-size: 13px;
-    font-weight: 500;
+  .conn-id {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .conn-name {
+    font-size: 14px;
+    font-weight: 600;
     color: var(--fg-0);
+    overflow-wrap: anywhere;
+  }
+  .conn-slug {
+    font-size: 10.5px;
+    color: var(--fg-3);
+  }
+  .conn-state {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    flex-wrap: wrap;
   }
   .badge {
     font-family: var(--font-mono);
@@ -1937,9 +1978,6 @@ ${preset.key_url ?? ''}`}
     background: color-mix(in srgb, var(--ok) 14%, var(--bg-3));
     color: var(--ok, #4ade80);
   }
-  .grow {
-    flex: 1 1 auto;
-  }
   .remove-btn {
     flex: none;
     font-size: 11px;
@@ -1962,46 +2000,48 @@ ${preset.key_url ?? ''}`}
     background: var(--err);
     border-color: var(--err);
   }
-  .provider-meta {
-    font-family: var(--font-mono);
+  .conn-url {
     font-size: 11px;
     color: var(--fg-3);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    margin: 0 0 2px;
+    margin: 4px 0 0 48px;
   }
-  .provider-actions {
+  .conn-actions {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
     margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
+    margin-left: 48px;
   }
-  .provider-actions .input {
-    flex: 1 1 180px;
+  .conn-actions .input {
+    flex: 1 1 200px;
     min-width: 150px;
     width: auto;
   }
   .model-select {
-    flex: 0 1 240px;
+    flex: 0 1 250px;
     min-width: 150px;
     padding: 5px 8px;
     font-size: 11.5px;
   }
+  .provider-hint {
+    font-size: 11px;
+    color: var(--fg-3);
+    align-self: center;
+  }
   .login-box {
-    margin-top: 10px;
+    margin: 12px 0 0 48px;
     padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--bg-0);
   }
-  .login-box .provider-actions {
+  .login-box .conn-actions {
     margin-top: 8px;
-    padding-top: 0;
-    border-top: none;
+    margin-left: 0;
   }
   .login-line {
     font-size: 12px;
@@ -2020,95 +2060,108 @@ ${preset.key_url ?? ''}`}
     padding: 1px 6px;
     border-radius: var(--radius-sm);
   }
-  .provider-hint {
-    font-size: 11px;
-    color: var(--fg-3);
-    align-self: center;
+
+  /* ---- Add a provider: catalog rows --------------------------------- */
+  .catalog {
+    margin-top: 26px;
   }
-  .preset-head {
+  .catalog-head {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin: 20px 0 4px;
+    gap: 10px;
     flex-wrap: wrap;
+    margin-bottom: 4px;
   }
-  .preset-title {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
+  .catalog-title {
     font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.1em;
+    font-size: 11px;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
+    color: var(--fg-2);
+  }
+  .catalog-count {
+    font-size: 11px;
     color: var(--fg-3);
-    margin: 0;
   }
-  .preset-count {
-    letter-spacing: 0;
-    text-transform: none;
-    color: var(--fg-4, var(--fg-3));
-    opacity: 0.7;
-  }
-  .preset-filter {
+  .catalog-filter {
     margin-left: auto;
     width: 200px;
     padding: 4px 10px;
     font-size: 11.5px;
   }
-  .preset-sub {
+  .catalog-sub {
     font-size: 10px;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: var(--fg-4, var(--fg-3));
-    opacity: 0.75;
-    margin: 14px 0 6px;
+    color: var(--fg-3);
+    margin: 16px 0 2px;
   }
-  .provider-slug {
-    font-size: 10px;
-    color: var(--fg-4, var(--fg-3));
-    opacity: 0.65;
-  }
-  .preset-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
-    gap: 8px;
-  }
-  .preset-card {
+  .catalog-rows {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    padding: 10px 12px;
-    background: linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--fg-0) 2.5%, var(--bg-1)),
-      var(--bg-1)
-    );
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    cursor: pointer;
+  }
+  .cat-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 6px;
+    border-bottom: 1px solid var(--border);
+    background: transparent;
     text-align: left;
+    cursor: pointer;
     transition:
-      border-color var(--motion),
-      transform var(--motion);
+      background var(--motion),
+      border-color var(--motion);
   }
-  .preset-card:hover:not(:disabled) {
-    border-color: var(--accent);
-    transform: translateY(-1px);
+  .cat-row:hover:not(:disabled) {
+    background: var(--bg-2);
   }
-  .preset-card:disabled {
+  .cat-row:disabled {
     opacity: 0.45;
     cursor: default;
   }
-  .preset-name {
-    font-size: 12px;
+  .cat-row.custom .cat-name {
+    color: var(--accent);
+  }
+  .cat-plus {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--fg-3);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+  }
+  .cat-row:hover .cat-plus {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .cat-name {
+    font-size: 12.5px;
     color: var(--fg-0);
     overflow-wrap: anywhere;
   }
-  .preset-meta {
+  .cat-meta {
+    margin-left: auto;
+    font-size: 10.5px;
+    color: var(--fg-3);
+  }
+  .cat-go {
     font-family: var(--font-mono);
     font-size: 10px;
-    color: var(--fg-3);
-    overflow-wrap: anywhere;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    opacity: 0;
+    flex: none;
+  }
+  .cat-row:hover .cat-go {
+    opacity: 1;
   }
   .skill-toggle {
     display: flex;
@@ -2544,8 +2597,13 @@ ${preset.key_url ?? ''}`}
     .settings-inner {
       padding: 24px 16px 64px;
     }
-    .preset-filter {
+    .catalog-filter {
       width: 100%;
+      margin-left: 0;
+    }
+    .conn-url,
+    .conn-actions,
+    .login-box {
       margin-left: 0;
     }
     .mcp-add-grid {

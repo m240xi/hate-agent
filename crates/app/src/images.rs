@@ -109,10 +109,14 @@ pub fn attachment(mime: &str, data: &str) -> Result<hate_core::ImagePart, String
 }
 
 pub fn default_name(source: &str, ext: &str) -> String {
-    let from_path = Path::new(source.trim())
+    let trimmed = source.trim();
+    // Take the basename on either separator: Windows paths keep their
+    // backslashes on Linux, where Path::file_stem returns the whole string.
+    let tail = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    let from_path = Path::new(tail)
         .file_stem()
         .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty() && !source.trim().starts_with("data:"))
+        .filter(|s| !s.is_empty() && !trimmed.starts_with("data:"))
         .map_or_else(|| "generated-image".to_string(), str::to_string);
     format!("{from_path}.{ext}")
 }

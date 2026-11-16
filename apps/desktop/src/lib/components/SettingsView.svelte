@@ -438,6 +438,11 @@
     return 'OpenAI-compatible';
   }
 
+  /** One letter for the tile, uppercase. */
+  function initial(p: ProviderInfo): string {
+    return (providerLabel(p.name).trim().charAt(0) || '?').toUpperCase();
+  }
+
   let mcpRows = $state<McpServerInfo[]>([]);
   let mcpDirty = $state(false);
   let mcpBusy = $state(false);
@@ -777,11 +782,11 @@
 
     <section class="group" id="providers" hidden={active !== 'providers'}>
       <div class="prov-hud">
-        <span class="prov-tick" aria-hidden="true"></span>
-        <h2 class="prov-title">Providers</h2>
-        <span class="prov-tick" aria-hidden="true"></span>
+        <h2 class="group-title">Providers</h2>
         <span class="grow"></span>
-        <span class="prov-count mono">{providers.length} installed</span>
+        <span class="prov-count mono">
+          {providers.length} installed · {providers.filter((p) => p.auth_kind !== 'none').length} connected
+        </span>
       </div>
       <p class="group-hint">
         Connect a provider to start chatting. Keys stay in the OS keychain;
@@ -800,7 +805,7 @@
             {@const isAcp = p.kind === 'acp'}
             <article class="provider" class:live={connected} class:fresh={justAdded === p.name}>
               <header class="provider-head">
-                <span class="status-dot" class:on={connected} aria-hidden="true"></span>
+                <span class="tile-mark" aria-hidden="true">{initial(p)}</span>
                 <span class="provider-name">{providerLabel(p.name)}</span>
                 {#if providerLabel(p.name) !== p.name}
                   <span class="provider-slug mono">{p.name}</span>
@@ -1835,50 +1840,27 @@ ${preset.key_url ?? ''}`}
   .theme-card.active .theme-name {
     color: var(--accent);
   }
-  /* ---- Providers: pixel HUD -------------------------------------------
-     A different visual language from the rest of Settings on purpose: the
-     provider page is a game-style roster — square panels, hard offset
-     shadows, LED lamps, Alagard heading and m5x7 labels, matching the
-     landing screen instead of the soft rounded cards. */
+  /* ---- Providers: connection ports ------------------------------------
+     Same tokens and soft depth as the rest of the app, but a layout no
+     other harness uses: a monogram tile on the left, identity on top, the
+     model and credentials in a footer row. */
   .prov-hud {
     display: flex;
-    align-items: center;
-    gap: 10px;
+    align-items: baseline;
+    gap: 12px;
     margin: 0 0 6px;
   }
-  .prov-title {
-    margin: 0;
-    font-family: 'Alagard', var(--font-mono);
-    font-weight: 400;
-    font-size: 26px;
-    line-height: 1;
-    letter-spacing: 0.01em;
-    color: var(--fg-0);
-    text-shadow: 0 2px 0 rgba(0, 0, 0, 0.55);
-  }
-  .prov-tick {
-    width: 8px;
-    height: 8px;
-    flex: none;
-    background: var(--accent);
-    box-shadow:
-      0 0 0 2px var(--bg-0),
-      0 0 0 3px var(--border-strong);
-    opacity: 0.85;
-  }
   .prov-count {
-    font-family: 'm5x7', var(--font-mono);
-    font-size: 12px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    font-size: 11px;
     color: var(--fg-3);
-    padding: 3px 8px;
-    border: 2px solid var(--border);
-    border-radius: 2px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    background: var(--bg-2);
   }
   .provider-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
     gap: 12px;
     margin-top: 14px;
   }
@@ -1886,81 +1868,61 @@ ${preset.key_url ?? ''}`}
     position: relative;
     display: flex;
     flex-direction: column;
-    padding: 12px 14px 13px;
-    background-color: var(--bg-1);
-    background-image: repeating-linear-gradient(
-      0deg,
-      rgba(255, 255, 255, 0.016) 0 1px,
-      transparent 1px 3px
-    );
-    border: 2px solid var(--border-strong);
-    border-radius: 2px;
-    box-shadow: 4px 4px 0 color-mix(in srgb, #000 42%, transparent);
+    padding: 14px 16px 13px;
+    background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--el-1);
     transition:
       border-color var(--motion),
-      box-shadow var(--motion),
-      transform var(--motion);
+      box-shadow var(--motion);
   }
   .provider:hover {
-    border-color: var(--fg-3);
-    transform: translate(-1px, -1px);
-    box-shadow: 5px 5px 0 color-mix(in srgb, #000 48%, transparent);
+    border-color: var(--border-strong);
+    box-shadow: var(--el-2);
   }
   .provider.live {
-    border-color: color-mix(in srgb, var(--ok) 40%, var(--border-strong));
+    border-color: color-mix(in srgb, var(--ok) 26%, var(--border));
   }
   .provider.fresh {
-    border-color: var(--accent);
-    box-shadow:
-      4px 4px 0 color-mix(in srgb, #000 42%, transparent),
-      0 0 0 2px var(--accent-dim);
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 1px var(--accent-dim);
   }
   .provider-head {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 7px;
-    margin-bottom: 6px;
+    gap: 8px;
+    margin-bottom: 7px;
   }
-  .status-dot {
-    width: 9px;
-    height: 9px;
+  .tile-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
     flex: none;
-    border-radius: 1px;
-    background: var(--bg-3);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg-3) 50%, transparent);
-  }
-  .status-dot.on {
-    background: var(--ok, #4ade80);
-    box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, #000 30%, transparent),
-      0 0 7px color-mix(in srgb, var(--ok, #4ade80) 60%, transparent);
-    animation: led-pulse 2.6s steps(2, jump-none) infinite;
-  }
-  @keyframes led-pulse {
-    50% {
-      opacity: 0.55;
-    }
-  }
-  :global(:root[data-ambient-motion='off']) .status-dot.on {
-    animation: none;
+    font-family: 'm5x7', var(--font-mono);
+    font-size: 17px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+    border-radius: 10px;
+    box-shadow: inset 0 1px 0 var(--hairline);
   }
   .provider-name {
-    font-family: 'm5x7', var(--font-mono);
-    font-size: 14px;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
+    font-size: 13px;
+    font-weight: 500;
     color: var(--fg-0);
   }
   .badge {
-    font-family: 'm5x7', var(--font-mono);
-    font-size: 10.5px;
-    letter-spacing: 0.1em;
-    padding: 2px 7px;
-    border: 1px solid var(--border-strong);
-    border-radius: 2px;
-    background: var(--bg-2);
-    color: var(--fg-3);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    background: var(--bg-3);
+    color: var(--fg-2);
     text-transform: uppercase;
   }
   .badge.exp {
@@ -1972,25 +1934,19 @@ ${preset.key_url ?? ''}`}
     color: var(--accent);
   }
   .badge.connected {
-    border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+    background: color-mix(in srgb, var(--ok) 14%, var(--bg-3));
     color: var(--ok, #4ade80);
-    background: color-mix(in srgb, var(--ok) 10%, var(--bg-2));
   }
   .grow {
     flex: 1 1 auto;
   }
   .remove-btn {
     flex: none;
-    font-family: 'm5x7', var(--font-mono);
-    font-size: 11.5px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    padding: 3px 9px;
-    border: 2px solid var(--border);
-    border-radius: 2px;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 8px;
+    border: 1px solid transparent;
     color: var(--fg-3);
-    background: var(--bg-0);
-    box-shadow: 2px 2px 0 color-mix(in srgb, #000 45%, transparent);
     transition:
       color var(--motion),
       background var(--motion),
@@ -1998,8 +1954,8 @@ ${preset.key_url ?? ''}`}
   }
   .remove-btn:hover {
     color: var(--err);
-    border-color: color-mix(in srgb, var(--err) 60%, transparent);
-    background: color-mix(in srgb, var(--err) 12%, var(--bg-0));
+    border-color: color-mix(in srgb, var(--err) 35%, transparent);
+    background: color-mix(in srgb, var(--err) 10%, transparent);
   }
   .remove-btn.confirming {
     color: #fff;
@@ -2008,8 +1964,7 @@ ${preset.key_url ?? ''}`}
   }
   .provider-meta {
     font-family: var(--font-mono);
-    font-size: 10.5px;
-    letter-spacing: 0.02em;
+    font-size: 11px;
     color: var(--fg-3);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2021,61 +1976,26 @@ ${preset.key_url ?? ''}`}
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    margin-top: 11px;
-    padding-top: 11px;
-    border-top: 1px dashed var(--border);
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
   }
   .provider-actions .input {
     flex: 1 1 180px;
-    min-width: 140px;
+    min-width: 150px;
     width: auto;
-    border-width: 2px;
-    border-radius: 2px;
-    font-size: 12px;
   }
   .model-select {
     flex: 0 1 240px;
     min-width: 150px;
     padding: 5px 8px;
     font-size: 11.5px;
-    border-width: 2px;
-    border-radius: 2px;
-    background: var(--bg-0);
-  }
-  /* Chunky pixel keys inside the roster. */
-  .provider .btn {
-    border-width: 2px;
-    border-radius: 2px;
-    padding: 5px 13px;
-    font-family: 'm5x7', var(--font-mono);
-    font-size: 12.5px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    background: var(--bg-2);
-    box-shadow: 2px 2px 0 color-mix(in srgb, #000 45%, transparent);
-    transition:
-      background var(--motion),
-      border-color var(--motion),
-      transform 60ms linear,
-      box-shadow 60ms linear;
-  }
-  .provider .btn:hover {
-    transform: translate(1px, 1px);
-    box-shadow: 1px 1px 0 color-mix(in srgb, #000 45%, transparent);
-  }
-  .provider .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--bg-0);
-  }
-  .provider .btn.ghost {
-    background: var(--bg-0);
   }
   .login-box {
     margin-top: 10px;
     padding: 10px 12px;
-    border: 1px dashed var(--border-strong);
-    border-radius: 2px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     background: var(--bg-0);
   }
   .login-box .provider-actions {
@@ -2084,8 +2004,7 @@ ${preset.key_url ?? ''}`}
     border-top: none;
   }
   .login-line {
-    font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--fg-1);
     margin: 0 0 8px;
     line-height: 1.65;
@@ -2099,12 +2018,10 @@ ${preset.key_url ?? ''}`}
   .login-line code {
     background: var(--bg-2);
     padding: 1px 6px;
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
   }
   .provider-hint {
-    font-family: 'm5x7', var(--font-mono);
     font-size: 11px;
-    letter-spacing: 0.06em;
     color: var(--fg-3);
     align-self: center;
   }
@@ -2119,11 +2036,11 @@ ${preset.key_url ?? ''}`}
     display: flex;
     align-items: baseline;
     gap: 8px;
-    font-family: 'm5x7', var(--font-mono);
-    font-size: 12px;
-    letter-spacing: 0.14em;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: var(--fg-2);
+    color: var(--fg-3);
     margin: 0;
   }
   .preset-count {
@@ -2139,23 +2056,12 @@ ${preset.key_url ?? ''}`}
     font-size: 11.5px;
   }
   .preset-sub {
-    font-family: 'm5x7', var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.16em;
+    font-size: 10px;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--fg-3);
-    margin: 16px 0 7px;
-    padding-left: 2px;
-  }
-  .preset-sub::before {
-    content: '';
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    margin-right: 8px;
-    vertical-align: 1px;
-    background: var(--accent);
-    opacity: 0.7;
+    color: var(--fg-4, var(--fg-3));
+    opacity: 0.75;
+    margin: 14px 0 6px;
   }
   .provider-slug {
     font-size: 10px;
@@ -2170,33 +2076,31 @@ ${preset.key_url ?? ''}`}
   .preset-card {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 3px;
     padding: 10px 12px;
-    background: var(--bg-1);
-    border: 2px solid var(--border);
-    border-radius: 2px;
-    box-shadow: 3px 3px 0 color-mix(in srgb, #000 40%, transparent);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--fg-0) 2.5%, var(--bg-1)),
+      var(--bg-1)
+    );
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     cursor: pointer;
     text-align: left;
     transition:
       border-color var(--motion),
-      transform var(--motion),
-      box-shadow var(--motion);
+      transform var(--motion);
   }
   .preset-card:hover:not(:disabled) {
     border-color: var(--accent);
-    transform: translate(-1px, -1px);
-    box-shadow: 4px 4px 0 color-mix(in srgb, #000 46%, transparent);
+    transform: translateY(-1px);
   }
   .preset-card:disabled {
     opacity: 0.45;
     cursor: default;
   }
   .preset-name {
-    font-family: 'm5x7', var(--font-mono);
-    font-size: 13px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    font-size: 12px;
     color: var(--fg-0);
     overflow-wrap: anywhere;
   }

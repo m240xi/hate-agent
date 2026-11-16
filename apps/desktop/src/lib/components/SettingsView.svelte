@@ -168,14 +168,6 @@
     loginBusy = false;
   }
 
-  async function disconnect(name: string): Promise<void> {
-    const m = await import('../ipc');
-    await m.authLogout(name).catch((e: unknown) => {
-      error = String(e);
-    });
-    await refresh();
-  }
-
   let presetQuery = $state('');
 
   const PRESET_GROUPS = [
@@ -259,10 +251,6 @@
   }
 
   async function loadProviderModels(name: string): Promise<void> {
-    if (modelLists[name]) {
-      modelLists = { ...modelLists, [name]: [] };
-      return;
-    }
     modelBusy = name;
     try {
       const m = await import('../ipc');
@@ -275,6 +263,11 @@
     }
   }
 
+  function onModelChange(provider: string, value: string): void {
+    if (value === '__load') void loadProviderModels(provider);
+    else if (value) void pickModel(provider, value);
+  }
+
   async function pickModel(provider: string, model: string): Promise<void> {
     await session.setModel(model, provider).catch((e: unknown) => {
       error = e instanceof Error ? e.message : String(e);
@@ -282,12 +275,31 @@
     await refresh();
   }
 
-  async function removeProvider(name: string): Promise<void> {
+  /** Two-step remove: the first click asks, the second takes it off the account. */
+  let confirmRemove = $state<string | null>(null);
+  let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function removeProvider(p: ProviderInfo): Promise<void> {
+    if (confirmRemove !== p.name) {
+      confirmRemove = p.name;
+      if (confirmTimer) clearTimeout(confirmTimer);
+      confirmTimer = setTimeout(() => (confirmRemove = null), 4000);
+      return;
+    }
+    confirmRemove = null;
+    if (confirmTimer) clearTimeout(confirmTimer);
     const m = await import('../ipc');
-    await m.providerRemove(name).catch((e: unknown) => {
-      error = String(e);
-    });
+    error = null;
+    try {
+      // The Google agent keeps its sign-in outside the keychain, so sign out
+      // first; provider_remove clears stored keys and OAuth tokens itself.
+      if (p.kind === 'acp') await m.antigravityLogout().catch(() => {});
+      await m.providerRemove(p.name);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
     await refresh();
+    void session.refreshModels();
   }
 
   async function connectClaude(): Promise<void> {
@@ -417,6 +429,13 @@
     if (p.auth_kind === 'api_key') return 'api key';
     if (p.auth_kind === 'env') return 'env key';
     return 'not connected';
+  }
+
+  /** What the endpoint speaks, in words rather than the internal kind. */
+  function kindLabel(p: ProviderInfo): string {
+    if (p.kind === 'acp') return 'Google Antigravity';
+    if (p.kind === 'anthropic') return 'Anthropic-compatible';
+    return 'OpenAI-compatible';
   }
 
   let mcpRows = $state<McpServerInfo[]>([]);
@@ -759,21 +778,23 @@
     <section class="group" id="providers" hidden={active !== 'providers'}>
       <h2 class="group-title">Providers</h2>
       <p class="group-hint">
-        Connect a provider to start chatting. Keys go to the OS
-        keychain; Portal logins use your subscription.
+        Connect a provider to start chatting. Keys stay in the OS keychain;
+        Remove forgets a provider, its key and its sign-in.
       </p>
 
       {#if !inTauri}
         <p class="muted">Provider management needs the desktop app.</p>
       {:else}
+        {#if providers.length === 0}
+          <p class="muted">No providers yet — pick one below to get started.</p>
+        {/if}
         <div class="provider-list">
           {#each providers as p (p.name)}
-            <div
-              class="provider"
-              class:live={p.auth_kind !== 'none'}
-              class:fresh={justAdded === p.name}
-            >
-              <div class="provider-head">
+            {@const connected = p.auth_kind !== 'none'}
+            {@const isAcp = p.kind === 'acp'}
+            <article class="provider" class:live={connected} class:fresh={justAdded === p.name}>
+              <header class="provider-head">
+                <span class="status-dot" class:on={connected} aria-hidden="true"></span>
                 <span class="provider-name">{providerLabel(p.name)}</span>
                 {#if providerLabel(p.name) !== p.name}
                   <span class="provider-slug mono">{p.name}</span>
@@ -781,81 +802,25 @@
                 {#if p.is_default}
                   <span class="badge">default</span>
                 {/if}
-                <span class="badge" class:connected={p.auth_kind !== 'none'}>
-                  {authLabel(p)}
-                </span>
-              </div>
-              <div class="provider-meta mono">
-                {p.kind} · {p.model}
-              </div>
-              <div class="provider-url mono" title={p.base_url}>{p.base_url}</div>
-              {#if p.kind !== 'acp'}
-                <div class="model-row">
-                  <button
-                    class="model-toggle"
-                    onclick={() => loadProviderModels(p.name)}
-                    disabled={modelBusy === p.name}
-                    aria-expanded={!!modelLists[p.name]?.length}
-                  >
-                    <Icon
-                      name={modelLists[p.name]?.length ? 'chevron-down' : 'chevron-right'}
-                      size={9}
-                    />
-                    {modelBusy === p.name ? 'loading models…' : 'Model'}
-                  </button>
-                  {#if modelLists[p.name]?.length}
-                    <select
-                      class="input model-select"
-                      value={p.model}
-                      onchange={(e) => pickModel(p.name, e.currentTarget.value)}
-                    >
-                      {#if !(modelLists[p.name] ?? []).some((x) => x.id === p.model)}
-                        <option value={p.model}>{p.model}</option>
-                      {/if}
-                      {#each modelLists[p.name] ?? [] as m (m.id)}
-                        <option value={m.id}>{m.id}</option>
-                      {/each}
-                    </select>
-                  {:else}
-                    <span class="model-current mono">{p.model || 'no model'}</span>
-                  {/if}
-                </div>
-              {/if}
+                <span class="badge" class:connected>{authLabel(p)}</span>
+                <span class="grow"></span>
+                <button
+                  class="remove-btn"
+                  class:confirming={confirmRemove === p.name}
+                  onclick={() => removeProvider(p)}
+                  title="Remove this provider and forget its key or sign-in"
+                >
+                  {confirmRemove === p.name ? 'Confirm remove' : 'Remove'}
+                </button>
+              </header>
 
-              {#if p.name === 'nous'}
-                {#if login}
-                  <div class="login-box">
-                    <p class="login-line">
-                      Approve at
-                      <a href={login.verification_url} target="_blank" rel="noreferrer">
-                        {login.verification_url}
-                      </a>
-                      — code <code>{login.user_code}</code>
-                    </p>
-                    <button class="btn ghost" onclick={cancelLogin}>Cancel</button>
-                  </div>
-                {:else}
-                  <div class="provider-actions">
-                    <button
-                      class="btn primary"
-                      onclick={connectNous}
-                      disabled={loginBusy || (p.auth_kind !== 'none' && p.auth_kind !== 'env')}
-                    >
-                      {p.auth_kind === 'none' ? 'Connect Nous Portal' : 'Reconnect'}
-                    </button>
-                    {#if p.auth_kind === 'api_key' || p.auth_kind === 'oauth'}
-                      <button class="btn" onclick={() => disconnect(p.name)}>Disconnect</button>
-                    {/if}
-                  </div>
-                {/if}
-                {#if loginError}
-                  <p class="error-text">{loginError}</p>
-                {/if}
-              {:else if p.kind === 'acp'}
+              <p class="provider-meta mono" title={p.base_url}>
+                {kindLabel(p)}{#if p.base_url} · {p.base_url}{/if}
+              </p>
+
+              {#if isAcp}
                 {#if agStatus && !agStatus.supported}
-                  <p class="provider-hint">
-                    Google doesn't publish Antigravity for this platform.
-                  </p>
+                  <p class="provider-hint">Google doesn't publish Antigravity for this platform.</p>
                 {:else if !agStatus?.installed}
                   <div class="provider-actions">
                     <button
@@ -865,7 +830,7 @@
                     >
                       {agBusy === 'install' ? agProgressLabel() : 'Install Antigravity'}
                     </button>
-                    <span class="provider-hint">~100 MB download from Google, checksum-verified</span>
+                    <span class="provider-hint">~100 MB from Google, checksum-verified</span>
                   </div>
                 {:else if agBusy === 'login'}
                   <div class="login-box">
@@ -888,124 +853,130 @@
                     >
                       Sign in with Google
                     </button>
-                    <span class="provider-hint">Google AI Free / Pro / Ultra plan</span>
+                    <span class="provider-hint">Free / Pro / Ultra plan</span>
                   </div>
                 {:else}
-                  <div class="provider-actions">
-                    <span class="provider-hint">
-                      Signed in · {agStatus.models} model{agStatus.models === 1 ? '' : 's'} · v{agStatus.installed}
-                    </span>
-                    <button
-                      class="btn"
-                      onclick={() => agRun('refresh', (m) => m.antigravityRefresh())}
-                      disabled={agBusy !== null}
-                    >
-                      {agBusy === 'refresh' ? 'Checking…' : 'Refresh'}
-                    </button>
-                    <button
-                      class="btn ghost"
-                      onclick={() => agRun('logout', (m) => m.antigravityLogout())}
-                      disabled={agBusy !== null}
-                    >
-                      Sign out
-                    </button>
-                  </div>
+                  <p class="provider-hint">
+                    Signed in · {agStatus.models} model{agStatus.models === 1 ? '' : 's'} · v{agStatus.installed}
+                  </p>
                 {/if}
-                <p class="provider-hint ag-note">
-                  Runs Google's official Antigravity agent with its own tools and prompt —
-                  Gemini models from your Google AI plan. hate-agent's token savings don't
-                  apply to these turns.
-                </p>
                 {#if agError}
                   <p class="error-text">{agError}</p>
                 {/if}
-                {#if !p.is_default}
-                  <div class="provider-actions">
-                    <button class="btn ghost" onclick={() => removeProvider(p.name)}>Remove</button>
-                  </div>
-                {/if}
               {:else}
-                {#if p.name === 'claude'}
-                  {#if claudeLogin}
-                    <div class="login-box">
-                      <p class="login-line">
-                        Approve at
-                        <a
-                          href={claudeLogin.authorize_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {claudeLogin.authorize_url}
-                        </a>
-                      </p>
-                      <div class="provider-actions">
-                        <input
-                          class="input"
-                          type="text"
-                          placeholder="paste the code shown…"
-                          bind:value={claudeCode}
-                          onkeydown={(e) => e.key === 'Enter' && finishClaudeLogin()}
-                        />
-                        <button
-                          class="btn primary"
-                          onclick={finishClaudeLogin}
-                          disabled={!claudeCode.trim() || claudeBusy}
-                        >
-                          {claudeBusy ? 'Signing in…' : 'Finish sign-in'}
-                        </button>
-                        <button
-                          class="btn ghost"
-                          onclick={() => {
-                            claudeLogin = null;
-                            claudeCode = '';
-                            claudeError = null;
-                          }}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  {:else}
-                    <div class="provider-actions">
-                      <button
-                        class="btn primary"
-                        onclick={connectClaude}
-                        disabled={claudeBusy}
-                      >
-                        {p.auth_kind === 'oauth'
-                          ? 'Reconnect Claude'
-                          : 'Sign in with Claude'}
-                      </button>
-                      <span class="provider-hint">Pro / Max subscription</span>
-                    </div>
-                  {/if}
-                  {#if claudeError}
-                    <p class="error-text">{claudeError}</p>
-                  {/if}
-                {/if}
                 <div class="provider-actions">
-                  <input
-                    class="input"
-                    type="password"
-                    placeholder={p.auth_kind === 'api_key' ? 'replace key…' : 'API key…'}
-                    bind:value={keyDrafts[p.name]}
-                  />
-                  <button
-                    class="btn"
-                    onclick={() => saveKey(p.name)}
-                    disabled={!keyDrafts[p.name]?.trim() || keyBusy === p.name}
+                  <select
+                    class="input model-select"
+                    aria-label="Model for {providerLabel(p.name)}"
+                    value={p.model}
+                    onchange={(e) => onModelChange(p.name, e.currentTarget.value)}
                   >
-                    {keyBusy === p.name ? 'Saving…' : 'Save key'}
-                  </button>
-                  {#if p.auth_kind === 'api_key' || p.auth_kind === 'oauth'}
-                    <button class="btn ghost" onclick={() => disconnect(p.name)}>Disconnect</button>
+                    {#if !(modelLists[p.name] ?? []).some((x) => x.id === p.model)}
+                      <option value={p.model}>{p.model || 'no model'}</option>
+                    {/if}
+                    {#if modelBusy === p.name}
+                      <option disabled>loading models…</option>
+                    {:else if !modelLists[p.name]?.length}
+                      <option value="__load">Load models…</option>
+                    {/if}
+                    {#each modelLists[p.name] ?? [] as m (m.id)}
+                      <option value={m.id}>{m.id}</option>
+                    {/each}
+                  </select>
+
+                  {#if p.name === 'nous' && !login}
+                    <button
+                      class="btn primary"
+                      onclick={connectNous}
+                      disabled={loginBusy || (p.auth_kind !== 'none' && p.auth_kind !== 'env')}
+                    >
+                      {p.auth_kind === 'none' ? 'Connect Nous Portal' : 'Reconnect'}
+                    </button>
                   {/if}
-                  {#if !p.is_default}
-                    <button class="btn ghost" onclick={() => removeProvider(p.name)}>Remove</button>
+
+                  {#if p.name === 'claude' && !claudeLogin}
+                    <button class="btn primary" onclick={connectClaude} disabled={claudeBusy}>
+                      {p.auth_kind === 'oauth' ? 'Reconnect' : 'Sign in with Claude'}
+                    </button>
+                  {/if}
+
+                  {#if (p.auth_kind === 'none' || p.auth_kind === 'env' || p.auth_kind === 'api_key') && !(p.name === 'nous' && login) && !(p.name === 'claude' && claudeLogin)}
+                    <input
+                      class="input"
+                      type="password"
+                      placeholder={p.auth_kind === 'api_key' ? 'replace key…' : 'API key…'}
+                      bind:value={keyDrafts[p.name]}
+                      onkeydown={(e) => e.key === 'Enter' && saveKey(p.name)}
+                    />
+                    <button
+                      class="btn"
+                      onclick={() => saveKey(p.name)}
+                      disabled={!keyDrafts[p.name]?.trim() || keyBusy === p.name}
+                    >
+                      {keyBusy === p.name ? 'Saving…' : 'Save key'}
+                    </button>
                   {/if}
                 </div>
+
+                {#if p.name === 'nous' && login}
+                  <div class="login-box">
+                    <p class="login-line">
+                      Approve at
+                      <a href={login.verification_url} target="_blank" rel="noreferrer">
+                        {login.verification_url}
+                      </a>
+                      — code <code>{login.user_code}</code>
+                    </p>
+                    <div class="provider-actions">
+                      <button class="btn ghost" onclick={cancelLogin}>Cancel</button>
+                    </div>
+                  </div>
+                {/if}
+                {#if p.name === 'nous' && loginError}
+                  <p class="error-text">{loginError}</p>
+                {/if}
+
+                {#if p.name === 'claude' && claudeLogin}
+                  <div class="login-box">
+                    <p class="login-line">
+                      Approve at
+                      <a href={claudeLogin.authorize_url} target="_blank" rel="noreferrer">
+                        {claudeLogin.authorize_url}
+                      </a>
+                    </p>
+                    <div class="provider-actions">
+                      <input
+                        class="input"
+                        type="text"
+                        placeholder="paste the code shown…"
+                        bind:value={claudeCode}
+                        onkeydown={(e) => e.key === 'Enter' && finishClaudeLogin()}
+                      />
+                      <button
+                        class="btn primary"
+                        onclick={finishClaudeLogin}
+                        disabled={!claudeCode.trim() || claudeBusy}
+                      >
+                        {claudeBusy ? 'Signing in…' : 'Finish sign-in'}
+                      </button>
+                      <button
+                        class="btn ghost"
+                        onclick={() => {
+                          claudeLogin = null;
+                          claudeCode = '';
+                          claudeError = null;
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+                {#if p.name === 'claude' && claudeError}
+                  <p class="error-text">{claudeError}</p>
+                {/if}
               {/if}
-            </div>
+            </article>
           {/each}
 
           {#if addablePresets.length > 0}
@@ -1766,7 +1737,6 @@ ${preset.key_url ?? ''}`}
 
   .provider-name,
   .provider-meta,
-  .provider-url,
   .about-grid dd,
   .login-line,
   .login-line code {
@@ -1867,25 +1837,52 @@ ${preset.key_url ?? ''}`}
   .provider {
     position: relative;
     overflow: hidden;
-    padding: 16px 18px 16px 20px;
+    padding: 14px 16px 14px 18px;
+    background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--el-1);
+    transition:
+      border-color var(--motion),
+      box-shadow var(--motion);
+  }
+  .provider:hover {
+    border-color: var(--border-strong);
   }
   .provider::before {
     content: '';
     position: absolute;
-    inset: 14px auto 14px 0;
+    inset: 12px auto 12px 0;
     width: 2px;
     border-radius: 2px;
-    background: var(--border);
+    background: var(--border-strong);
   }
   .provider.live::before {
-    background: color-mix(in srgb, var(--ok) 65%, transparent);
+    background: color-mix(in srgb, var(--ok) 70%, transparent);
+  }
+  .provider.fresh {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 1px var(--accent-dim);
   }
   .provider-head {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 3px;
+    gap: 7px;
+    margin-bottom: 4px;
+  }
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--fg-4, var(--fg-3));
+    opacity: 0.6;
+  }
+  .status-dot.on {
+    opacity: 1;
+    background: var(--ok, #4ade80);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--ok, #4ade80) 55%, transparent);
   }
   .provider-name {
     font-size: 13px;
@@ -1914,58 +1911,38 @@ ${preset.key_url ?? ''}`}
     background: var(--accent-soft);
     color: var(--accent);
   }
-  .provider-meta {
-    font-size: 11.5px;
-    color: var(--fg-2);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .provider.fresh {
-    border-color: var(--accent-dim);
-    box-shadow: 0 0 0 1px var(--accent-dim);
-  }
-  .model-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 10px;
-  }
-  .model-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    flex: none;
-    font-size: 10.5px;
-    color: var(--fg-3);
-    padding: 3px 6px;
-    border-radius: 6px;
-  }
-  .model-toggle:hover:not(:disabled) {
-    color: var(--fg-1);
-    background: var(--bg-3);
-  }
-  .model-current {
-    font-size: 10.5px;
-    color: var(--fg-2);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .model-select {
-    width: auto;
-    padding: 4px 8px;
-    font-size: 11.5px;
+  .grow {
     flex: 1 1 auto;
-    min-width: 0;
   }
-  .provider-url {
+  .remove-btn {
+    flex: none;
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    color: var(--fg-3);
+    transition:
+      color var(--motion),
+      background var(--motion),
+      border-color var(--motion);
+  }
+  .remove-btn:hover {
+    color: var(--err);
+    border-color: color-mix(in srgb, var(--err) 40%, transparent);
+    background: color-mix(in srgb, var(--err) 10%, transparent);
+  }
+  .remove-btn.confirming {
+    color: #fff;
+    background: var(--err);
+    border-color: var(--err);
+  }
+  .provider-meta {
     font-size: 11px;
     color: var(--fg-3);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    margin-top: 2px;
+    margin: 0;
   }
   .provider-actions {
     display: flex;
@@ -1978,6 +1955,12 @@ ${preset.key_url ?? ''}`}
     flex: 1 1 200px;
     min-width: 160px;
     width: auto;
+  }
+  .model-select {
+    flex: 0 1 260px;
+    min-width: 170px;
+    padding: 4px 8px;
+    font-size: 11.5px;
   }
   .login-box {
     margin-top: 10px;
@@ -2275,12 +2258,6 @@ ${preset.key_url ?? ''}`}
   }
   .mcp-row.mcp-off {
     opacity: 0.55;
-  }
-  .ag-note {
-    margin: 10px 0 0;
-    font-size: 11px;
-    line-height: 1.6;
-    color: var(--fg-2);
   }
   .mcp-refresh {
     font-size: 10.5px;

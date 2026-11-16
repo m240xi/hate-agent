@@ -871,9 +871,10 @@ pub fn provider_remove(name: String) -> Result<(), String> {
     if !ctx.config.providers.contains_key(&name) {
         return Err(format!("unknown provider {name:?}"));
     }
-    if ctx.config.providers.len() <= 1 {
-        return Err("can't remove the last provider".to_string());
-    }
+    // Removing a provider must also take it off the account: drop the stored
+    // key or OAuth tokens first, so a re-added provider starts from scratch and
+    // a removed one can never be silently reused. A missing credential is fine.
+    let _ = ctx.logout(&name);
     ctx.config.providers.remove(&name);
     if ctx.config.default_provider.as_deref() == Some(name.as_str()) {
         ctx.config.default_provider = ctx.config.providers.keys().next().cloned();

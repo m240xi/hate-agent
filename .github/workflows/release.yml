@@ -27,7 +27,7 @@ jobs:
         run: |
           prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           if [ -n "$prev" ]; then range="${prev}..HEAD"; else range="HEAD"; fi
-          git log $range --no-merges --pretty=format:'- %s' | head -40 > notes.md
+          git log $range --no-merges --pretty=tformat:'- %s' | head -40 > notes.md
           {
             echo "notes<<NOTES_EOF"
             cat notes.md

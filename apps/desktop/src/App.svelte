@@ -80,6 +80,55 @@
     document.documentElement.dataset.density = session.density;
   });
 
+  // Glass mode: a cursor-following rim light on each pane's edge. Positions are
+  // written in the pane's own coordinates, so the gradient needs no
+  // fixed-attachment background. One rAF loop eases toward the pointer and
+  // stops once the light catches up. This follows input rather than playing
+  // on its own, so it stays on even when the OS asks for reduced motion.
+  let ambient = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    if (!session.glass) return;
+    let frame = 0;
+    let targetX = 0;
+    let targetY = 0;
+    let x = 0;
+    let y = 0;
+    let primed = false;
+    const paint = (): void => {
+      frame = 0;
+      x += (targetX - x) * 0.24;
+      y += (targetY - y) * 0.24;
+      const settled = Math.abs(targetX - x) < 0.5 && Math.abs(targetY - y) < 0.5;
+      if (settled) {
+        x = targetX;
+        y = targetY;
+      }
+      for (const el of document.querySelectorAll<HTMLElement>('.glass-pane')) {
+        const r = el.getBoundingClientRect();
+        el.style.setProperty('--gx', `${(x - r.left).toFixed(1)}px`);
+        el.style.setProperty('--gy', `${(y - r.top).toFixed(1)}px`);
+      }
+      ambient?.style.setProperty('--px', (x / window.innerWidth - 0.5).toFixed(3));
+      ambient?.style.setProperty('--py', (y / window.innerHeight - 0.5).toFixed(3));
+      if (!settled) frame = requestAnimationFrame(paint);
+    };
+    const onMove = (e: PointerEvent): void => {
+      targetX = e.clientX;
+      targetY = e.clientY;
+      if (!primed) {
+        primed = true;
+        x = targetX;
+        y = targetY;
+      }
+      if (!frame) frame = requestAnimationFrame(paint);
+    };
+    window.addEventListener('pointermove', onMove, { passive: true });
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  });
+
   {
     const r = Number(localStorage.getItem('hate:pane:right'));
     if (r) session.rightWidth = r;
@@ -162,6 +211,15 @@
   {/if}
 {/snippet}
 
+{#if session.glass}
+  <div class="glass-ambient" bind:this={ambient} aria-hidden="true">
+    <span class="orb a"></span>
+    <span class="orb b"></span>
+    <span class="orb c"></span>
+    <span class="orb d"></span>
+  </div>
+{/if}
+
 <div class="shell">
   {#if session.mode === 'home'}
     <header class="topbar" role="presentation" onmousedown={dragRegion}>
@@ -173,7 +231,7 @@
       <Landing />
     </div>
   {:else}
-    <div class="frame">
+    <div class="frame" role="presentation" onmousedown={(e) => e.target === e.currentTarget && dragRegion(e)}>
       {#if !session.sidebarCollapsed}
         <Sidebar />
       {/if}

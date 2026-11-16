@@ -39,7 +39,7 @@
 </script>
 
 <aside
-  class="panel"
+  class="panel glass-pane"
   style:width="{session.rightWidth}px"
   style:--panel-w="{session.rightWidth - 1}px"
   aria-label="Side panel"

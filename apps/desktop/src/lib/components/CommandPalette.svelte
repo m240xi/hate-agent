@@ -41,6 +41,7 @@
     { name: '/model', hint: `cycle model (now ${session.model || '—'})`, group: 'model', run: () => void session.cycleModel() },
     { name: '/thinking', hint: `cycle thinking level (now ${session.thinkingLevel})`, group: 'model', run: () => session.cycleThinking() },
     { name: '/theme', hint: `cycle palette (now ${session.theme})`, group: 'view', run: () => cycleTheme() },
+    { name: '/glass', hint: `experimental glass effect (now ${session.glass ? 'on' : 'off'})`, group: 'view', run: () => session.setGlass(!session.glass) },
     { name: '/density', hint: `transcript density (now ${session.density})`, group: 'view', run: () => session.setDensity(session.density === 'compact' ? 'comfortable' : 'compact') },
     { name: '/activity', hint: session.panelOpen ? 'hide the side panel' : 'show tokens, plan and checkpoints', group: 'view', run: () => (session.panelOpen ? session.setPanel(false) : session.openActivity()) },
     { name: '/export md', hint: 'write the transcript as Markdown', group: 'export', run: () => void session.exportTo('md') },

@@ -261,6 +261,10 @@ class SessionStore {
     else if (MODES.includes(saved as AppMode)) this.mode = saved as AppMode;
     const savedTheme = localStorage.getItem('hate:theme');
     if (isThemeId(savedTheme)) this.theme = savedTheme;
+    // Drop a theme id we no longer ship (e.g. a retired palette) so the
+    // fallback to Auto isn't re-evaluated on every launch.
+    else if (savedTheme) localStorage.removeItem('hate:theme');
+    this.glass = localStorage.getItem('hate:glass') === 'on';
     const savedThinking = localStorage.getItem('hate:thinking');
     if (isThinkingLevel(savedThinking)) this.thinkingLevel = savedThinking;
     this.applyTheme();
@@ -1494,8 +1498,19 @@ class SessionStore {
     this.applyTheme();
   }
 
+  /** Experimental: frosted, floating glass panes over an ambient light field. */
+  glass = $state(false);
+
+  setGlass(on: boolean): void {
+    this.glass = on;
+    localStorage.setItem('hate:glass', on ? 'on' : 'off');
+    this.applyTheme();
+  }
+
   private applyTheme(): void {
     if (typeof document === 'undefined') return;
+    if (this.glass) document.documentElement.dataset.glass = '';
+    else document.documentElement.removeAttribute('data-glass');
     if (this.theme === 'auto') {
       document.documentElement.removeAttribute('data-theme');
     } else {

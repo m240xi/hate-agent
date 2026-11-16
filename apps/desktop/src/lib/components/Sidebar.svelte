@@ -96,7 +96,7 @@
 </script>
 
 <aside
-  class="sidebar"
+  class="sidebar glass-pane"
   aria-label="Sidebar"
   transition:slide={{ axis: 'x', duration: ms(200), easing: cubicOut }}
 >

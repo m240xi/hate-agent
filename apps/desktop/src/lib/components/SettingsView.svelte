@@ -640,7 +640,7 @@
   }
 </script>
 
-<div class="settings">
+<div class="settings glass-pane">
   <div class="pane" bind:this={paneEl}>
   {#if session.sidebarCollapsed}
     <nav class="dock" aria-label="Settings sections">
@@ -705,6 +705,22 @@
           </div>
           <span class="density-hint">Trims vertical rhythm in the transcript.</span>
         </div>
+        <label class="pref-row">
+          <span class="pref-text">
+            <span class="pref-name">
+              Glass effect <span class="badge exp">experimental</span>
+            </span>
+            <span class="pref-hint">
+              Floating frosted panes over a soft ambient light that follows your cursor.
+            </span>
+          </span>
+          <input
+            class="switch"
+            type="checkbox"
+            checked={session.glass}
+            onchange={(e) => session.setGlass(e.currentTarget.checked)}
+          />
+        </label>
       </div>
     </section>
 
@@ -1848,6 +1864,14 @@ ${preset.key_url ?? ''}`}
     background: var(--bg-3);
     color: var(--fg-2);
     text-transform: uppercase;
+  }
+  .badge.exp {
+    margin-left: 6px;
+    padding: 1px 6px;
+    font-size: 9px;
+    vertical-align: 1px;
+    background: var(--accent-soft);
+    color: var(--accent);
   }
   .badge.connected {
     background: var(--accent-soft);

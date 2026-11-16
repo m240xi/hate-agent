@@ -60,7 +60,7 @@
   }
 </script>
 
-<div class="conv" class:fresh>
+<div class="conv glass-pane" class:fresh>
   {#if fresh}
     <div class="sky" aria-hidden="true">
       {#each STARS as st, i (i)}
@@ -147,6 +147,7 @@
     mask-image: linear-gradient(180deg, #000 55%, transparent);
   }
   .star {
+    display: var(--sky-stars, block);
     position: absolute;
     width: 2px;
     height: 2px;

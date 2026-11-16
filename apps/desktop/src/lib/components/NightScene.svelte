@@ -341,8 +341,6 @@
         draw(ctx, scene, performance.now());
       });
 
-    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
     const resize = () => {
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
@@ -361,11 +359,11 @@
     ro.observe(canvas);
     resize();
 
-    if (!reduced) {
-      timer = setInterval(() => {
-        if (!document.hidden) draw(ctx, scene, performance.now());
-      }, FPS_MS);
-    }
+    // The scene is the app's centrepiece and its only moving art, so it keeps
+    // running even under reduced motion; CSS-level motion still settles.
+    timer = setInterval(() => {
+      if (!document.hidden) draw(ctx, scene, performance.now());
+    }, FPS_MS);
 
     return () => {
       ro.disconnect();

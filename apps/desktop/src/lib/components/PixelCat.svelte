@@ -56,10 +56,22 @@
   .z2 {
     animation-delay: 1.6s;
   }
+  /* The glyph is a still cat that blinks and snores — character, not motion —
+     so it keeps going even when the OS asks for reduced motion. Longhands (not
+     the `animation` shorthand) keep .z2's delay intact, and !important beats
+     the app-wide reduced-motion reset. */
   @media (prefers-reduced-motion: reduce) {
-    .sprite,
+    .sprite {
+      animation-name: frames !important;
+      animation-duration: 1.8s !important;
+      animation-timing-function: steps(2, jump-none) !important;
+      animation-iteration-count: infinite !important;
+    }
     .z {
-      animation: none;
+      animation-name: float !important;
+      animation-duration: 3.2s !important;
+      animation-timing-function: ease-out !important;
+      animation-iteration-count: infinite !important;
     }
   }
   @keyframes float {

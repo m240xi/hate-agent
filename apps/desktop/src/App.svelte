@@ -88,6 +88,9 @@
   let ambient = $state<HTMLDivElement | null>(null);
   $effect(() => {
     if (!session.glass) return;
+    const rim = session.motion !== 'reduced';
+    const parallax = session.ambientMotion === 'on';
+    if (!rim && !parallax) return;
     let frame = 0;
     let targetX = 0;
     let targetY = 0;
@@ -103,13 +106,17 @@
         x = targetX;
         y = targetY;
       }
-      for (const el of document.querySelectorAll<HTMLElement>('.glass-pane')) {
-        const r = el.getBoundingClientRect();
-        el.style.setProperty('--gx', `${(x - r.left).toFixed(1)}px`);
-        el.style.setProperty('--gy', `${(y - r.top).toFixed(1)}px`);
+      if (rim) {
+        for (const el of document.querySelectorAll<HTMLElement>('.glass-pane')) {
+          const r = el.getBoundingClientRect();
+          el.style.setProperty('--gx', `${(x - r.left).toFixed(1)}px`);
+          el.style.setProperty('--gy', `${(y - r.top).toFixed(1)}px`);
+        }
       }
-      ambient?.style.setProperty('--px', (x / window.innerWidth - 0.5).toFixed(3));
-      ambient?.style.setProperty('--py', (y / window.innerHeight - 0.5).toFixed(3));
+      if (parallax) {
+        ambient?.style.setProperty('--px', (x / window.innerWidth - 0.5).toFixed(3));
+        ambient?.style.setProperty('--py', (y / window.innerHeight - 0.5).toFixed(3));
+      }
       if (!settled) frame = requestAnimationFrame(paint);
     };
     const onMove = (e: PointerEvent): void => {
@@ -470,10 +477,8 @@
         0 0 26px -4px color-mix(in srgb, var(--accent) 75%, transparent);
     }
   }
-  @media (prefers-reduced-motion: reduce) {
-    .updatebar {
-      animation: none;
-    }
+  :global(:root[data-ambient-motion='off']) .updatebar {
+    animation: none;
   }
   .wn-scrim {
     position: fixed;

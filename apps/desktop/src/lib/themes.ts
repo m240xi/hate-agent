@@ -8,277 +8,39 @@ export interface ThemeMeta {
   scheme?: 'dark' | 'light';
 }
 
-export const THEMES: ThemeMeta[] = [
-  {
-    id: 'auto',
-    label: 'Auto',
-    hint: 'follow the system',
-    bg: 'linear-gradient(135deg,#0a0a0c 50%,#edebe5 50%)',
-    accent: '#8d8a82',
-    fg: '#f0eee9',
-  },
-  {
-    id: 'dark',
-    label: 'Midnight',
-    hint: 'OLED black, warm mono',
-    bg: '#0a0a0c',
-    accent: '#efede6',
-    fg: '#f0eee9',
-    scheme: 'dark',
-  },
-  {
-    id: 'light',
-    label: 'Daylight',
-    hint: 'warm paper light',
-    bg: '#ffffff',
-    accent: '#1c1b18',
-    fg: '#1a1917',
-    scheme: 'light',
-  },
-  {
-    id: 'phosphor',
-    label: 'Phosphor',
-    hint: 'terminal green',
-    bg: '#071009',
-    accent: '#8fe6a8',
-    fg: '#e2f5e4',
-    scheme: 'dark',
-  },
-  {
-    id: 'ember',
-    label: 'Ember',
-    hint: 'campfire amber',
-    bg: '#140d09',
-    accent: '#f2a95e',
-    fg: '#f5ebe0',
-    scheme: 'dark',
-  },
-  {
-    id: 'sakura',
-    label: 'Sakura',
-    hint: 'night-flower pink',
-    bg: '#110c18',
-    accent: '#e8a0c4',
-    fg: '#f2ecf7',
-    scheme: 'dark',
-  },
-  {
-    id: 'kanagawa',
-    label: 'Kanagawa',
-    hint: 'sumi ink & wave gold',
-    bg: '#16161d',
-    accent: '#dca561',
-    fg: '#dcd7ba',
-    scheme: 'dark',
-  },
-  {
-    id: 'carbon',
-    label: 'Carbon',
-    hint: 'matte gunmetal & ice blue',
-    bg: '#0c0d10',
-    accent: '#78a9ff',
-    fg: '#f2f4f8',
-    scheme: 'dark',
-  },
-  {
-    id: 'graphite',
-    label: 'Graphite',
-    hint: 'machined titanium mono',
-    bg: '#111316',
-    accent: '#cbd5e1',
-    fg: '#eef2f6',
-    scheme: 'dark',
-  },
-  {
-    id: 'alpine',
-    label: 'Alpine',
-    hint: 'glacier pine & crisp cyan',
-    bg: '#081215',
-    accent: '#67e8f9',
-    fg: '#e6f6f8',
-    scheme: 'dark',
-  },
-  {
-    id: 'tide',
-    label: 'Tide',
-    hint: 'abyssal blue & bioluminescent teal',
-    bg: '#07101c',
-    accent: '#38bdf8',
-    fg: '#e4f1fb',
-    scheme: 'dark',
-  },
-  {
-    id: 'after-rain',
-    label: 'After Rain',
-    hint: 'wet slate & petrichor moss',
-    bg: '#0b1214',
-    accent: '#6ee7b7',
-    fg: '#e5f2ee',
-    scheme: 'dark',
-  },
-  {
-    id: 'aurora',
-    label: 'Aurora',
-    hint: 'polar night & boreal emerald',
-    bg: '#080f1a',
-    accent: '#4ade80',
-    fg: '#e8f5ee',
-    scheme: 'dark',
-  },
-  {
-    id: 'seafoam',
-    label: 'Seafoam',
-    hint: 'kelp shadow & mint foam',
-    bg: '#061311',
-    accent: '#5eead4',
-    fg: '#e4f7f4',
-    scheme: 'dark',
-  },
-  {
-    id: 'orbit',
-    label: 'Orbit',
-    hint: 'deep cosmos & starlight indigo',
-    bg: '#080917',
-    accent: '#818cf8',
-    fg: '#eaeaff',
-    scheme: 'dark',
-  },
-  {
-    id: 'nebula',
-    label: 'Nebula',
-    hint: 'cosmic void & astral magenta',
-    bg: '#0e0818',
-    accent: '#e879f9',
-    fg: '#f6ebfa',
-    scheme: 'dark',
-  },
-  {
-    id: 'violet-hour',
-    label: 'Violet Hour',
-    hint: 'twilight plum & soft lavender',
-    bg: '#100b1e',
-    accent: '#c084fc',
-    fg: '#f2ecfc',
-    scheme: 'dark',
-  },
-  {
-    id: 'dusk',
-    label: 'Dusk',
-    hint: 'horizon indigo & sunset coral',
-    bg: '#120d1a',
-    accent: '#fb7185',
-    fg: '#f7ecf0',
-    scheme: 'dark',
-  },
-  {
-    id: 'mirage',
-    label: 'Mirage',
-    hint: 'desert night & oasis gold',
-    bg: '#120f0a',
-    accent: '#fbbf24',
-    fg: '#f6f0e4',
-    scheme: 'dark',
-  },
-  {
-    id: 'dune',
-    label: 'Dune',
-    hint: 'arrakis spice & warm ochre',
-    bg: '#150e08',
-    accent: '#fb923c',
-    fg: '#f7ece0',
-    scheme: 'dark',
-  },
-  {
-    id: 'streak-fire',
-    label: 'Streak Fire',
-    hint: 'molten obsidian & blaze flame',
-    bg: '#130705',
-    accent: '#ff6b35',
-    fg: '#f9ebe6',
-    scheme: 'dark',
-  },
-  {
-    id: 'plasma',
-    label: 'Plasma',
-    hint: 'ultraviolet & electric arc',
-    bg: '#0a0616',
-    accent: '#a855f7',
-    fg: '#f0ebfc',
-    scheme: 'dark',
-  },
-  {
-    id: 'paper',
-    label: 'Paper',
-    hint: 'archival ink on warm vellum',
-    bg: '#f7f3eb',
-    accent: '#9a4a1a',
-    fg: '#231f1b',
-    scheme: 'light',
-  },
-  {
-    id: 'shine',
-    label: 'Shine',
-    hint: 'sunlit alabaster & warm gold',
-    bg: '#fcfaf3',
-    accent: '#c97708',
-    fg: '#221d14',
-    scheme: 'light',
-  },
-  {
-    id: 'daybreak',
-    label: 'Daybreak',
-    hint: 'morning sky & horizon blue',
-    bg: '#f4f8fc',
-    accent: '#0284c7',
-    fg: '#12202e',
-    scheme: 'light',
-  },
-  {
-    id: 'frost',
-    label: 'Frost',
-    hint: 'arctic snow & glacier cyan',
-    bg: '#f3f9fb',
-    accent: '#0891b2',
-    fg: '#10242b',
-    scheme: 'light',
-  },
-  {
-    id: 'blossom',
-    label: 'Blossom',
-    hint: 'petal cream & cherry rose',
-    bg: '#fdf5f7',
-    accent: '#d62860',
-    fg: '#29151d',
-    scheme: 'light',
-  },
-  {
-    id: 'peach',
-    label: 'Peach',
-    hint: 'soft nectar & terracotta',
-    bg: '#fdf6f0',
-    accent: '#d9531e',
-    fg: '#291a13',
-    scheme: 'light',
-  },
-  {
-    id: 'lilac',
-    label: 'Lilac',
-    hint: 'misty wisteria & royal iris',
-    bg: '#f8f5fc',
-    accent: '#7c3aed',
-    fg: '#1e162b',
-    scheme: 'light',
-  },
-  {
-    id: 'sherbet',
-    label: 'Sherbet',
-    hint: 'citrus cream & tangy coral',
-    bg: '#fef8f2',
-    accent: '#e13b57',
-    fg: '#28181b',
-    scheme: 'light',
-  },
-];
+import palettes from './palettes.json';
+
+export interface Palette {
+  id: string;
+  label: string;
+  hint: string;
+  scheme: 'auto' | 'dark' | 'light';
+  swatch: { bg: string; accent: string; fg: string };
+  /** The CSS custom properties emitted for this palette in styles/themes.css. */
+  tokens?: Record<string, string>;
+}
+
+const DATA = palettes as { themes: Palette[] };
+
+/**
+ * The grid reads its swatches and labels straight from the palette table, and
+ * `scripts/gen-themes.mjs` emits the matching token block from the same file —
+ * so a theme can't drift between its preview tile and its colours.
+ */
+export const THEMES: ThemeMeta[] = DATA.themes.map((p) => ({
+  id: p.id,
+  label: p.label,
+  hint: p.hint,
+  bg: p.swatch.bg,
+  accent: p.swatch.accent,
+  fg: p.swatch.fg,
+  ...(p.scheme === 'auto' ? {} : { scheme: p.scheme }),
+}));
+
+/** Palettes that define a token block (everything except the Auto entry). */
+export const PALETTES: Palette[] = DATA.themes.filter(
+  (p): p is Palette & { tokens: Record<string, string> } => p.tokens != null,
+);
 
 export function isThemeId(v: string | null): v is string {
   return v != null && THEMES.some((t) => t.id === v);

@@ -65,10 +65,7 @@
   <div class="hero">
     <div class="version pixel">v{version}</div>
     <h1 class="wordmark">hate-agent</h1>
-    <p class="tagline pixel">
-      A coding agent that spends fewer tokens per task — small prompt,
-      lazy tools, verified work. Built for the 3am club.
-    </p>
+    <p class="tagline pixel">Built for the 3am club.</p>
 
     <div class="plates">
       {#each PLATES as plate (plate.id)}

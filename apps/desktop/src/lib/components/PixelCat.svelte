@@ -56,24 +56,9 @@
   .z2 {
     animation-delay: 1.6s;
   }
-  /* The glyph is a still cat that blinks and snores — character, not motion —
-     so it keeps going even when the OS asks for reduced motion. Longhands (not
-     the `animation` shorthand) keep .z2's delay intact, and !important beats
-     the app-wide reduced-motion reset. */
-  @media (prefers-reduced-motion: reduce) {
-    .sprite {
-      animation-name: frames !important;
-      animation-duration: 1.8s !important;
-      animation-timing-function: steps(2, jump-none) !important;
-      animation-iteration-count: infinite !important;
-    }
-    .z {
-      animation-name: float !important;
-      animation-duration: 3.2s !important;
-      animation-timing-function: ease-out !important;
-      animation-iteration-count: infinite !important;
-    }
-  }
+  /* The blink and the zzz are character animation, not decorative motion, so
+     they ride on `data-motion` alone and survive "system + OS reduced"; only an
+     explicit "Reduced" stops them (see app.css). */
   @keyframes float {
     0% {
       transform: translate(0, 0);

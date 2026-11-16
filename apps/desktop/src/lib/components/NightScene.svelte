@@ -362,7 +362,9 @@
     // The scene is the app's centrepiece and its only moving art, so it keeps
     // running even under reduced motion; CSS-level motion still settles.
     timer = setInterval(() => {
-      if (!document.hidden) draw(ctx, scene, performance.now());
+      if (document.hidden) return;
+      if (document.documentElement.dataset.motion === 'reduced') return;
+      draw(ctx, scene, performance.now());
     }, FPS_MS);
 
     return () => {

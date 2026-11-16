@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "themes": "node ../../scripts/gen-themes.mjs",
+    "themes:check": "node ../../scripts/gen-themes.mjs --check",
+    "predev": "npm run themes",
+    "prebuild": "npm run themes"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0"

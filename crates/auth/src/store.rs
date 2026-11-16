@@ -46,6 +46,22 @@ pub struct Config {
     /// Flash the taskbar / raise a notification when a turn finishes unfocused.
     #[serde(default = "default_true")]
     pub notify_on_done: bool,
+
+    // Appearance. Kept here (rather than only in the webview's localStorage) so
+    // it travels with the config file and survives a fresh webview profile.
+    // `None` means "not chosen yet" — the UI falls back to its own default.
+    /// Palette id from the desktop theme table (`dark`, `paper`, …) or `auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    /// Experimental frosted-pane mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glass: Option<bool>,
+    /// Transcript density: `comfortable` or `compact`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density: Option<String>,
+    /// Motion policy: `system`, `full` or `reduced`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<String>,
 }
 
 impl Default for Config {
@@ -60,6 +76,10 @@ impl Default for Config {
             budget_day_usd: None,
             sound_on_done: false,
             notify_on_done: true,
+            theme: None,
+            glass: None,
+            density: None,
+            motion: None,
         }
     }
 }
@@ -209,5 +229,48 @@ impl AuthStore for MemoryStore {
             .expect("memory store poisoned")
             .remove(provider);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn config_from_before_appearance_still_loads() {
+        // A config written by an older build has no appearance keys at all; the
+        // `None` values mean "the UI picks its default".
+        let old = r#"
+default_provider = "nous"
+sound_on_done = true
+"#;
+        let cfg: Config = toml::from_str(old).expect("old config parses");
+        assert_eq!(cfg.theme, None);
+        assert_eq!(cfg.glass, None);
+        assert_eq!(cfg.density, None);
+        assert_eq!(cfg.motion, None);
+        assert!(cfg.sound_on_done);
+    }
+
+    #[test]
+    fn appearance_round_trips_and_is_omitted_when_unset() {
+        let mut cfg = Config::default();
+        let text = toml::to_string(&cfg).expect("serialise");
+        assert!(
+            !text.contains("theme"),
+            "unset appearance must not be written"
+        );
+
+        cfg.theme = Some("paper".into());
+        cfg.glass = Some(true);
+        cfg.density = Some("compact".into());
+        cfg.motion = Some("reduced".into());
+
+        let text = toml::to_string(&cfg).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.theme.as_deref(), Some("paper"));
+        assert_eq!(back.glass, Some(true));
+        assert_eq!(back.density.as_deref(), Some("compact"));
+        assert_eq!(back.motion.as_deref(), Some("reduced"));
     }
 }

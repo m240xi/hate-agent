@@ -115,10 +115,8 @@
       background-position: -110% 0;
     }
   }
-  @media (prefers-reduced-motion: reduce) {
-    .shimmer {
-      -webkit-text-fill-color: currentColor;
-      color: var(--fg-2);
-    }
+  :global(:root[data-ambient-motion='off']) .shimmer {
+    -webkit-text-fill-color: currentColor;
+    color: var(--fg-2);
   }
 </style>

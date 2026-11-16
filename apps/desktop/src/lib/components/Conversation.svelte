@@ -173,11 +173,9 @@
       display: none;
     }
   }
-  @media (prefers-reduced-motion: reduce) {
-    .star {
-      animation: none;
-      opacity: 0.35;
-    }
+  :global(:root[data-ambient-motion='off']) .star {
+    animation: none;
+    opacity: 0.35;
   }
   .hello,
   .dock,

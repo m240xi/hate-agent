@@ -209,6 +209,11 @@ export interface Prefs {
   budget_day_usd: number | null;
   sound_on_done: boolean;
   notify_on_done: boolean;
+  /** Appearance, stored in the config file; null/undefined means "not set". */
+  theme?: string | null;
+  glass?: boolean | null;
+  density?: string | null;
+  motion?: string | null;
 }
 
 export async function prefsGet(): Promise<Prefs> {
@@ -216,12 +221,7 @@ export async function prefsGet(): Promise<Prefs> {
 }
 
 export async function prefsSet(p: Prefs): Promise<void> {
-  return invoke<void>('prefs_set', {
-    budgetSessionUsd: p.budget_session_usd,
-    budgetDayUsd: p.budget_day_usd,
-    soundOnDone: p.sound_on_done,
-    notifyOnDone: p.notify_on_done,
-  });
+  return invoke<void>('prefs_set', { prefs: p });
 }
 
 export interface UsageTotalsInfo {

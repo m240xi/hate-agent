@@ -55,6 +55,12 @@
   import { THEMES } from '../themes';
   import { SETTINGS_SECTIONS } from '../settings';
 
+  const MOTION_MODES = [
+    { id: 'system', label: 'System', hint: 'follow the OS animation setting' },
+    { id: 'full', label: 'Full', hint: 'always animate' },
+    { id: 'reduced', label: 'Reduced', hint: 'settle all motion' },
+  ] as const;
+
   const SECTIONS = SETTINGS_SECTIONS;
 
   const active = $derived(
@@ -704,6 +710,27 @@
             </button>
           </div>
           <span class="density-hint">Trims vertical rhythm in the transcript.</span>
+        </div>
+        <div class="density-row">
+          <span class="density-label">Motion</span>
+          <div class="range" role="group" aria-label="Motion">
+            {#each MOTION_MODES as m (m.id)}
+              <button
+                class="range-btn"
+                class:active={session.motion === m.id}
+                onclick={() => session.setMotion(m.id)}
+                aria-pressed={session.motion === m.id}
+                title={m.hint}
+              >
+                {m.label}
+              </button>
+            {/each}
+          </div>
+          <span class="density-hint">
+            {session.motion === 'system' && session.ambientMotion === 'off'
+              ? 'Your system asks for less motion — fades and drift are settling, the cat still blinks.'
+              : 'System follows your OS; Full keeps fades and drift on; Reduced settles everything.'}
+          </span>
         </div>
         <label class="pref-row">
           <span class="pref-text">

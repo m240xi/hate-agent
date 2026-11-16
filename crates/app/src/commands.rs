@@ -981,12 +981,35 @@ pub fn presence_set(state: State<'_, PresenceState>, enabled: bool) -> Result<()
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct Prefs {
     pub budget_session_usd: Option<f64>,
     pub budget_day_usd: Option<f64>,
     pub sound_on_done: bool,
     pub notify_on_done: bool,
+    pub theme: Option<String>,
+    pub glass: Option<bool>,
+    pub density: Option<String>,
+    pub motion: Option<String>,
+}
+
+/// Palette ids are slugs; reject anything that isn't (the UI ignores ids it
+/// doesn't know, this just keeps junk out of the config file).
+fn sane_theme(v: Option<String>) -> Option<String> {
+    v.filter(|t| {
+        !t.is_empty()
+            && t.len() <= 32
+            && t.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    })
+}
+
+fn sane_density(v: Option<String>) -> Option<String> {
+    v.filter(|d| matches!(d.as_str(), "compact" | "comfortable"))
+}
+
+fn sane_motion(v: Option<String>) -> Option<String> {
+    v.filter(|m| matches!(m.as_str(), "system" | "full" | "reduced"))
 }
 
 #[tauri::command]
@@ -998,23 +1021,26 @@ pub fn prefs_get() -> Result<Prefs, String> {
         budget_day_usd: ctx.config.budget_day_usd,
         sound_on_done: ctx.config.sound_on_done,
         notify_on_done: ctx.config.notify_on_done,
+        theme: ctx.config.theme.clone(),
+        glass: ctx.config.glass,
+        density: ctx.config.density.clone(),
+        motion: ctx.config.motion.clone(),
     })
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn prefs_set(
-    budget_session_usd: Option<f64>,
-    budget_day_usd: Option<f64>,
-    sound_on_done: bool,
-    notify_on_done: bool,
-) -> Result<(), String> {
+pub fn prefs_set(prefs: Prefs) -> Result<(), String> {
     let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
     let sane = |v: Option<f64>| v.filter(|n| n.is_finite() && *n > 0.0);
-    ctx.config.budget_session_usd = sane(budget_session_usd);
-    ctx.config.budget_day_usd = sane(budget_day_usd);
-    ctx.config.sound_on_done = sound_on_done;
-    ctx.config.notify_on_done = notify_on_done;
+    ctx.config.budget_session_usd = sane(prefs.budget_session_usd);
+    ctx.config.budget_day_usd = sane(prefs.budget_day_usd);
+    ctx.config.sound_on_done = prefs.sound_on_done;
+    ctx.config.notify_on_done = prefs.notify_on_done;
+    ctx.config.theme = sane_theme(prefs.theme);
+    ctx.config.glass = prefs.glass;
+    ctx.config.density = sane_density(prefs.density);
+    ctx.config.motion = sane_motion(prefs.motion);
     ctx.config.save().map_err(|e| e.to_string())
 }
 
@@ -2208,5 +2234,37 @@ mod preset_tests {
                     || p.auth == "agent"),
             "a keyed preset is missing its env hint"
         );
+    }
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use super::{sane_density, sane_motion, sane_theme};
+
+    #[test]
+    fn palette_ids_are_slugs() {
+        assert_eq!(sane_theme(Some("dark".into())).as_deref(), Some("dark"));
+        assert_eq!(
+            sane_theme(Some("after-rain".into())).as_deref(),
+            Some("after-rain")
+        );
+        assert_eq!(sane_theme(Some("../../etc".into())), None);
+        assert_eq!(sane_theme(Some(String::new())), None);
+        assert_eq!(sane_theme(Some("Paper".into())), None);
+        assert_eq!(sane_theme(None), None);
+    }
+
+    #[test]
+    fn enums_are_closed() {
+        assert_eq!(
+            sane_density(Some("compact".into())).as_deref(),
+            Some("compact")
+        );
+        assert_eq!(sane_density(Some("airy".into())), None);
+        assert_eq!(
+            sane_motion(Some("reduced".into())).as_deref(),
+            Some("reduced")
+        );
+        assert_eq!(sane_motion(Some("fast".into())), None);
     }
 }

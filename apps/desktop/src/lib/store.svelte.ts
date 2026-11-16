@@ -213,6 +213,10 @@ class SessionStore {
     budget_day_usd: null,
     sound_on_done: false,
     notify_on_done: true,
+    theme: null,
+    glass: null,
+    density: null,
+    motion: null,
   });
   todayCostUsd = $state(0);
   budgetPrompt = $state(false);
@@ -224,9 +228,23 @@ class SessionStore {
   usageDays = $state(30);
 
   density = $state<'comfortable' | 'compact'>('comfortable');
+
+  /**
+   * Motion policy. Two tiers, because "reduce motion" means different things
+   * for a decorative scene than for a fade:
+   *  - `motion`      the choice itself, mirrored to `data-motion`.
+   *  - `ambientMotion` whether *decorative* motion (fades, drift, twinkle,
+   *    shimmer) may run, mirrored to `data-ambient-motion`. Off under an
+   *    explicit "Reduced" and, on "System", when the OS asks for less motion.
+   * Character animation (the mascot, the landing scene) is not decorative
+   * movement — it is the app's identifying art — so it follows `motion` only.
+   */
+  motion = $state<'system' | 'full' | 'reduced'>('system');
+  ambientMotion = $state<'on' | 'off'>('on');
   paletteOpen = $state(false);
 
   private unlisten: UnlistenFn | null = null;
+  private motionUnlisten: (() => void) | null = null;
   private unlistenUpdate: UnlistenFn | null = null;
   private fixtureTimers: ReturnType<typeof setTimeout>[] = [];
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -267,7 +285,13 @@ class SessionStore {
     this.glass = localStorage.getItem('hate:glass') === 'on';
     const savedThinking = localStorage.getItem('hate:thinking');
     if (isThinkingLevel(savedThinking)) this.thinkingLevel = savedThinking;
+    const savedMotion = localStorage.getItem('hate:motion');
+    if (savedMotion === 'full' || savedMotion === 'reduced' || savedMotion === 'system') {
+      this.motion = savedMotion;
+    }
     this.applyTheme();
+    this.applyMotion();
+    this.watchSystemMotion();
     if (inTauri()) {
       const m = await import('./ipc');
       void m
@@ -327,6 +351,8 @@ class SessionStore {
 
   destroy(): void {
     this.unlisten?.();
+    this.motionUnlisten?.();
+    this.motionUnlisten = null;
     this.unlistenUpdate?.();
     this.fixtureTimers.forEach(clearTimeout);
     this.fixtureTimers = [];
@@ -763,7 +789,41 @@ class SessionStore {
     if (!inTauri()) return;
     const m = await import('./ipc');
     this.prefs = await m.prefsGet().catch(() => this.prefs);
+    this.adoptAppearance();
     if (this.dayBudget) void this.refreshToday();
+  }
+
+  /**
+   * Appearance lives in the config file (`Prefs`) with localStorage as the
+   * cache that browser mode and the first paint use. Saved prefs win; when a
+   * field is empty (a config from before appearance moved here) the current
+   * value is pushed up so the next launch agrees with this one.
+   */
+  private adoptAppearance(): void {
+    const p = this.prefs;
+    const migrate: Partial<Prefs> = {};
+    if (typeof p.theme === 'string' && isThemeId(p.theme)) this.theme = p.theme;
+    else if (p.theme == null) migrate.theme = this.theme;
+    if (typeof p.glass === 'boolean') this.glass = p.glass;
+    else if (p.glass == null) migrate.glass = this.glass;
+    if (p.density === 'compact' || p.density === 'comfortable') this.density = p.density;
+    else if (p.density == null) migrate.density = this.density;
+    if (p.motion === 'system' || p.motion === 'full' || p.motion === 'reduced') {
+      this.motion = p.motion;
+    } else if (p.motion == null) migrate.motion = this.motion;
+
+    this.applyTheme();
+    this.applyMotion();
+    this.cacheAppearance();
+    if (Object.keys(migrate).length > 0) void this.savePrefs(migrate);
+  }
+
+  /** Mirror appearance into localStorage for the next first paint. */
+  private cacheAppearance(): void {
+    localStorage.setItem('hate:theme', this.theme);
+    localStorage.setItem('hate:glass', this.glass ? 'on' : 'off');
+    localStorage.setItem('hate:density', this.density);
+    localStorage.setItem('hate:motion', this.motion);
   }
 
   async savePrefs(patch: Partial<Prefs>): Promise<void> {
@@ -782,6 +842,34 @@ class SessionStore {
   setDensity(d: 'comfortable' | 'compact'): void {
     this.density = d;
     localStorage.setItem('hate:density', d);
+    void this.savePrefs({ density: d });
+  }
+
+  setMotion(m: 'system' | 'full' | 'reduced'): void {
+    this.motion = m;
+    localStorage.setItem('hate:motion', m);
+    this.applyMotion();
+    void this.savePrefs({ motion: m });
+  }
+
+  private applyMotion(): void {
+    if (typeof document === 'undefined') return;
+    const osReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const off = this.motion === 'reduced' || (this.motion === 'system' && osReduced);
+    this.ambientMotion = off ? 'off' : 'on';
+    document.documentElement.dataset.motion = this.motion;
+    document.documentElement.dataset.ambientMotion = this.ambientMotion;
+  }
+
+  private watchSystemMotion(): void {
+    this.motionUnlisten?.();
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = (): void => {
+      if (this.motion === 'system') this.applyMotion();
+    };
+    mq.addEventListener('change', onChange);
+    this.motionUnlisten = () => mq.removeEventListener('change', onChange);
   }
 
   /** Today's spend, from the ledger, for the daily ceiling. */
@@ -1496,6 +1584,7 @@ class SessionStore {
     this.theme = theme;
     localStorage.setItem('hate:theme', theme);
     this.applyTheme();
+    void this.savePrefs({ theme });
   }
 
   /** Experimental: frosted, floating glass panes over an ambient light field. */
@@ -1505,6 +1594,7 @@ class SessionStore {
     this.glass = on;
     localStorage.setItem('hate:glass', on ? 'on' : 'off');
     this.applyTheme();
+    void this.savePrefs({ glass: on });
   }
 
   private applyTheme(): void {

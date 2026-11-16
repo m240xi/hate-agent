@@ -76,16 +76,23 @@ pub fn run() {
         commands::presence_set,
     ]);
 
+    // Regenerate the TypeScript bindings on every debug launch. A shape the
+    // exporter refuses (e.g. a u64 field, which Specta forbids as BigInt) used
+    // to take the whole app down before the window opened, which made
+    // `tauri dev` unusable; warn loudly instead and let the app boot.
     #[cfg(debug_assertions)]
-    builder
-        .export(
-            specta_typescript::Typescript::default(),
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../apps/desktop/src/bindings.ts"
-            ),
-        )
-        .expect("failed to export TypeScript bindings");
+    if let Err(e) = builder.export(
+        specta_typescript::Typescript::default(),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src/bindings.ts"
+        ),
+    ) {
+        eprintln!("warning: TypeScript bindings were not exported: {e}");
+        eprintln!(
+            "warning: apps/desktop/src/bindings.ts is now stale. Fix the offending export              (see the message above), then restart."
+        );
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

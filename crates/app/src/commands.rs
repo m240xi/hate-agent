@@ -761,7 +761,7 @@ pub struct ProviderPreset {
 }
 
 fn preset_catalog() -> Vec<ProviderPreset> {
-    hate_auth::presets::PRESETS
+    let mut out: Vec<ProviderPreset> = hate_auth::presets::PRESETS
         .iter()
         .map(|p| ProviderPreset {
             name: p.name.to_string(),
@@ -774,13 +774,59 @@ fn preset_catalog() -> Vec<ProviderPreset> {
             env_hint: p.env.map(str::to_string),
             key_url: p.keys.map(str::to_string),
         })
-        .collect()
+        .collect();
+    // A standalone entry for endpoints that aren't in the catalog. It lives here
+    // rather than in the shared catalog because the CLI has nothing to add from
+    // an empty row: the desktop sheet fills in URL, key, model and name.
+    out.push(ProviderPreset {
+        name: "custom".to_string(),
+        label: "Custom endpoint".to_string(),
+        group: "custom".to_string(),
+        kind: "openai_compat".to_string(),
+        base_url: String::new(),
+        model: String::new(),
+        auth: "api_key".to_string(),
+        env_hint: None,
+        key_url: None,
+    });
+    out
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn provider_presets() -> Vec<ProviderPreset> {
     preset_catalog()
+}
+
+/// Provider keys become config keys and CLI arguments, so keep them slug-shaped.
+fn sane_provider_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 48
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
+}
+
+/// A custom endpoint must be a real http(s) URL with a host, and it needs a
+/// model before it can be selected. The trailing slash is trimmed here because
+/// the adapter appends `/chat/completions` (or `/messages`) itself.
+fn normalize_endpoint(base_url: &str, model: &str) -> Result<(String, String), String> {
+    let url = base_url.trim().trim_end_matches('/');
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return Err("base URL must start with https:// or http://".to_string());
+    };
+    let host = rest.split('/').next().unwrap_or("");
+    if host.is_empty() {
+        return Err("base URL has no host".to_string());
+    }
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("pick a model for this provider".to_string());
+    }
+    Ok((url.to_string(), model.to_string()))
 }
 
 #[tauri::command]
@@ -796,6 +842,16 @@ pub fn provider_upsert(
         kind
     } else {
         ProviderKind::parse(&kind).name().to_string()
+    };
+    let (base_url, model) = if kind == antigravity::KIND {
+        (base_url, model)
+    } else {
+        if !sane_provider_name(&name) {
+            return Err(
+                "provider name must be lowercase letters, digits, dashes or dots".to_string(),
+            );
+        }
+        normalize_endpoint(&base_url, &model)?
     };
     ctx.config.providers.insert(
         name,
@@ -2225,15 +2281,51 @@ mod preset_tests {
     #[test]
     fn every_preset_reaches_the_frontend_catalog() {
         let presets = preset_catalog();
-        assert_eq!(presets.len(), PRESETS.len());
+        assert_eq!(
+            presets.len(),
+            PRESETS.len() + 1,
+            "catalog plus the custom row"
+        );
+        let custom = presets.last().expect("custom row");
+        assert_eq!(custom.name, "custom");
+        assert_eq!(custom.group, "custom");
+        assert!(custom.base_url.is_empty() && custom.model.is_empty());
         assert!(
             presets
                 .iter()
                 .all(|p| !p.env_hint.as_deref().unwrap_or("").is_empty()
                     || p.auth == "none"
-                    || p.auth == "agent"),
+                    || p.auth == "agent"
+                    || p.group == "custom"),
             "a keyed preset is missing its env hint"
         );
+    }
+}
+
+#[cfg(test)]
+mod custom_endpoint_tests {
+    use super::{normalize_endpoint, sane_provider_name};
+
+    #[test]
+    fn endpoints_are_validated_and_normalized() {
+        let (url, model) =
+            normalize_endpoint(" https://api.silkcompute.com/ ", " some/model ").unwrap();
+        assert_eq!(url, "https://api.silkcompute.com");
+        assert_eq!(model, "some/model");
+
+        assert!(normalize_endpoint("http://localhost:11434/v1", "llama").is_ok());
+        assert!(normalize_endpoint("api.silkcompute.com", "m").is_err());
+        assert!(normalize_endpoint("https://", "m").is_err());
+        assert!(normalize_endpoint("https://api.silkcompute.com", "  ").is_err());
+    }
+
+    #[test]
+    fn provider_names_are_slugs() {
+        assert!(sane_provider_name("silkcompute"));
+        assert!(sane_provider_name("my-endpoint_2"));
+        assert!(!sane_provider_name(""));
+        assert!(!sane_provider_name("Silk Compute"));
+        assert!(!sane_provider_name("../evil"));
     }
 }
 

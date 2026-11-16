@@ -183,10 +183,15 @@
     { key: 'router', label: 'Routers' },
     { key: 'hosted', label: 'Hosted inference' },
     { key: 'local', label: 'Local' },
+    { key: 'custom', label: 'Custom' },
   ] as const;
 
+  // The custom row is a form, not a fixed provider: it stays available no
+  // matter how many endpoints were already added under their own names.
   const addablePresets = $derived(
-    presets.filter((p) => !providers.some((q) => q.name === p.name)),
+    presets.filter(
+      (p) => p.group === 'custom' || !providers.some((q) => q.name === p.name),
+    ),
   );
 
   const filteredPresets = $derived.by(() => {
@@ -1061,7 +1066,12 @@ ${preset.key_url ?? ''}`}
     </section>
 
     {#if adding}
-      <AddProviderSheet preset={adding} onClose={() => (adding = null)} onAdded={addedProvider} />
+      <AddProviderSheet
+        preset={adding}
+        existingNames={providers.map((p) => p.name)}
+        onClose={() => (adding = null)}
+        onAdded={addedProvider}
+      />
     {/if}
 
     <section class="group" id="skills" hidden={active !== 'skills'}>

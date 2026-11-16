@@ -6,11 +6,13 @@
 
   interface Props {
     preset: ProviderPreset;
+    /** Provider keys already in use — a custom endpoint must pick a fresh one. */
+    existingNames?: string[];
     onClose: () => void;
     onAdded: (name: string, model: string, useNow: boolean) => void;
   }
 
-  let { preset, onClose, onAdded }: Props = $props();
+  let { preset, existingNames = [], onClose, onAdded }: Props = $props();
 
   // The sheet is mounted per preset, so these seeds never need to re-sync.
   let key = $state('');
@@ -25,10 +27,53 @@
   let showAdvanced = $state(false);
   let keyInput = $state<HTMLInputElement | null>(null);
 
+  /** The custom row is a form, not a catalog entry. */
+  const custom = $derived(preset.group === 'custom');
+  let kind = $state(untrack(() => preset.kind));
+  let name = $state('');
+  let nameTouched = $state(false);
+
+  const KINDS = [
+    { id: 'openai_compat', label: 'OpenAI-compatible' },
+    { id: 'anthropic', label: 'Anthropic-compatible' },
+  ] as const;
+
+  /** `https://api.silkcompute.com/v1` → `silkcompute`. */
+  function slugFromUrl(url: string): string {
+    const host = url.trim().replace(/^https?:\/\//, '').split('/')[0] ?? '';
+    const label = host
+      .split('.')
+      .map((l) => l.toLowerCase())
+      .find((l) => l && !['api', 'www', 'chat', 'inference', 'v1'].includes(l));
+    return (label ?? '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 32);
+  }
+
+  // Suggest a name from the URL until the user edits it themselves.
+  $effect(() => {
+    if (!custom || nameTouched) return;
+    const suggested = slugFromUrl(baseUrl);
+    if (suggested && suggested !== name) name = suggested;
+  });
+
   const needsKey = $derived(preset.auth === 'api_key');
+  const nameTaken = $derived(
+    custom && existingNames.some((n) => n.toLowerCase() === name.trim().toLowerCase()),
+  );
+  const nameInvalid = $derived(
+    custom && name.trim() !== '' && !/^[a-z0-9._-]+$/.test(name.trim()),
+  );
+  const endpointMissing = $derived(
+    custom && !/^https?:\/\/[^/]/.test(baseUrl.trim()),
+  );
   // A key is not required: the environment variable counts, and the provider
   // row can take a key later.
-  const canAdd = $derived(model.trim().length > 0);
+  const canAdd = $derived(
+    model.trim().length > 0 &&
+      (!custom || (name.trim().length > 0 && !nameTaken && !nameInvalid && !endpointMissing)),
+  );
 
   $effect(() => {
     keyInput?.focus();
@@ -40,7 +85,7 @@
     models = [];
     try {
       const m = await import('../ipc');
-      const list = await m.providerPreviewModels(preset.kind, baseUrl, key);
+      const list = await m.providerPreviewModels(custom ? kind : preset.kind, baseUrl, key);
       models = list
         .filter((x) => !/embed|bge-|e5-|gte-|voyage|paraphrase|rerank|:batch/i.test(x.id))
         .sort((a, b) => a.id.localeCompare(b.id));
@@ -65,9 +110,10 @@
     error = null;
     try {
       const m = await import('../ipc');
-      await m.providerUpsert(preset.name, preset.kind, baseUrl.trim(), model.trim());
-      if (needsKey && key.trim()) await m.authSetKey(preset.name, key.trim());
-      onAdded(preset.name, model.trim(), useNow);
+      const provider = custom ? name.trim() : preset.name;
+      await m.providerUpsert(provider, custom ? kind : preset.kind, baseUrl.trim(), model.trim());
+      if (needsKey && key.trim()) await m.authSetKey(provider, key.trim());
+      onAdded(provider, model.trim(), useNow);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       busy = false;
@@ -98,6 +144,64 @@
     </button>
   </header>
 
+  {#if custom}
+    <label class="field">
+      <span class="field-label">Name</span>
+      <input
+        class="input mono"
+        type="text"
+        placeholder="silkcompute"
+        spellcheck="false"
+        bind:value={name}
+        oninput={() => (nameTouched = true)}
+      />
+      <span class="field-hint">
+        {#if nameTaken}
+          <span class="bad">Already in use — pick another name.</span>
+        {:else if nameInvalid}
+          <span class="bad">Lowercase letters, digits, dashes and dots only.</span>
+        {:else}
+          How this endpoint appears in the provider list and in /model.
+        {/if}
+      </span>
+    </label>
+
+    <label class="field">
+      <span class="field-label">Base URL</span>
+      <input
+        class="input mono"
+        type="text"
+        placeholder="https://api.example.com/v1"
+        spellcheck="false"
+        bind:value={baseUrl}
+      />
+      <span class="field-hint">
+        {#if endpointMissing && baseUrl.trim()}
+          <span class="bad">Must be an https:// or http:// URL with a host.</span>
+        {:else}
+          Stop at the version segment — the app appends /chat/completions or
+          /messages itself.
+        {/if}
+      </span>
+    </label>
+
+    <div class="field">
+      <span class="field-label">Wire format</span>
+      <div class="kinds" role="group" aria-label="Wire format">
+        {#each KINDS as k (k.id)}
+          <button
+            class="kind-btn"
+            class:on={kind === k.id}
+            aria-pressed={kind === k.id}
+            onclick={() => (kind = k.id)}
+          >
+            {k.label}
+          </button>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
   {#if needsKey}
     <label class="field">
       <span class="field-label">
@@ -119,7 +223,7 @@
         <button
           class="btn"
           onclick={scan}
-          disabled={scanning || !key.trim() || !baseUrl.trim()}
+          disabled={scanning || !baseUrl.trim() || (!custom && !key.trim())}
           title="Check the key and list this provider's models"
         >
           {scanning ? 'Checking…' : 'Check key'}
@@ -130,6 +234,8 @@
           <span class="bad">{scanError}</span>
         {:else if models.length > 0}
           <span class="good">Key works — {models.length} models available.</span>
+        {:else if custom}
+          Optional — endpoints that don't check a key can leave this empty.
         {:else if key.trim()}
           Stays on this machine, in the OS keychain.
         {:else}
@@ -163,24 +269,28 @@
     <span class="field-hint">
       {#if models.length > 0}
         Pick the model this provider should start on.
+      {:else if custom}
+        Type the model id this endpoint serves — check the key to list them.
       {:else}
         Default for {preset.label}{#if needsKey} — check the key to load the real list{/if}.
       {/if}
     </span>
   </label>
 
-  <button class="advanced-toggle" onclick={() => (showAdvanced = !showAdvanced)}>
-    <Icon name={showAdvanced ? 'chevron-down' : 'chevron-right'} size={10} />
-    Advanced
-  </button>
-  {#if showAdvanced}
-    <label class="field">
-      <span class="field-label">Base URL</span>
-      <input class="input mono" type="text" bind:value={baseUrl} spellcheck="false" />
-      <span class="field-hint">
-        Change this for a proxy, a regional endpoint, or a self-hosted server.
-      </span>
-    </label>
+  {#if !custom}
+    <button class="advanced-toggle" onclick={() => (showAdvanced = !showAdvanced)}>
+      <Icon name={showAdvanced ? 'chevron-down' : 'chevron-right'} size={10} />
+      Advanced
+    </button>
+    {#if showAdvanced}
+      <label class="field">
+        <span class="field-label">Base URL</span>
+        <input class="input mono" type="text" bind:value={baseUrl} spellcheck="false" />
+        <span class="field-hint">
+          Change this for a proxy, a regional endpoint, or a self-hosted server.
+        </span>
+      </label>
+    {/if}
   {/if}
 
   <label class="use-now">
@@ -195,7 +305,7 @@
   <footer class="sheet-foot">
     <button class="btn ghost" onclick={onClose} disabled={busy}>Cancel</button>
     <button class="btn primary" onclick={add} disabled={!canAdd || busy}>
-      {busy ? 'Adding…' : `Add ${preset.label}`}
+      {busy ? 'Adding…' : custom ? 'Add endpoint' : `Add ${preset.label}`}
     </button>
   </footer>
 </div>
@@ -297,6 +407,29 @@
     font-size: 10.5px;
     line-height: 1.5;
     color: var(--fg-3);
+  }
+  .kinds {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 10px;
+    background: var(--bg-2);
+    align-self: flex-start;
+  }
+  .kind-btn {
+    height: 26px;
+    padding: 0 12px;
+    border-radius: 7px;
+    font-size: 11.5px;
+    color: var(--fg-2);
+  }
+  .kind-btn:hover {
+    color: var(--fg-0);
+  }
+  .kind-btn.on {
+    background: var(--bg-0);
+    color: var(--fg-0);
+    box-shadow: var(--el-1);
   }
   .good {
     color: var(--ok, #4ade80);

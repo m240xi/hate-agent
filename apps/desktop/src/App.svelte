@@ -7,6 +7,7 @@
   import SettingsView from './lib/components/SettingsView.svelte';
   import Notice from './lib/components/Notice.svelte';
   import CommandPalette from './lib/components/CommandPalette.svelte';
+  import QuickOpen from './lib/components/QuickOpen.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
   import SidePanel from './lib/components/SidePanel.svelte';
   import Conversation from './lib/components/Conversation.svelte';
@@ -49,6 +50,23 @@
     if (mod && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       session.paletteOpen = !session.paletteOpen;
+      return;
+    }
+    if (mod && (e.code === 'Backquote' || e.key === '`') && session.mode === 'chat') {
+      e.preventDefault();
+      session.toggleTerminal();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'p' && !e.shiftKey && session.mode === 'chat') {
+      e.preventDefault();
+      session.quickOpen = !session.quickOpen;
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'f' && !e.shiftKey && session.mode === 'chat') {
+      if (!el?.closest('.xterm')) {
+        e.preventDefault();
+        session.transcriptSearchOpen = true;
+      }
       return;
     }
     if (mod && e.key === ',') {
@@ -268,6 +286,15 @@
           {#if session.mode === 'chat'}
             <button
               class="bar-btn"
+              class:on={(session.terminalOpen && session.terminalDock === 'bottom') || (session.panelOpen && session.panelTab === 'terminal')}
+              onclick={() => session.toggleTerminal()}
+              aria-label="Toggle workspace terminal"
+              title="Toggle terminal (Ctrl+`)"
+            >
+              <Icon name="terminal" size={16} />
+            </button>
+            <button
+              class="bar-btn"
               class:on={session.panelOpen}
               onclick={() => session.setPanel(!session.panelOpen)}
               aria-label={session.workspacePath ? 'Toggle files & activity' : 'Toggle activity'}
@@ -341,6 +368,9 @@
 
   {#if session.paletteOpen}
     <CommandPalette onclose={() => (session.paletteOpen = false)} />
+  {/if}
+  {#if session.quickOpen}
+    <QuickOpen onclose={() => (session.quickOpen = false)} />
   {/if}
   <ContextMenu />
   <Notice />

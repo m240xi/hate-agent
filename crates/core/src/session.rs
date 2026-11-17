@@ -15,6 +15,7 @@ use crate::persist::{PersistCtx, PersistedSession};
 use crate::provider::{ChatRequest, Delta, Message, Provider, ProviderError, ThinkingLevel};
 use crate::skills::{self, Skill, SkillStore, build_digest, parse_reflection, text_signals};
 use crate::state::SessionState;
+use crate::terminal_bridge::TerminalToolkit;
 use crate::tools::{ToolOutput, WorkspaceTools};
 use crate::types::{
     CheckpointId, CompactionReason, FailureReason, Outcome, PermissionDecision, PermissionRequest,
@@ -55,6 +56,7 @@ pub struct SessionConfig {
     pub ledger: Option<Arc<Ledger>>,
     pub persist: Option<PersistCtx>,
     pub tools: Option<Arc<WorkspaceTools>>,
+    pub terminal: Option<Arc<TerminalToolkit>>,
     pub mcp: Option<Arc<McpHub>>,
     pub skills: Option<Arc<SkillStore>>,
     pub auto_skills: bool,
@@ -408,6 +410,11 @@ impl Actor {
             out.push_str("\n\nProject instructions (from the workspace):\n");
             out.push_str(ctx);
         }
+        if let Some(term) = self.cfg.terminal.as_ref()
+            && term.has_open_terminals()
+        {
+            out.push_str("\n\n## Workspace Terminal\nInteractive workspace terminal tab(s) are open. Use `terminal_read` to inspect recent terminal output and `terminal_write` (user-confirmed) to send commands or input into an open tab.");
+        }
         if let Some(store) = self.cfg.skills.as_ref() {
             out.push_str("\n\n");
             out.push_str(&store.render_prompt(&self.signals));
@@ -471,6 +478,7 @@ impl Actor {
         let provider_name = self.cfg.provider_name.clone();
         let thinking = self.cfg.thinking;
         let tools = self.cfg.tools.clone();
+        let terminal = self.cfg.terminal.clone();
         let mcp = self.cfg.mcp.clone();
         let skills = self.cfg.skills.clone();
         let permissions = self.cfg.permissions.clone();
@@ -491,6 +499,7 @@ impl Actor {
                 provider_name,
                 thinking,
                 tools,
+                terminal,
                 mcp,
                 skills,
                 permissions,
@@ -870,6 +879,7 @@ async fn gate_tool(
 
 enum ToolBackend<'a> {
     Ws(&'a Arc<WorkspaceTools>),
+    Term(&'a Arc<TerminalToolkit>),
     Mcp(&'a Arc<McpHub>),
     Skill(&'a Arc<SkillStore>),
 }
@@ -878,6 +888,7 @@ impl ToolBackend<'_> {
     fn gate_reason(&self, call: &ToolCall) -> Option<(String, Option<String>)> {
         match self {
             Self::Ws(t) => t.gate_reason(call),
+            Self::Term(t) => t.gate_reason(call),
             Self::Mcp(h) => h.gate_reason(call),
             Self::Skill(_) => None,
         }
@@ -886,6 +897,7 @@ impl ToolBackend<'_> {
     async fn execute(&self, call: &ToolCall, cancel: &CancellationToken) -> ToolOutput {
         match self {
             Self::Ws(t) => t.execute(call).await,
+            Self::Term(t) => t.execute(call),
             Self::Mcp(h) => h.execute(call, cancel).await,
             Self::Skill(s) => s.execute(call),
         }
@@ -894,6 +906,7 @@ impl ToolBackend<'_> {
     fn tool_error(&self, msg: String) -> ToolOutput {
         match self {
             Self::Ws(t) => t.tool_error(msg),
+            Self::Term(t) => t.tool_error(msg),
             Self::Mcp(h) => h.tool_error(msg),
             Self::Skill(s) => s.tool_error(msg),
         }
@@ -904,10 +917,12 @@ fn error_backend<'a>(
     mcp: Option<&'a Arc<McpHub>>,
     tools: Option<&'a Arc<WorkspaceTools>>,
     skills: Option<&'a Arc<SkillStore>>,
+    terminal: Option<&'a Arc<TerminalToolkit>>,
 ) -> ToolBackend<'a> {
     mcp.map(ToolBackend::Mcp)
         .or_else(|| tools.map(ToolBackend::Ws))
         .or_else(|| skills.map(ToolBackend::Skill))
+        .or_else(|| terminal.map(ToolBackend::Term))
         .expect("error_backend requires at least one tool backend")
 }
 
@@ -920,6 +935,7 @@ async fn run_turn(
     provider_name: String,
     thinking: ThinkingLevel,
     tools: Option<Arc<WorkspaceTools>>,
+    terminal: Option<Arc<TerminalToolkit>>,
     mcp: Option<Arc<McpHub>>,
     skills: Option<Arc<SkillStore>>,
     permissions: Arc<PermissionHub>,
@@ -943,6 +959,9 @@ async fn run_turn(
     }
 
     let mut specs = tools.as_ref().map_or_default(|t| t.specs());
+    if let Some(term) = terminal.as_ref() {
+        specs.extend(term.specs());
+    }
     if let Some(hub) = mcp.as_ref() {
         hub.kick_refresh();
         specs.extend(hub.specs());
@@ -1155,7 +1174,7 @@ async fn run_turn(
             return;
         }
 
-        if tools.is_none() && mcp.is_none() && skills.is_none() {
+        if tools.is_none() && terminal.is_none() && mcp.is_none() && skills.is_none() {
             let _ = done_tx
                 .send(TurnReport::Failed {
                     error: ProviderError::Stream(
@@ -1198,13 +1217,17 @@ async fn run_turn(
         for call in calls {
             emit(Event::ToolStarted { call: call.clone() });
             if plan_mode && !plan_allows(call.name.as_str()) {
-                let out = error_backend(mcp.as_ref(), tools.as_ref(), skills.as_ref()).tool_error(
-                    format!(
-                        "plan mode is read-only — `{}` is blocked this turn. Finish the plan; \
+                let out = error_backend(
+                    mcp.as_ref(),
+                    tools.as_ref(),
+                    skills.as_ref(),
+                    terminal.as_ref(),
+                )
+                .tool_error(format!(
+                    "plan mode is read-only — `{}` is blocked this turn. Finish the plan; \
                          the user approves it before anything changes.",
-                        call.name.as_str()
-                    ),
-                );
+                    call.name.as_str()
+                ));
                 record_tool_result(&events, &mut convo, &call, out);
                 continue;
             }
@@ -1212,6 +1235,8 @@ async fn run_turn(
                 mcp.as_ref().map(ToolBackend::Mcp)
             } else if matches!(call.name.as_str(), "skill_view" | "skill_save") {
                 skills.as_ref().map(ToolBackend::Skill)
+            } else if matches!(call.name.as_str(), "terminal_read" | "terminal_write") {
+                terminal.as_ref().map(ToolBackend::Term)
             } else {
                 tools.as_ref().map(ToolBackend::Ws)
             };
@@ -1234,9 +1259,16 @@ async fn run_turn(
                     }
                     None => b.execute(&call, &cancel).await,
                 },
-                None => error_backend(mcp.as_ref(), tools.as_ref(), skills.as_ref()).tool_error(
-                    format!("unknown tool `{}` for this session", call.name.as_str()),
-                ),
+                None => error_backend(
+                    mcp.as_ref(),
+                    tools.as_ref(),
+                    skills.as_ref(),
+                    terminal.as_ref(),
+                )
+                .tool_error(format!(
+                    "unknown tool `{}` for this session",
+                    call.name.as_str()
+                )),
             };
             if out.ok
                 && call.name.as_str() == "skill_save"
@@ -1307,7 +1339,9 @@ fn parse_plan_command(text: &str) -> Option<&str> {
 }
 
 fn plan_allows(name: &str) -> bool {
-    WorkspaceTools::is_read_only(name) || name == "skill_view"
+    WorkspaceTools::is_read_only(name)
+        || name == "skill_view"
+        || TerminalToolkit::is_read_only(name)
 }
 
 fn record_tool_result(

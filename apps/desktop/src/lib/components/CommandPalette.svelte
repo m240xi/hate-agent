@@ -15,20 +15,27 @@
   interface Command {
     name: string;
     hint: string;
-    group: 'session' | 'model' | 'view' | 'export' | 'settings';
+    group: 'session' | 'model' | 'view' | 'export' | 'settings' | 'custom';
+    keepOpen?: boolean;
     provider?: string | undefined;
     keys?: string;
     run?: () => void;
-    disabled?: string;
+    disabled?: string | undefined;
   }
 
   const GROUPS: { id: Command['group']; label: string }[] = [
     { id: 'session', label: 'Session' },
+    { id: 'custom', label: 'Custom' },
     { id: 'model', label: 'Model' },
     { id: 'view', label: 'View' },
     { id: 'export', label: 'Export' },
     { id: 'settings', label: 'Settings' },
   ];
+
+  let creatingCmd = $state(false);
+  let newCmdName = $state('');
+  let newCmdScope = $state<'workspace' | 'global'>('workspace');
+  let newCmdBody = $state('');
 
   const commands = $derived<Command[]>([
     { name: '/new', hint: 'start a fresh chat', group: 'session', keys: '⌘N', run: () => session.startFresh() },
@@ -47,6 +54,13 @@
     { name: '/glass', hint: `experimental glass effect (now ${session.glass ? 'on' : 'off'})`, group: 'view', run: () => session.setGlass(!session.glass) },
     { name: '/density', hint: `transcript density (now ${session.density})`, group: 'view', run: () => session.setDensity(session.density === 'compact' ? 'comfortable' : 'compact') },
     { name: '/activity', hint: session.panelOpen ? 'hide the side panel' : 'show tokens, plan and checkpoints', group: 'view', run: () => (session.panelOpen ? session.setPanel(false) : session.openActivity()) },
+    { name: '/terminal', hint: 'toggle workspace terminal', group: 'view', keys: 'Ctrl+`', run: () => session.toggleTerminal() },
+    { name: '/terminal dock', hint: `move terminal to ${session.terminalDock === 'bottom' ? 'right panel' : 'bottom drawer'}`, group: 'view', run: () => session.setTerminalDock(session.terminalDock === 'bottom' ? 'right' : 'bottom') },
+    { name: '/quick-open', hint: 'jump to file or symbol', group: 'view', keys: '?P', run: () => (session.quickOpen = true) },
+    { name: '/search', hint: 'find text in this transcript', group: 'view', keys: '?F', run: () => (session.transcriptSearchOpen = true) },
+    { name: '/rules', hint: 'create or open .hate-agent.md project rules', group: 'session', disabled: session.workspacePath ? undefined : 'attach a folder first', run: () => void session.createRulesFile('.hate-agent.md') },
+    { name: '/worktree', hint: session.worktree?.is_worktree ? 'merge worktree back to main' : 'isolate changes in a git worktree', group: 'session', disabled: session.worktree?.is_git ? undefined : 'requires a git repository', run: () => void (session.worktree?.is_worktree ? session.mergeBackWorktree() : session.enterWorktree()) },
+    { name: '/command new', hint: 'save a custom /slash command markdown prompt', group: 'custom', keepOpen: true, run: () => { newCmdScope = session.workspacePath ? 'workspace' : 'global'; creatingCmd = true; } },
     { name: '/export md', hint: 'write the transcript as Markdown', group: 'export', run: () => void session.exportTo('md') },
     { name: '/export html', hint: 'self-contained HTML, images inline', group: 'export', run: () => void session.exportTo('html') },
     { name: '/export json', hint: 'structured transcript for tooling', group: 'export', run: () => void session.exportTo('json') },
@@ -79,6 +93,9 @@
     '  ⌘, / Ctrl+,  settings',
     '  ⌘N / Ctrl+N  new chat',
     '  ⌘B / Ctrl+B  toggle the sidebar',
+    '  Ctrl+`       toggle workspace terminal',
+    '  ?P / Ctrl+P  quick open file or symbol',
+    '  ?F / Ctrl+F  search transcript',
     '  /            command palette',
     '  @            attach file reference',
     '',
@@ -123,7 +140,16 @@
     })),
   );
 
-  const all = $derived([...commands, ...modelCommands]);
+  const customCommandItems = $derived<Command[]>(
+    session.customCommands.map((cmd) => ({
+      name: cmd.name,
+      hint: `${cmd.description} (${cmd.scope})`,
+      group: 'custom' as const,
+      run: () => session.runCustomCommand(cmd),
+    })),
+  );
+
+  const all = $derived([...customCommandItems, ...commands, ...modelCommands]);
 
   const matched = $derived.by(() => {
     const q = filter.trim().toLowerCase();
@@ -142,7 +168,7 @@
   });
 
   const visible = $derived(
-    filter.trim() ? [...matched.commands, ...matched.models] : commands,
+    filter.trim() ? [...matched.commands, ...matched.models] : [...customCommandItems, ...commands],
   );
 
   $effect(() => {
@@ -164,10 +190,28 @@
   function choose(c: Command): void {
     if (c.disabled || !c.run) return;
     c.run();
-    close();
+    if (!c.keepOpen) close();
+  }
+
+  async function saveNewCmd(): Promise<void> {
+    if (!newCmdName.trim() || !newCmdBody.trim()) return;
+    const ok = await session.saveCustomCommand(newCmdName, newCmdScope, newCmdBody);
+    if (ok) {
+      creatingCmd = false;
+      newCmdName = '';
+      newCmdBody = '';
+      close();
+    }
   }
 
   function onKeydown(e: KeyboardEvent): void {
+    if (creatingCmd) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        creatingCmd = false;
+      }
+      return;
+    }
     if (e.key === 'Escape') {
       e.preventDefault();
       close();
@@ -199,6 +243,25 @@
   role="presentation"
 >
   <div class="palette rise" role="dialog" aria-label="Command palette" tabindex="-1" use:trapFocus>
+    {#if creatingCmd}
+      <form class="cmd-create" onsubmit={(e) => { e.preventDefault(); void saveNewCmd(); }}>
+        <div class="cc-head">
+          <span class="mono">New custom slash command</span>
+          <button type="button" class="btn ghost sm" onclick={() => (creatingCmd = false)}>Back</button>
+        </div>
+        <div class="cc-row">
+          <input class="input mono" placeholder="name (e.g. review)" bind:value={newCmdName} required />
+          <select class="input" bind:value={newCmdScope}>
+            {#if session.workspacePath}<option value="workspace">Workspace</option>{/if}
+            <option value="global">Global</option>
+          </select>
+        </div>
+        <textarea class="input mono" rows="5" placeholder="Prompt template (use $ARGUMENTS for optional args)?" bind:value={newCmdBody} required></textarea>
+        <div class="cc-foot">
+          <button type="submit" class="btn primary sm">Save command</button>
+        </div>
+      </form>
+    {:else}
     <div class="filter-wrap">
       <Icon name="terminal" size={13} />
       <input
@@ -246,6 +309,7 @@
       <span>⏎ run</span>
       <span>esc close</span>
     </div>
+    {/if}
   </div>
 </div>
 
@@ -260,6 +324,28 @@
     justify-content: center;
     padding-top: 14vh;
     z-index: 50;
+  }
+  .cmd-create {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+  }
+  .cc-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--fg-1);
+  }
+  .cc-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+  }
+  .cc-foot {
+    display: flex;
+    justify-content: flex-end;
   }
   .palette {
     width: 520px;

@@ -19,11 +19,13 @@ export interface ImageAttachment {
 export async function sessionSend(
   text: string,
   pins?: PinRef[],
+  contexts?: import('./types').ContextRef[],
   images?: ImageAttachment[],
 ): Promise<void> {
   return invoke<void>('session_send', {
     text,
     pins: pins?.length ? pins : null,
+    contexts: contexts?.length ? contexts : null,
     images: images?.length ? images : null,
   });
 }
@@ -572,4 +574,126 @@ export async function localModelStart(
 
 export async function localRuntimeStop(): Promise<LocalRuntimeStatus> {
   return invoke<LocalRuntimeStatus>('local_runtime_stop');
+}
+
+export async function sessionBranchAfter(
+  userIndex: number,
+  title: string | null,
+  uiState: string | null,
+): Promise<RewindResult> {
+  return invoke<RewindResult>('session_branch_after', {
+    userIndex,
+    title,
+    uiState,
+  });
+}
+
+export async function sessionBranches(
+  sessionId: string,
+): Promise<import('./types').BranchGroup[]> {
+  return invoke<import('./types').BranchGroup[]>('session_branches', { sessionId });
+}
+
+export async function workspaceWriteFile(path: string, content: string): Promise<number> {
+  return invoke<number>('workspace_write_file', { path, content });
+}
+
+export async function workspaceRevertFile(path: string): Promise<void> {
+  return invoke<void>('workspace_revert_file', { path });
+}
+
+export async function workspaceRevertHunk(path: string, patch: string): Promise<void> {
+  return invoke<void>('workspace_revert_hunk', { path, patch });
+}
+
+export async function workspaceRulesInfo(): Promise<import('./types').WorkspaceRuleInfo[]> {
+  return invoke<import('./types').WorkspaceRuleInfo[]>('workspace_rules_info');
+}
+
+export async function workspaceCreateRules(
+  file?: string | null,
+  content?: string | null,
+): Promise<string> {
+  return invoke<string>('workspace_create_rules', {
+    file: file ?? null,
+    content: content ?? null,
+  });
+}
+
+export async function customCommandsList(): Promise<import('./types').CustomCommandInfo[]> {
+  return invoke<import('./types').CustomCommandInfo[]>('custom_commands_list');
+}
+
+export async function customCommandSave(
+  name: string,
+  scope: 'workspace' | 'global',
+  content: string,
+): Promise<string> {
+  return invoke<string>('custom_command_save', { name, scope, content });
+}
+
+export async function workspaceWorktreeStatus(): Promise<import('./types').WorktreeStatus> {
+  return invoke<import('./types').WorktreeStatus>('workspace_worktree_status');
+}
+
+export async function workspaceWorktreeCreate(branch?: string | null): Promise<string> {
+  return invoke<string>('workspace_worktree_create', { branch: branch ?? null });
+}
+
+export async function workspaceWorktreeMergeBack(): Promise<import('./types').MergeBackResult> {
+  return invoke<import('./types').MergeBackResult>('workspace_worktree_merge_back');
+}
+
+export async function workspaceWorktreeRemove(force = false): Promise<string> {
+  return invoke<string>('workspace_worktree_remove', { force });
+}
+
+export async function fetchUrlContext(url: string): Promise<string> {
+  return invoke<string>('fetch_url_context', { url });
+}
+
+export async function terminalListShells(): Promise<import('./types').ShellInfo[]> {
+  return invoke<import('./types').ShellInfo[]>('terminal_list_shells');
+}
+
+export async function terminalList(): Promise<import('./types').TerminalTabInfo[]> {
+  return invoke<import('./types').TerminalTabInfo[]>('terminal_list');
+}
+
+export async function terminalCreate(
+  cwd?: string | null,
+  shell?: string | null,
+  cols?: number | null,
+  rows?: number | null,
+): Promise<import('./types').TerminalTabInfo> {
+  return invoke<import('./types').TerminalTabInfo>('terminal_create', {
+    cwd: cwd ?? null,
+    shell: shell ?? null,
+    cols: cols ?? null,
+    rows: rows ?? null,
+  });
+}
+
+export async function terminalWrite(id: string, data: string): Promise<void> {
+  return invoke<void>('terminal_write', { id, data });
+}
+
+export async function terminalResize(id: string, cols: number, rows: number): Promise<void> {
+  return invoke<void>('terminal_resize', { id, cols, rows });
+}
+
+export async function terminalClose(id: string): Promise<void> {
+  return invoke<void>('terminal_close', { id });
+}
+
+export async function terminalReadBuffer(
+  id: string,
+  raw?: boolean,
+  tailLines?: number,
+): Promise<string> {
+  return invoke<string>('terminal_read_buffer', {
+    id,
+    raw: raw ?? null,
+    tailLines: tailLines ?? null,
+  });
 }

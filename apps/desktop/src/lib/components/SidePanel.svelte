@@ -3,6 +3,7 @@
   import Icon from './Icon.svelte';
   import FileTree from './FileTree.svelte';
   import Inspector from './Inspector.svelte';
+  import TerminalPanel from './TerminalPanel.svelte';
   import { slide } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import { ms } from '../motion';
@@ -13,8 +14,22 @@
 
   let { files }: Props = $props();
 
-  const tab = $derived(files ? session.panelTab : 'activity');
+  const tab = $derived.by(() => {
+    if (session.panelTab === 'terminal') return 'terminal';
+    if (!files && session.panelTab === 'files') return 'activity';
+    return session.panelTab;
+  });
   let dragging = $state(false);
+
+  function selectTab(next: 'files' | 'activity' | 'terminal'): void {
+    session.panelTab = next;
+    if (next === 'terminal') {
+      session.terminalDock = 'right';
+      localStorage.setItem('hate:term:dock', 'right');
+      session.terminalOpen = false;
+      if (session.terminals.length === 0) void session.createTerminal();
+    }
+  }
 
   function startDrag(e: PointerEvent): void {
     e.preventDefault();
@@ -23,7 +38,7 @@
     const startW = session.rightWidth;
     const max = Math.max(
       240,
-      Math.min(560, window.innerWidth - (session.sidebarCollapsed ? 0 : 260) - 420),
+      Math.min(620, window.innerWidth - (session.sidebarCollapsed ? 0 : 260) - 380),
     );
     const move = (ev: PointerEvent) => {
       session.rightWidth = Math.min(max, Math.max(240, startW - (ev.clientX - startX)));
@@ -46,28 +61,34 @@
   transition:slide={{ axis: 'x', duration: ms(200), easing: cubicOut }}
 >
   <header class="head">
-    {#if files}
-      <div class="tabs" role="tablist">
+    <div class="tabs" role="tablist">
+      {#if files}
         <button
           role="tab"
           class:on={tab === 'files'}
           aria-selected={tab === 'files'}
-          onclick={() => (session.panelTab = 'files')}
+          onclick={() => selectTab('files')}
         >
           <Icon name="folder" size={13} /> Files
         </button>
-        <button
-          role="tab"
-          class:on={tab === 'activity'}
-          aria-selected={tab === 'activity'}
-          onclick={() => (session.panelTab = 'activity')}
-        >
-          <Icon name="activity" size={13} /> Activity
-        </button>
-      </div>
-    {:else}
-      <span class="title">Activity</span>
-    {/if}
+      {/if}
+      <button
+        role="tab"
+        class:on={tab === 'activity'}
+        aria-selected={tab === 'activity'}
+        onclick={() => selectTab('activity')}
+      >
+        <Icon name="activity" size={13} /> Activity
+      </button>
+      <button
+        role="tab"
+        class:on={tab === 'terminal'}
+        aria-selected={tab === 'terminal'}
+        onclick={() => selectTab('terminal')}
+      >
+        <Icon name="terminal" size={13} /> Term
+      </button>
+    </div>
     <span class="grow"></span>
     <button
       class="close"
@@ -81,6 +102,8 @@
   <div class="body">
     {#if tab === 'files'}
       <FileTree />
+    {:else if tab === 'terminal'}
+      <TerminalPanel dock="right" />
     {:else}
       <Inspector />
     {/if}
@@ -130,11 +153,11 @@
   .tabs button {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     height: 26px;
-    padding: 0 10px;
+    padding: 0 9px;
     border-radius: 7px;
-    font-size: 12px;
+    font-size: 11.5px;
     color: var(--fg-2);
   }
   .tabs button:hover {
@@ -144,12 +167,6 @@
     background: var(--bg-0);
     color: var(--fg-0);
     box-shadow: var(--el-1);
-  }
-  .title {
-    padding-left: 4px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--fg-1);
   }
   .grow {
     flex: 1;

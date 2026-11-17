@@ -72,13 +72,50 @@ struct SymbolCache {
     hits: Arc<Vec<SymbolHit>>,
 }
 
-const PROJECT_INSTRUCTIONS: &[&str] = &[
+pub const PROJECT_INSTRUCTIONS: &[&str] = &[
     "AGENTS.md",
+    ".hate-agent.md",
     "CLAUDE.md",
     ".github/copilot-instructions.md",
     "GEMINI.md",
     ".cursorrules",
 ];
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceRule {
+    pub file: String,
+    pub active: bool,
+    pub bytes: u32,
+    pub preview: String,
+}
+
+pub fn inspect_instructions(root: &Path) -> Vec<WorkspaceRule> {
+    let mut out = Vec::new();
+    let mut found_active = false;
+    for rel in PROJECT_INSTRUCTIONS {
+        let p = root.join(rel);
+        let Ok(meta) = p.metadata() else { continue };
+        if !meta.is_file() || meta.len() > INSTRUCTIONS_CAP {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let active = !found_active;
+            found_active = true;
+            let preview: String = trimmed.chars().take(240).collect();
+            out.push(WorkspaceRule {
+                file: (*rel).to_string(),
+                active,
+                bytes: u32::try_from(meta.len()).unwrap_or(u32::MAX),
+                preview,
+            });
+        }
+    }
+    out
+}
 const INSTRUCTIONS_CAP: u64 = 12 * 1024;
 
 impl WorkspaceTools {

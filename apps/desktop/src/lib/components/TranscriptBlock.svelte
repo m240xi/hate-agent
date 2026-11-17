@@ -6,7 +6,7 @@
   import ImagePreview from './ImagePreview.svelte';
   import { renderMarkdown } from '../markdown';
   import { copyText, fmtTok, turnLabel, usageLabel, usageTitle } from '../format';
-  import type { TranscriptBlock } from '../types';
+  import type { ContextRef, TranscriptBlock } from '../types';
 
   interface Props {
     block: TranscriptBlock;
@@ -18,6 +18,32 @@
   let copied = $state(false);
   let detailsOpen = $state(false);
   const isLatest = $derived(block.kind === 'text' && block.id === session.lastReplyId);
+  const userTurnIndex = $derived.by(() => {
+    if (block.kind !== 'user') return -1;
+    let count = 0;
+    for (const b of session.blocks) {
+      if (b.id === block.id) return count;
+      if (b.kind === 'user') count += 1;
+    }
+    return -1;
+  });
+  const branchGroup = $derived.by(() => {
+    if (userTurnIndex < 0) return null;
+    const g = session.branchGroups.find((bg) => bg.fork_turn === userTurnIndex);
+    return g && g.branches.length > 1 ? g : null;
+  });
+  const branchCursor = $derived.by(() => {
+    if (!branchGroup) return -1;
+    return Math.max(0, branchGroup.branches.findIndex((b) => b.id === session.sessionId));
+  });
+
+  function ctxLabel(c: ContextRef): string {
+    if (c.kind === 'git_diff') return '@git:diff';
+    if (c.kind === 'git_staged') return '@git:staged';
+    if (c.kind === 'terminal') return '@terminal';
+    if (c.kind === 'url') return `@url ${c.url}`;
+    return `@folder:${c.path}`;
+  }
   let editing = $state(false);
 
   // The context menu lives at the app root, so it asks the block to open its
@@ -120,8 +146,11 @@
     {:else}
       <div class="user-text">{block.text}</div>
     {/if}
-    {#if block.pins && block.pins.length > 0}
-      <ul class="user-pins" aria-label="Attached files">
+    {#if (block.pins && block.pins.length > 0) || (block.contexts && block.contexts.length > 0)}
+      <ul class="user-pins" aria-label="Attached context">
+        {#each block.contexts ?? [] as c, ci (ci)}
+          <li class="user-pin mono ctx">{ctxLabel(c)}</li>
+        {/each}
         {#each block.pins as p (p.path)}
           <li class="user-pin mono" title={p.path}>
             <Icon name="file" size={9} />
@@ -136,6 +165,39 @@
         {turnLabel(block.turn)}
       </div>
       {/if}
+      {#if branchGroup}
+        <span class="branch-switch mono" title="Switch conversation branch at this turn">
+          <button
+            class="bs-btn"
+            onclick={() => {
+              const prev = branchGroup.branches[(branchCursor - 1 + branchGroup.branches.length) % branchGroup.branches.length];
+              if (prev) void session.switchBranch(prev.id);
+            }}
+            aria-label="Previous branch"
+          >
+            <Icon name="chevron-left" size={10} />
+          </button>
+          <span>{branchCursor + 1}/{branchGroup.branches.length}</span>
+          <button
+            class="bs-btn"
+            onclick={() => {
+              const next = branchGroup.branches[(branchCursor + 1) % branchGroup.branches.length];
+              if (next) void session.switchBranch(next.id);
+            }}
+            aria-label="Next branch"
+          >
+            <Icon name="chevron-right" size={10} />
+          </button>
+        </span>
+      {/if}
+      <button
+        class="edit-btn"
+        class:starred={!!block.bookmarked}
+        onclick={() => session.toggleBookmark(block.id)}
+        title={block.bookmarked ? 'Remove bookmark' : 'Bookmark this prompt'}
+      >
+        <Icon name="star" size={10} />
+      </button>
       {#if !editing}
         <button class="edit-btn" onclick={startEdit} title="Edit and resend from here">
           <Icon name="edit" size={10} />
@@ -162,6 +224,24 @@
           title={copied ? 'Copied' : 'Copy'}
         >
           <Icon name={copied ? 'check' : 'copy'} size={14} />
+        </button>
+        <button
+          class="act"
+          class:starred={!!block.bookmarked}
+          onclick={() => session.toggleBookmark(block.id)}
+          aria-label={block.bookmarked ? 'Remove bookmark' : 'Bookmark reply'}
+          title={block.bookmarked ? 'Remove bookmark' : 'Bookmark reply'}
+        >
+          <Icon name="star" size={14} />
+        </button>
+        <button
+          class="act"
+          onclick={() => void session.branchAfterBlock(block.id)}
+          disabled={session.running}
+          aria-label="Branch from here"
+          title="Branch conversation from this reply"
+        >
+          <Icon name="branch" size={14} />
         </button>
         {#if isLatest && session.lastUserBlock?.text && !session.lastUserBlock.images?.length}
           <button
@@ -282,6 +362,39 @@
   }
   .edit-btn:hover {
     color: var(--fg-1);
+  }
+  .edit-btn.starred {
+    opacity: 1;
+    color: var(--warn);
+  }
+  .branch-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0 5px;
+    height: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    background: var(--bg-1);
+    font-size: 10px;
+    color: var(--fg-2);
+  }
+  .bs-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1px;
+    color: var(--fg-2);
+  }
+  .bs-btn:hover {
+    color: var(--fg-0);
+  }
+  .user-pin.ctx {
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+    color: var(--accent);
+  }
+  .act.starred {
+    color: var(--warn);
   }
   .user-edit {
     display: flex;

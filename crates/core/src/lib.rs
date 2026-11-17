@@ -10,6 +10,7 @@ mod session;
 mod shape;
 pub mod skills;
 mod state;
+pub mod terminal_bridge;
 mod tools;
 mod types;
 pub mod view;
@@ -29,9 +30,10 @@ pub use session::{
 };
 pub use skills::{Skill, SkillStore};
 pub use state::SessionState;
-pub use tools::{ToolOutput, WorkspaceTools};
+pub use terminal_bridge::{TerminalBridge, TerminalTabSummary, TerminalToolkit};
+pub use tools::{ToolOutput, WorkspaceRule, WorkspaceTools, inspect_instructions};
 pub use types::{
     CheckpointId, CompactionReason, FailureReason, Outcome, PermissionDecision, PermissionRequest,
     Plan, RequestId, SessionId, Step, TokenUsage, ToolCall, ToolName, TurnId, TurnOutcome,
 };
-pub use view::{ChangedFile, FileDiff, FileView};
+pub use view::{ChangedFile, FileDiff, FileView, MergeBackSummary, WorktreeStatus};

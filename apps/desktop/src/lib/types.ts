@@ -52,6 +52,13 @@ export type SessionEvent =
   | { type: 'context_usage'; used: number; size: number }
   | { type: 'done'; outcome: string };
 
+export type ContextRef =
+  | { kind: 'git_diff' }
+  | { kind: 'git_staged' }
+  | { kind: 'terminal'; id?: string | null; lines?: number | null }
+  | { kind: 'url'; url: string }
+  | { kind: 'folder'; path: string };
+
 export interface TranscriptBlock {
   id: number;
   kind: 'user' | 'text' | 'thinking' | 'tool' | 'image' | 'error';
@@ -71,6 +78,8 @@ export interface TranscriptBlock {
   plan?: boolean;
   local?: boolean;
   pins?: PinRef[];
+  contexts?: ContextRef[];
+  bookmarked?: boolean;
 }
 
 export interface TurnSummary {
@@ -136,4 +145,64 @@ export interface SymbolHit {
   path: string;
   line: number;
   kind: 'def' | 'ref' | 'call';
+}
+
+export interface ShellInfo {
+  id: string;
+  label: string;
+  program: string;
+  args: string[];
+}
+
+export interface TerminalTabInfo {
+  id: string;
+  title: string;
+  shell: string;
+  cwd: string;
+  alive: boolean;
+  exit_code: number | null;
+}
+
+export interface WorkspaceRuleInfo {
+  file: string;
+  active: boolean;
+  bytes: number;
+  preview: string;
+}
+
+export interface CustomCommandInfo {
+  name: string;
+  description: string;
+  body: string;
+  scope: string;
+  path: string;
+}
+
+export interface WorktreeStatus {
+  is_git: boolean;
+  is_worktree: boolean;
+  branch: string;
+  main_root: string | null;
+  worktree_path: string | null;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+}
+
+export interface MergeBackResult {
+  merged_branch: string;
+  target_branch: string;
+  main_root: string;
+  summary: string;
+}
+
+export interface BranchSibling {
+  id: string;
+  title: string;
+  updated_at: number;
+}
+
+export interface BranchGroup {
+  fork_turn: number;
+  branches: BranchSibling[];
 }

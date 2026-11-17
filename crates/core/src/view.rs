@@ -1,16 +1,17 @@
-//! Read-only workspace views for the desktop UI: file peeks and git diffs.
+//! Workspace views and safe workspace/git actions for the desktop UI.
 //!
 //! Every path here is workspace-relative and passes the same containment guard
-//! the agent's own file tools use, so the UI can never read outside the folder
-//! the user picked. Nothing in this module writes.
+//! the agent's own file tools use, so the UI can never escape the folder
+//! the user picked.
 
-use std::io::{BufRead, BufReader};
+use std::fmt::Write as _;
+use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
-/// Refuse to render files larger than this; the UI shows a "too large" notice.
+/// Refuse to render or write files larger than this; the UI shows a "too large" notice.
 pub const MAX_VIEW_BYTES: u64 = 4 * 1024 * 1024;
 /// Hard ceiling on lines returned in one peek.
 pub const MAX_VIEW_LINES: usize = 4000;
@@ -62,6 +63,26 @@ pub struct FileDiff {
     pub removed: u32,
     pub tracked: bool,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeStatus {
+    pub is_git: bool,
+    pub is_worktree: bool,
+    pub branch: String,
+    pub main_root: Option<String>,
+    pub worktree_path: Option<String>,
+    pub dirty: bool,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeBackSummary {
+    pub merged_branch: String,
+    pub target_branch: String,
+    pub main_root: String,
+    pub summary: String,
 }
 
 /// Resolve a workspace-relative path, refusing anything that escapes the root.
@@ -174,6 +195,24 @@ pub fn read_view(root: &Path, rel: &str, offset: u32, limit: u32) -> Result<File
     })
 }
 
+/// Write UTF-8 content to a workspace-relative file (for inline viewer edits).
+pub fn write_file(root: &Path, rel: &str, content: &str) -> Result<u32, String> {
+    if content.len() as u64 > MAX_VIEW_BYTES {
+        return Err("file content exceeds the 4 MB editor limit".to_string());
+    }
+    let fs_path = resolve(root, rel)?;
+    if fs_path.is_dir() {
+        return Err(format!("{rel:?} is a directory"));
+    }
+    if let Some(parent) = fs_path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&fs_path, content.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(u32::try_from(content.lines().count()).unwrap_or(u32::MAX))
+}
+
 #[cfg(windows)]
 fn quiet(cmd: &mut Command) -> &mut Command {
     use std::os::windows::process::CommandExt;
@@ -204,12 +243,95 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+fn git_stdin(root: &Path, args: &[&str], stdin_bytes: &[u8]) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(root)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = quiet(&mut cmd)
+        .spawn()
+        .map_err(|e| format!("git unavailable: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_bytes)
+            .map_err(|e| format!("git stdin failed: {e}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("git failed: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        return Err(if err.is_empty() {
+            "git exited with an error".to_string()
+        } else {
+            err.to_string()
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// True when `root` is inside a git work tree. Cheap enough to call per open.
 pub fn is_git_repo(root: &Path) -> bool {
     let Ok(root) = root.canonicalize() else {
         return false;
     };
     git(&root, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
+}
+
+/// Revert an entire workspace file back to HEAD (or delete it if untracked).
+pub fn revert_file(root: &Path, rel: &str) -> Result<(), String> {
+    let fs_path = resolve(root, rel)?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("workspace root: {e}"))?;
+    if !is_git_repo(&root_canon) {
+        return Err("this folder is not a git repository".to_string());
+    }
+    let tracked = git(&root_canon, &["ls-files", "--error-unmatch", "--", rel]).is_ok();
+    if tracked {
+        let has_head = git(&root_canon, &["rev-parse", "--verify", "HEAD"]).is_ok();
+        if has_head && git(&root_canon, &["cat-file", "-e", &format!("HEAD:{rel}")]).is_ok() {
+            git(&root_canon, &["checkout", "HEAD", "--", rel])?;
+        } else {
+            let _ = git(&root_canon, &["reset", "HEAD", "--", rel]);
+            if fs_path.is_file() {
+                std::fs::remove_file(&fs_path).map_err(|e| e.to_string())?;
+            }
+        }
+    } else if fs_path.is_file() {
+        std::fs::remove_file(&fs_path).map_err(|e| e.to_string())?;
+    } else {
+        return Err(format!("{rel:?} does not exist"));
+    }
+    Ok(())
+}
+
+/// Revert a single unified diff hunk patch on `rel` using `git apply -R`.
+pub fn revert_hunk(root: &Path, rel: &str, patch: &str) -> Result<(), String> {
+    let _ = resolve(root, rel)?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("workspace root: {e}"))?;
+    if !is_git_repo(&root_canon) {
+        return Err("this folder is not a git repository".to_string());
+    }
+    if patch.trim().is_empty() {
+        return Err("empty diff hunk".to_string());
+    }
+    let mut normalized = patch.replace("\r\n", "\n");
+    if !normalized.ends_with('\n') {
+        normalized.push('\n');
+    }
+    git_stdin(
+        &root_canon,
+        &["apply", "-R", "--unidiff-zero", "-"],
+        normalized.as_bytes(),
+    )?;
+    Ok(())
 }
 
 /// Working-tree changes relative to HEAD, with line counts where git knows them.
@@ -308,8 +430,6 @@ fn count_lines(path: &Path) -> u32 {
 /// Tracked files diff against HEAD; untracked files are rendered as a pure
 /// addition so review still works before anything is staged.
 pub fn diff(root: &Path, rel: &str) -> Result<FileDiff, String> {
-    use std::fmt::Write as _;
-
     let fs_path = resolve(root, rel)?;
     let root_canon = root
         .canonicalize()
@@ -389,6 +509,335 @@ pub fn diff(root: &Path, rel: &str) -> Result<FileDiff, String> {
     })
 }
 
+/// Combined repository diff (for `@git:diff` or `@git:staged` context attachment).
+pub fn diff_all(root: &Path, staged_only: bool) -> Result<String, String> {
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("workspace root: {e}"))?;
+    if !is_git_repo(&root_canon) {
+        return Err("this folder is not a git repository".to_string());
+    }
+    let mut body = if staged_only {
+        git(
+            &root_canon,
+            &["diff", "--no-color", "--no-ext-diff", "-U3", "--cached"],
+        )?
+    } else {
+        let mut out = git(
+            &root_canon,
+            &["diff", "--no-color", "--no-ext-diff", "-U3", "HEAD"],
+        )
+        .unwrap_or_else(|_| {
+            git(&root_canon, &["diff", "--no-color", "--no-ext-diff", "-U3"]).unwrap_or_default()
+        });
+        if let Ok(changed) = changes(&root_canon) {
+            let untracked: Vec<_> = changed.into_iter().filter(|c| c.status == "?").collect();
+            if !untracked.is_empty() {
+                out.push_str("\n# Untracked files:\n");
+                for f in untracked.iter().take(20) {
+                    let _ = writeln!(out, "#   + {} ({} lines)", f.path, f.added);
+                }
+            }
+        }
+        out
+    };
+    if body.trim().is_empty() {
+        return Ok(if staged_only {
+            "(no staged changes)".to_string()
+        } else {
+            "(working tree is clean)".to_string()
+        });
+    }
+    if body.len() > 96 * 1024 {
+        body.truncate(floor_char_boundary(&body, 96 * 1024));
+        body.push_str("\n[… diff truncated to 96 KB]\n");
+    }
+    Ok(body)
+}
+
+/// Concise listing of a workspace subdirectory for `@folder:<path>` context attachment.
+pub fn list_dir_summary(root: &Path, rel: &str, max_entries: usize) -> Result<String, String> {
+    let base = if rel.trim().is_empty() || rel.trim() == "." {
+        root.canonicalize()
+            .map_err(|e| format!("workspace root: {e}"))?
+    } else {
+        resolve(root, rel)?
+    };
+    if !base.is_dir() {
+        return Err(format!("{rel:?} is not a directory"));
+    }
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("workspace root: {e}"))?;
+    let mut out = String::new();
+    let mut stack = vec![base];
+    let mut count = 0usize;
+    let skip = [
+        ".git",
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        ".next",
+        ".venv",
+        "__pycache__",
+    ];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut items: Vec<_> = entries.flatten().collect();
+        items.sort_by_key(std::fs::DirEntry::file_name);
+        let mut subdirs = Vec::new();
+        for e in items {
+            let name = e.file_name();
+            let name_s = name.to_string_lossy();
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+            if is_dir && (name_s.starts_with('.') || skip.contains(&name_s.as_ref())) {
+                continue;
+            }
+            let p = e.path();
+            let rel_p = p.strip_prefix(&root_canon).unwrap_or(&p);
+            let rel_s = rel_p.to_string_lossy().replace('\\', "/");
+            if count < max_entries {
+                let _ = writeln!(out, "{rel_s}{}", if is_dir { "/" } else { "" });
+                count += 1;
+            }
+            if is_dir && count < max_entries {
+                subdirs.push(p);
+            }
+        }
+        for d in subdirs.into_iter().rev() {
+            stack.push(d);
+        }
+        if count >= max_entries {
+            let _ = writeln!(out, "[… truncated at {max_entries} entries]");
+            break;
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(empty directory)\n");
+    }
+    Ok(out)
+}
+
+/// Inspect git & worktree state for a workspace path.
+pub fn worktree_status(root: &Path) -> Result<WorktreeStatus, String> {
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("workspace root: {e}"))?;
+    if !is_git_repo(&root_canon) {
+        return Ok(WorktreeStatus {
+            is_git: false,
+            is_worktree: false,
+            branch: String::new(),
+            main_root: None,
+            worktree_path: None,
+            dirty: false,
+            ahead: 0,
+            behind: 0,
+        });
+    }
+    let git_dir = PathBuf::from(git(&root_canon, &["rev-parse", "--git-dir"])?.trim());
+    let common_dir = PathBuf::from(git(&root_canon, &["rev-parse", "--git-common-dir"])?.trim());
+    let git_dir_abs = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        root_canon.join(git_dir)
+    };
+    let common_abs = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        root_canon.join(common_dir)
+    };
+    let git_canon = git_dir_abs.canonicalize().unwrap_or(git_dir_abs);
+    let common_canon = common_abs.canonicalize().unwrap_or(common_abs);
+    let is_worktree = git_canon != common_canon;
+    let main_root = if is_worktree {
+        common_canon.parent().map(dunce_str)
+    } else {
+        None
+    };
+    let branch = git(&root_canon, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let dirty = !git(&root_canon, &["status", "--porcelain"])
+        .unwrap_or_default()
+        .trim()
+        .is_empty();
+    let (ahead, behind) = if is_worktree {
+        let base_branch = main_root
+            .as_deref()
+            .and_then(|mr| git(Path::new(mr), &["rev-parse", "--abbrev-ref", "HEAD"]).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "HEAD");
+        if let Some(base) = base_branch {
+            let range = format!("{base}...HEAD");
+            let counts = git(
+                &root_canon,
+                &["rev-list", "--left-right", "--count", &range],
+            )
+            .unwrap_or_default();
+            let mut nums = counts.split_whitespace();
+            let b = nums.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0);
+            let a = nums.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0);
+            (a, b)
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+    Ok(WorktreeStatus {
+        is_git: true,
+        is_worktree,
+        branch,
+        main_root,
+        worktree_path: is_worktree.then(|| dunce_str(&root_canon)),
+        dirty,
+        ahead,
+        behind,
+    })
+}
+
+fn dunce_str(path: &Path) -> String {
+    let s = path.display().to_string();
+    #[cfg(windows)]
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        return stripped.to_string();
+    }
+    s
+}
+
+/// Create an isolated git worktree at `dest` on a new branch.
+pub fn worktree_create(root: &Path, dest: &Path, branch: &str) -> Result<String, String> {
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("workspace root: {e}"))?;
+    if !is_git_repo(&root_canon) {
+        return Err("this folder is not a git repository".to_string());
+    }
+    if git(&root_canon, &["rev-parse", "--verify", "HEAD"]).is_err() {
+        return Err("repository has no commits yet — make an initial commit first".to_string());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("worktree dir: {e}"))?;
+    }
+    let branch_clean = sanitize_branch(branch);
+    if branch_clean.is_empty() {
+        return Err("invalid branch name".to_string());
+    }
+    let dest_s = dest.display().to_string();
+    git(
+        &root_canon,
+        &["worktree", "add", "-b", &branch_clean, &dest_s, "HEAD"],
+    )?;
+    let canon = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
+    Ok(dunce_str(&canon))
+}
+
+fn sanitize_branch(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['/', '.'])
+        .to_string()
+}
+
+/// Commit any uncommitted changes in a worktree, then merge its branch back into the main repo.
+pub fn worktree_merge_back(worktree_root: &Path) -> Result<MergeBackSummary, String> {
+    let st = worktree_status(worktree_root)?;
+    if !st.is_worktree {
+        return Err("current workspace is not an isolated worktree".to_string());
+    }
+    let main_root = st
+        .main_root
+        .ok_or_else(|| "could not locate main repository root".to_string())?;
+    let main_path = Path::new(&main_root);
+    let wt_canon = worktree_root
+        .canonicalize()
+        .map_err(|e| format!("workspace root: {e}"))?;
+
+    if !git(main_path, &["status", "--porcelain"])
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Err(
+            "the main repository has uncommitted changes — commit or stash them before merging back"
+                .to_string(),
+        );
+    }
+
+    if st.dirty {
+        git(&wt_canon, &["add", "-A"])?;
+        git(
+            &wt_canon,
+            &[
+                "-c",
+                "user.name=hate-agent",
+                "-c",
+                "user.email=hate-agent@local",
+                "commit",
+                "-m",
+                &format!("hate-agent worktree ({})", st.branch),
+            ],
+        )?;
+    }
+
+    let target_branch = git(main_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map_or_else(|_| "main".to_string(), |s| s.trim().to_string());
+
+    let merge_res = git(main_path, &["merge", "--no-edit", &st.branch]);
+    match merge_res {
+        Ok(out) => Ok(MergeBackSummary {
+            merged_branch: st.branch,
+            target_branch,
+            main_root,
+            summary: out.trim().to_string(),
+        }),
+        Err(e) => {
+            let _ = git(main_path, &["merge", "--abort"]);
+            Err(format!("merge failed (aborted cleanly): {e}"))
+        }
+    }
+}
+
+/// Remove an isolated worktree and return the main repository path.
+pub fn worktree_remove(worktree_root: &Path, force: bool) -> Result<String, String> {
+    let st = worktree_status(worktree_root)?;
+    if !st.is_worktree {
+        return Err("current workspace is not an isolated worktree".to_string());
+    }
+    let main_root = st
+        .main_root
+        .ok_or_else(|| "could not locate main repository root".to_string())?;
+    let main_path = Path::new(&main_root);
+    let wt_s = dunce_str(
+        &worktree_root
+            .canonicalize()
+            .unwrap_or_else(|_| worktree_root.to_path_buf()),
+    );
+
+    if force {
+        git(main_path, &["worktree", "remove", "--force", &wt_s])?;
+    } else {
+        git(main_path, &["worktree", "remove", &wt_s])?;
+    }
+    if st.branch.starts_with("hate/") {
+        let flag = if force { "-D" } else { "-d" };
+        let _ = git(main_path, &["branch", flag, &st.branch]);
+    }
+    Ok(main_root)
+}
+
 fn floor_char_boundary(s: &str, i: usize) -> usize {
     if i >= s.len() {
         return s.len();
@@ -447,6 +896,16 @@ mod tests {
     }
 
     #[test]
+    fn writes_and_reads_file() {
+        let (_d, root) = ws();
+        let count = write_file(&root, "src/new.txt", "hello\nworld\n").unwrap();
+        assert_eq!(count, 2);
+        let v = read_view(&root, "src/new.txt", 1, 10).unwrap();
+        assert_eq!(v.lines, vec!["hello", "world"]);
+        assert!(write_file(&root, "../escape.txt", "nope").is_err());
+    }
+
+    #[test]
     fn reads_the_tail_without_truncation() {
         let (_d, root) = ws();
         let v = read_view(&root, "a.txt", 3, 10).unwrap();
@@ -483,6 +942,7 @@ mod tests {
         if !run(&["init", "-q"]) {
             return None;
         }
+        let _ = run(&["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("a.txt"), "one\n").ok()?;
         if !run(&["add", "."]) {
             return None;
@@ -538,6 +998,61 @@ mod tests {
             .expect("fresh.txt listed");
         assert_eq!(entry.status, "?");
         assert_eq!(entry.added, 2);
+    }
+
+    #[test]
+    fn revert_file_restores_tracked_and_removes_untracked() {
+        let Some((_d, root)) = init_repo() else {
+            return;
+        };
+        std::fs::write(root.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(root.join("extra.txt"), "temp\n").unwrap();
+        revert_file(&root, "a.txt").unwrap();
+        revert_file(&root, "extra.txt").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "one\n"
+        );
+        assert!(!root.join("extra.txt").exists());
+    }
+
+    #[test]
+    fn revert_hunk_applies_reverse_patch() {
+        let Some((_d, root)) = init_repo() else {
+            return;
+        };
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        let d = diff(&root, "a.txt").unwrap();
+        revert_hunk(&root, "a.txt", &d.unified).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "one\n"
+        );
+    }
+
+    #[test]
+    fn worktree_lifecycle_create_merge_and_remove() {
+        let Some((_d, root)) = init_repo() else {
+            return;
+        };
+        let wt_parent = tempfile::tempdir().unwrap();
+        let wt_dest = wt_parent.path().join("wt1");
+        let wt_path = worktree_create(&root, &wt_dest, "hate/test-wt").unwrap();
+        let st = worktree_status(Path::new(&wt_path)).unwrap();
+        assert!(st.is_worktree);
+        assert_eq!(st.branch, "hate/test-wt");
+
+        std::fs::write(Path::new(&wt_path).join("wt_file.txt"), "isolated\n").unwrap();
+        let merged = worktree_merge_back(Path::new(&wt_path)).unwrap();
+        assert_eq!(merged.merged_branch, "hate/test-wt");
+        assert!(root.join("wt_file.txt").exists());
+
+        let back = worktree_remove(Path::new(&wt_path), false).unwrap();
+        assert!(Path::new(&back).join("wt_file.txt").exists());
     }
 
     #[test]

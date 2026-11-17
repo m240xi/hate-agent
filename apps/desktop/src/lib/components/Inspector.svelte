@@ -43,7 +43,6 @@
   const sessionTokTotal = $derived(
     session.sessionTotals.input + session.sessionTotals.output,
   );
-
 </script>
 
 <div class="inspector">
@@ -106,6 +105,82 @@
     </div>
   </section>
 
+  {#if session.workspacePath && session.worktree?.is_git}
+  <section class="sec">
+    <h3 class="section-title">
+      <Icon name="branch" size={11} /> Git Worktree
+      <span class="spacer"></span>
+      <span class="wt-branch mono">{session.worktree.branch}</span>
+    </h3>
+    {#if session.worktree.is_worktree}
+      <p class="empty-body" style="margin-bottom: 8px">
+        Isolated branch active{session.worktree.dirty ? ' (uncommitted changes)' : ''}.
+      </p>
+      <div class="wt-actions">
+        <button
+          class="cp-rewind"
+          onclick={() => void session.mergeBackWorktree()}
+          disabled={session.running}
+          title="Commit any changes and merge back into the main branch"
+        >
+          Merge back
+        </button>
+        <button
+          class="cp-rewind danger"
+          onclick={() => void session.discardWorktree(session.worktree?.dirty ?? false)}
+          disabled={session.running}
+          title="Remove this worktree and return to the main repository"
+        >
+          {session.worktree.dirty ? 'Force discard' : 'Return to main'}
+        </button>
+      </div>
+    {:else}
+      <p class="empty-body" style="margin-bottom: 8px">
+        Spin up an isolated git worktree so edits don't touch your main working tree until merged.
+      </p>
+      <button
+        class="cp-rewind"
+        onclick={() => void session.enterWorktree()}
+        disabled={session.running}
+      >
+        Isolate in worktree
+      </button>
+    {/if}
+  </section>
+  {/if}
+
+  {#if session.workspacePath}
+  <section class="sec">
+    <h3 class="section-title">
+      <Icon name="book" size={11} /> Workspace Rules
+      <span class="spacer"></span>
+      <button class="sec-btn" onclick={() => void session.createRulesFile('.hate-agent.md')} title="Create or open .hate-agent.md">
+        <Icon name="plus" size={10} />
+      </button>
+    </h3>
+    {#if session.workspaceRules.length === 0}
+      <div class="empty">
+        <p class="empty-title">No instruction files</p>
+        <p class="empty-body">
+          Add <code>.hate-agent.md</code> or <code>AGENTS.md</code> to set persistent project rules.
+        </p>
+      </div>
+    {:else}
+      <ul class="files">
+        {#each session.workspaceRules as r (r.file)}
+          <li class="file">
+            <button class="fpath mono" onclick={() => void session.openFile(r.file)} title={r.preview}>
+              <span class="rule-dot" class:on={r.active}>{r.active ? '●' : '○'}</span>
+              {r.file}
+            </button>
+            <span class="fstat mono">{r.bytes} B</span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </section>
+  {/if}
+
   {#if session.workspacePath || session.checkpoints.length > 0}
   <section class="sec">
     <h3 class="section-title"><Icon name="history" size={11} /> Checkpoints</h3>
@@ -163,6 +238,14 @@
               {f.path}
             </button>
             <span class="fstat mono"><span class="add">+{f.added}</span> <span class="del">-{f.removed}</span></span>
+            <button
+              class="sec-btn revert-btn"
+              onclick={() => void session.revertChangedFile(f.path)}
+              title={`Revert ${f.path}`}
+              aria-label={`Revert ${f.path}`}
+            >
+              <Icon name="undo" size={10} />
+            </button>
           </li>
         {/each}
       </ul>
@@ -203,6 +286,30 @@
   .sec-btn:hover {
     background: var(--bg-3);
     color: var(--fg-0);
+  }
+  .revert-btn:hover {
+    color: var(--err);
+  }
+  .wt-branch {
+    font-size: 10px;
+    color: var(--accent);
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .wt-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .rule-dot {
+    color: var(--fg-3);
+    margin-right: 4px;
+    font-size: 9px;
+  }
+  .rule-dot.on {
+    color: var(--ok);
   }
   .empty {
     padding: 8px 10px;
@@ -353,20 +460,28 @@
   .cp-rewind {
     flex: none;
     font-size: 10px;
-    padding: 1px 7px;
+    padding: 2px 7px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--bg-2);
     color: var(--fg-2);
   }
-  .cp-rewind:hover {
+  .cp-rewind:hover:not(:disabled) {
     color: var(--warn);
     border-color: var(--warn);
+  }
+  .cp-rewind.danger:hover:not(:disabled) {
+    color: var(--err);
+    border-color: var(--err);
+  }
+  .cp-rewind:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
   .file {
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: 6px;
     font-size: 11.5px;
   }
   .fpath {
@@ -399,7 +514,8 @@
   }
   .fstat {
     flex: none;
-    font-size: 10.5px;
+    font-size: 10px;
+    color: var(--fg-3);
   }
   .add {
     color: var(--ok);

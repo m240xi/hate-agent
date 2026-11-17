@@ -220,6 +220,10 @@ async fn ensure_session(
         });
 
     let ledger = ledger_handle();
+    let terminal = app
+        .try_state::<crate::terminal::TerminalState>()
+        .and_then(|t| hate_core::TerminalToolkit::new(t.bridge()).ok())
+        .map(std::sync::Arc::new);
     let mcp = app.state::<McpState>().hub.clone();
     let skills = hate_core::SkillStore::default_dir()
         .map(|d| std::sync::Arc::new(hate_core::SkillStore::new(d)));
@@ -233,6 +237,7 @@ async fn ensure_session(
         ledger,
         persist,
         tools,
+        terminal,
         mcp: Some(mcp),
         skills,
         auto_skills,
@@ -394,22 +399,37 @@ fn ledger_handle() -> Option<std::sync::Arc<Ledger>> {
 
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 pub async fn session_send(
     state: State<'_, Sessions>,
     local: State<'_, local_runtime::LocalRuntimeState>,
+    term: State<'_, crate::terminal::TerminalState>,
     app: AppHandle,
     text: String,
     pins: Option<Vec<PinRef>>,
+    contexts: Option<Vec<crate::extras::ContextRef>>,
     images: Option<Vec<ImageAttachment>>,
 ) -> Result<(), String> {
     let handle = ensure_session(&state, &local, &app).await?;
-    let wire = match pins.as_deref() {
+    let mut wire = match pins.as_deref() {
         Some(list) if !list.is_empty() => {
             let root = workspace_root(&state)?;
             attach_pinned(&root, &text, list)
         }
         _ => text,
     };
+    if let Some(ctx_list) = contexts.as_deref()
+        && !ctx_list.is_empty()
+    {
+        let root = workspace_root(&state).ok();
+        let ctx_block = crate::extras::build_context_block(root.as_deref(), &term, ctx_list).await;
+        wire.push_str(
+            "
+
+",
+        );
+        wire.push_str(&ctx_block);
+    }
     let parts = prepare_images(images.unwrap_or_default())?;
     handle
         .command(Command::user_with_images(wire, parts))
@@ -1576,8 +1596,19 @@ pub fn session_rewind_message(
     .unwrap_or(u32::MAX);
 
     if branch {
+        let database = db()?;
+        let (parent_id, parent_turn) = database.get_branch_meta(&key)?;
+        let root_parent = if parent_turn == Some(user_index) {
+            parent_id.unwrap_or_else(|| key.clone())
+        } else {
+            key.clone()
+        };
         let new_key = uuid::Uuid::new_v4().to_string();
-        db()?.create(&new_key, &persisted.mode)?;
+        database.create(&new_key, &persisted.mode)?;
+        if guard.workspace.is_some() {
+            database.set_workspace(&new_key, guard.workspace.as_deref(), &persisted.mode)?;
+        }
+        database.set_branch_meta(&new_key, Some(&root_parent), Some(user_index))?;
         persisted.key.clone_from(&new_key);
         persisted.title = title.unwrap_or_else(|| "branch".to_string());
         persisted.cost_usd = 0.0;
@@ -1605,13 +1636,110 @@ fn mode_for(workspace: Option<&str>) -> &'static str {
     if workspace.is_some() { "code" } else { "chat" }
 }
 
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct BranchSiblingOut {
+    pub id: String,
+    pub title: String,
+    pub updated_at: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct BranchGroupOut {
+    pub fork_turn: u32,
+    pub branches: Vec<BranchSiblingOut>,
+}
+
+/// Branch the current session right after the `user_index`-th turn (keeping that
+/// turn's user prompt and assistant response intact) into a new session.
 #[tauri::command]
 #[specta::specta]
-pub fn session_set_workspace(
+pub fn session_branch_after(
     state: State<'_, Sessions>,
-    path: Option<String>,
-) -> Result<(), String> {
+    user_index: u32,
+    title: Option<String>,
+    ui_state: Option<String>,
+) -> Result<RewindResult, String> {
+    use hate_core::SessionJournal as _;
+
     ensure_idle(&state)?;
+    let mut guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    let key = guard
+        .key
+        .clone()
+        .ok_or_else(|| "no session is open".to_string())?;
+    let journal = SqliteJournal::new()?;
+    let mut persisted = journal
+        .load(&key)
+        .ok_or_else(|| "this session has no saved history yet".to_string())?;
+
+    let _ = truncate_to_user_index(&mut persisted.messages, user_index + 1);
+    persisted.turn = u32::try_from(
+        persisted
+            .messages
+            .iter()
+            .filter(|m| matches!(m, hate_core::provider::Message::User { .. }))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+
+    let database = db()?;
+    let (parent_id, parent_turn) = database.get_branch_meta(&key)?;
+    let root_parent = if parent_turn == Some(user_index) {
+        parent_id.unwrap_or_else(|| key.clone())
+    } else {
+        key.clone()
+    };
+    let new_key = uuid::Uuid::new_v4().to_string();
+    database.create(&new_key, &persisted.mode)?;
+    if guard.workspace.is_some() {
+        database.set_workspace(&new_key, guard.workspace.as_deref(), &persisted.mode)?;
+    }
+    database.set_branch_meta(&new_key, Some(&root_parent), Some(user_index))?;
+    persisted.key.clone_from(&new_key);
+    if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+        persisted.title = t;
+    }
+    persisted.cost_usd = 0.0;
+    persisted.usage = hate_core::TokenUsage::default();
+    journal.save(&persisted);
+    if let Some(ui) = ui_state {
+        database.save_ui(&new_key, &ui)?;
+    }
+    guard.key = Some(new_key.clone());
+    guard.restore = Some(persisted);
+    guard.handle = None;
+    Ok(RewindResult {
+        session_id: new_key,
+        branched: true,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn session_branches(session_id: String) -> Result<Vec<BranchGroupOut>, String> {
+    let groups = db()?.branch_groups(&session_id)?;
+    Ok(groups
+        .into_iter()
+        .map(|g| BranchGroupOut {
+            fork_turn: g.fork_turn,
+            branches: g
+                .branches
+                .into_iter()
+                .map(|b| BranchSiblingOut {
+                    id: b.id,
+                    title: b.title,
+                    updated_at: b.updated_at,
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+pub(crate) fn set_workspace_path(state: &Sessions, path: Option<String>) -> Result<(), String> {
+    ensure_idle(state)?;
     let path = path.filter(|p| !p.trim().is_empty());
     if let Some(p) = path.as_deref()
         && !std::path::Path::new(p).is_dir()
@@ -1636,6 +1764,15 @@ pub fn session_set_workspace(
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn session_set_workspace(
+    state: State<'_, Sessions>,
+    path: Option<String>,
+) -> Result<(), String> {
+    set_workspace_path(&state, path)
 }
 
 #[tauri::command]
@@ -1685,7 +1822,7 @@ fn db() -> Result<SessionDb, String> {
     SessionDb::open()
 }
 
-fn ensure_idle(state: &Sessions) -> Result<(), String> {
+pub(crate) fn ensure_idle(state: &Sessions) -> Result<(), String> {
     let guard = state
         .inner
         .lock()
@@ -1872,7 +2009,7 @@ pub fn workspace_index(path: String) -> Result<WorkspaceIndexOut, String> {
         .map_err(|e| format!("index shape mismatch: {e}"))
 }
 
-fn workspace_root(state: &Sessions) -> Result<std::path::PathBuf, String> {
+pub(crate) fn workspace_root(state: &Sessions) -> Result<std::path::PathBuf, String> {
     let from_session = {
         let guard = state
             .inner

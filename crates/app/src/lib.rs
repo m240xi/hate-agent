@@ -2,10 +2,12 @@
 
 mod antigravity;
 mod commands;
+mod extras;
 mod images;
 mod local_runtime;
 mod presence;
 mod sessions_db;
+mod terminal;
 mod web_search_mcp;
 
 use tauri::Manager;
@@ -24,6 +26,8 @@ pub fn run() {
         commands::session_answer,
         commands::session_respond_permission,
         commands::session_rewind_message,
+        commands::session_branch_after,
+        commands::session_branches,
         commands::session_set_options,
         commands::session_set_provider,
         commands::models_list,
@@ -60,6 +64,25 @@ pub fn run() {
         commands::image_reveal,
         commands::workspace_changes,
         commands::workspace_diff,
+        extras::workspace_write_file,
+        extras::workspace_revert_file,
+        extras::workspace_revert_hunk,
+        extras::workspace_rules_info,
+        extras::workspace_create_rules,
+        extras::custom_commands_list,
+        extras::custom_command_save,
+        extras::workspace_worktree_status,
+        extras::workspace_worktree_create,
+        extras::workspace_worktree_merge_back,
+        extras::workspace_worktree_remove,
+        extras::fetch_url_context,
+        terminal::terminal_list_shells,
+        terminal::terminal_list,
+        terminal::terminal_create,
+        terminal::terminal_write,
+        terminal::terminal_resize,
+        terminal::terminal_close,
+        terminal::terminal_read_buffer,
         commands::mcp_list,
         commands::mcp_refresh,
         commands::mcp_save,
@@ -119,6 +142,7 @@ pub fn run() {
             app.manage(commands::UpdateState::default());
             app.manage(antigravity::AntigravityState::default());
             app.manage(local_runtime::LocalRuntimeState::default());
+            app.manage(terminal::TerminalState::default());
             let discord_on =
                 hate_auth::AuthContext::load().map_or(true, |c| c.config.discord_presence);
             let presence = presence::Presence::start(discord_on);
@@ -140,6 +164,7 @@ pub fn run() {
         .run(|app, ev| {
             if let tauri::RunEvent::Exit = ev {
                 local_runtime::shutdown_sync(&app.state::<local_runtime::LocalRuntimeState>());
+                app.state::<terminal::TerminalState>().shutdown_all();
             }
         });
 }

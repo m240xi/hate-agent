@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,6 +9,19 @@ pub struct StoredSession {
     pub meta: SessionMeta,
     pub persisted: Option<PersistedSession>,
     pub ui_state: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchSiblingRow {
+    pub id: String,
+    pub title: String,
+    pub updated_at: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchGroupRow {
+    pub fork_turn: u32,
+    pub branches: Vec<BranchSiblingRow>,
 }
 
 pub struct SessionDb {
@@ -42,6 +56,13 @@ impl SessionDb {
             "ALTER TABLE sessions ADD COLUMN title_manual INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // Conversation branching metadata for tree navigation (< 1 / N >).
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN fork_turn INTEGER", []);
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_id, fork_turn)",
+            [],
+        );
         Ok(Self { path })
     }
 
@@ -64,6 +85,116 @@ impl SessionDb {
             )
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn set_branch_meta(
+        &self,
+        key: &str,
+        parent_id: Option<&str>,
+        fork_turn: Option<u32>,
+    ) -> Result<(), String> {
+        self.conn()?
+            .execute(
+                "UPDATE sessions SET parent_id = ?1, fork_turn = ?2 WHERE id = ?3",
+                params![parent_id, fork_turn.map(i64::from), key],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_branch_meta(&self, key: &str) -> Result<(Option<String>, Option<u32>), String> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT parent_id, fork_turn FROM sessions WHERE id = ?1",
+                params![key],
+                |r| {
+                    let parent: Option<String> = r.get(0)?;
+                    let turn: Option<i64> = r.get(1)?;
+                    Ok((parent, turn.and_then(|t| u32::try_from(t).ok())))
+                },
+            )
+            .ok();
+        Ok(row.unwrap_or((None, None)))
+    }
+
+    pub fn branch_groups(&self, key: &str) -> Result<Vec<BranchGroupRow>, String> {
+        let conn = self.conn()?;
+        let mut by_turn: BTreeMap<u32, Vec<BranchSiblingRow>> = BTreeMap::new();
+
+        // 1. If this session itself forked from a parent at `fork_turn`, collect the
+        // parent and all siblings sharing that (parent_id, fork_turn).
+        let (own_parent, own_turn) = self.get_branch_meta(key)?;
+        if let (Some(pid), Some(ft)) = (own_parent.as_deref(), own_turn) {
+            let mut list = Vec::new();
+            if let Some(parent_row) = Self::session_row(&conn, pid) {
+                list.push(parent_row);
+            }
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, updated_at FROM sessions
+                     WHERE parent_id = ?1 AND fork_turn = ?2
+                     ORDER BY updated_at ASC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![pid, i64::from(ft)], sibling_row)
+                .map_err(|e| e.to_string())?;
+            for r in rows {
+                let row = r.map_err(|e| e.to_string())?;
+                if !list.iter().any(|x| x.id == row.id) {
+                    list.push(row);
+                }
+            }
+            if list.len() > 1 {
+                by_turn.insert(ft, list);
+            }
+        }
+
+        // 2. Collect all direct child branches forked FROM `key` at any turn.
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, updated_at, fork_turn FROM sessions
+                 WHERE parent_id = ?1 AND fork_turn IS NOT NULL
+                 ORDER BY fork_turn ASC, updated_at ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let self_row = Self::session_row(&conn, key);
+        let child_rows = stmt
+            .query_map(params![key], |r| {
+                Ok((
+                    sibling_row(r)?,
+                    u32::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in child_rows {
+            let (row, ft) = r.map_err(|e| e.to_string())?;
+            let entry = by_turn
+                .entry(ft)
+                .or_insert_with(|| self_row.clone().into_iter().collect());
+            if !entry.iter().any(|x| x.id == row.id) {
+                entry.push(row);
+            }
+        }
+
+        Ok(by_turn
+            .into_iter()
+            .filter(|(_, branches)| branches.len() > 1)
+            .map(|(fork_turn, branches)| BranchGroupRow {
+                fork_turn,
+                branches,
+            })
+            .collect())
+    }
+
+    fn session_row(conn: &Connection, id: &str) -> Option<BranchSiblingRow> {
+        conn.query_row(
+            "SELECT id, title, updated_at FROM sessions WHERE id = ?1",
+            params![id],
+            sibling_row,
+        )
+        .ok()
     }
 
     pub fn load(&self, key: &str) -> Result<Option<StoredSession>, String> {
@@ -180,6 +311,14 @@ impl SessionDb {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn sibling_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BranchSiblingRow> {
+    Ok(BranchSiblingRow {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        updated_at: u32::try_from(r.get::<_, i64>(2)?).unwrap_or(u32::MAX),
+    })
 }
 
 fn meta_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {

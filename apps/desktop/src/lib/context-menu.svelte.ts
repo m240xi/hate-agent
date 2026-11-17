@@ -106,6 +106,23 @@ function messageActions(el: HTMLElement): MenuEntry[] {
       run: () => emit('hate:edit-message', { id }),
     });
   }
+  if (Number.isFinite(id) && (kind === 'user' || kind === 'text')) {
+    out.push(sep, {
+      id: 'bookmark',
+      label: block?.bookmarked ? 'Remove bookmark' : 'Bookmark message',
+      icon: 'star',
+      run: () => session.toggleBookmark(id),
+    });
+  }
+  if (kind === 'text' && Number.isFinite(id)) {
+    out.push({
+      id: 'branch-after',
+      label: 'Branch from here',
+      icon: 'branch',
+      disabled: session.running,
+      run: () => session.branchAfterBlock(id),
+    });
+  }
   if (kind === 'text' && session.canRegenerate) {
     out.push(sep, {
       id: 'regen',
@@ -189,6 +206,21 @@ function fileActions(el: HTMLElement): MenuEntry[] {
       icon: 'paperclip',
       run: () => session.togglePin(path),
     });
+    if (session.changedFiles.some((f) => f.path === path)) {
+      out.push({
+        id: 'diff',
+        label: 'View diff',
+        icon: 'diff',
+        run: () => session.openDiff(path),
+      });
+      out.push({
+        id: 'revert',
+        label: 'Revert changes',
+        icon: 'undo',
+        danger: true,
+        run: () => session.revertChangedFile(path),
+      });
+    }
   }
   return out;
 }

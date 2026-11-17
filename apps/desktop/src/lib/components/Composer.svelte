@@ -6,6 +6,7 @@
   import ModelPicker from './ModelPicker.svelte';
   import ThinkingMenu from './ThinkingMenu.svelte';
   import PlanBar from './PlanBar.svelte';
+  import type { ContextRef } from '../types';
 
   let ta = $state<HTMLTextAreaElement | null>(null);
   let wrap = $state<HTMLDivElement | null>(null);
@@ -18,6 +19,21 @@
   const folderName = $derived(
     session.workspacePath?.split(/[\\/]/).filter(Boolean).pop() ?? '',
   );
+
+  function ctxIcon(c: ContextRef): string {
+    if (c.kind === 'git_diff' || c.kind === 'git_staged') return 'diff';
+    if (c.kind === 'terminal') return 'terminal';
+    if (c.kind === 'url') return 'globe';
+    return 'folder';
+  }
+
+  function ctxLabel(c: ContextRef): string {
+    if (c.kind === 'git_diff') return '@git:diff';
+    if (c.kind === 'git_staged') return '@git:staged';
+    if (c.kind === 'terminal') return '@terminal';
+    if (c.kind === 'url') return `@url ${c.url}`;
+    return `@folder:${c.path}`;
+  }
 
   // Measure the composer width via ResizeObserver rather than `container-type:
   // inline-size`: CSS layout containment creates both a stacking context (trapping
@@ -103,7 +119,7 @@
       paletteOpen = true;
       return;
     }
-    if (e.key === '@' && session.workspacePath && session.tree.length > 0) {
+    if (e.key === '@' && (session.draft.length === 0 || /\s$/.test(session.draft))) {
       e.preventDefault();
       pickerOpen = true;
     }
@@ -188,8 +204,22 @@
         {session.model} can't see images — the attachment will be ignored by the model.
       </p>
     {/if}
-    {#if session.pinned.length > 0}
-      <ul class="pins" aria-label="Attached files">
+    {#if session.pinned.length > 0 || session.contexts.length > 0}
+      <ul class="pins" aria-label="Attached context">
+        {#each session.contexts as c, ci}
+          <li class="pin-chip ctx">
+            <Icon name={ctxIcon(c)} size={10} />
+            <span class="pin-path mono" title={ctxLabel(c)}>{ctxLabel(c)}</span>
+            <button
+              class="pin-x"
+              onclick={() => session.removeContext(ci)}
+              aria-label={`Detach ${ctxLabel(c)}`}
+              title="Remove from this message"
+            >
+              <Icon name="x" size={9} />
+            </button>
+          </li>
+        {/each}
         {#each session.pinned as p (p.path)}
           <li class="pin-chip">
             <Icon name="file" size={10} />
@@ -219,8 +249,8 @@
         : session.planMode
           ? 'Describe what to plan — nothing changes until you approve'
           : session.workspacePath
-            ? 'Describe a change — / for commands, @ for files'
-            : 'Ask anything — / for commands'}
+            ? 'Describe a change ? / for commands, @ for files & context'
+            : 'Ask anything ? / for commands, @ for terminal or URL'}
       rows="1"
       aria-label="Message composer"
       disabled={session.sessionState === 'awaiting_permission'}
@@ -250,8 +280,10 @@
             disabled={session.running}
             aria-label="Change folder"
           >
-            <Icon name="folder" size={13} />
-            <span class="folder-name">{folderName}</span>
+            <Icon name={session.worktree?.is_worktree ? 'branch' : 'folder'} size={13} />
+            <span class="folder-name">
+              {folderName}{#if session.worktree?.is_worktree} ? wt{/if}
+            </span>
           </button>
           <button
             class="folder-x"
@@ -300,7 +332,7 @@
         <button
           class="send"
           onclick={() => session.send()}
-          disabled={!session.draft.trim() && session.attachments.length === 0}
+          disabled={!session.draft.trim() && session.attachments.length === 0 && session.contexts.length === 0 && session.pinned.length === 0}
           aria-label="Send message"
           title="Send (Enter) · Shift+Enter for a new line"
         >
@@ -567,6 +599,10 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+  }
+  .pin-chip.ctx {
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+    background: var(--accent-soft);
   }
   .pin-chip {
     display: inline-flex;

@@ -11,8 +11,11 @@ import {
   fixtureUsage,
 } from './fixtures';
 import type {
+  BranchGroup,
   ChangedFile,
   CheckpointEntry,
+  ContextRef,
+  CustomCommandInfo,
   FailureReason,
   FileDiff,
   FileNode,
@@ -21,10 +24,14 @@ import type {
   PinRef,
   PlanStep,
   SessionEvent,
+  ShellInfo,
   SymbolHit,
+  TerminalTabInfo,
   TokenUsage,
   TranscriptBlock,
   TurnOutcome,
+  WorkspaceRuleInfo,
+  WorktreeStatus,
 } from './types';
 import type {
   ImageAttachment,
@@ -112,6 +119,7 @@ export interface ViewerState {
 export interface QueuedMessage {
   text: string;
   pins: PinRef[];
+  contexts: ContextRef[];
   images: ImageAttachment[];
 }
 
@@ -129,6 +137,23 @@ class SessionStore {
   selectedPath = $state<string | null>(null);
   viewer = $state<ViewerState | null>(null);
   pinned = $state<PinRef[]>([]);
+  contexts = $state<ContextRef[]>([]);
+
+  // Multi-tab workspace terminal
+  terminals = $state<TerminalTabInfo[]>([]);
+  activeTerminalId = $state<string | null>(null);
+  terminalOpen = $state(false);
+  terminalDock = $state<'bottom' | 'right'>('bottom');
+  terminalHeight = $state(240);
+  terminalShells = $state<ShellInfo[]>([]);
+
+  // Quick open, search, branching, worktrees, rules, custom commands
+  quickOpen = $state(false);
+  transcriptSearchOpen = $state(false);
+  branchGroups = $state<BranchGroup[]>([]);
+  worktree = $state<WorktreeStatus | null>(null);
+  workspaceRules = $state<WorkspaceRuleInfo[]>([]);
+  customCommands = $state<CustomCommandInfo[]>([]);
 
   plan = $state<PlanStep[]>([]);
   usage = $state<TokenUsage>({ input: 0, cached_input: 0, output: 0, thinking: 0 });
@@ -166,7 +191,7 @@ class SessionStore {
 
   rightCollapsed = $state(false);
   sidebarCollapsed = $state(false);
-  panelTab = $state<'files' | 'activity'>('files');
+  panelTab = $state<'files' | 'activity' | 'terminal'>('files');
   chatPanelOpen = $state(false);
 
   get panelOpen(): boolean {
@@ -246,6 +271,9 @@ class SessionStore {
   private unlisten: UnlistenFn | null = null;
   private motionUnlisten: (() => void) | null = null;
   private unlistenUpdate: UnlistenFn | null = null;
+  private unlistenTermOut: UnlistenFn | null = null;
+  private unlistenTermExit: UnlistenFn | null = null;
+  private termOutputListeners = new Set<(id: string, data: string) => void>();
   private fixtureTimers: ReturnType<typeof setTimeout>[] = [];
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private roundStart = 0;
@@ -289,6 +317,10 @@ class SessionStore {
     if (savedMotion === 'full' || savedMotion === 'reduced' || savedMotion === 'system') {
       this.motion = savedMotion;
     }
+    const savedDock = localStorage.getItem('hate:term:dock');
+    if (savedDock === 'bottom' || savedDock === 'right') this.terminalDock = savedDock;
+    const savedTermH = Number(localStorage.getItem('hate:term:height'));
+    if (savedTermH >= 140 && savedTermH <= 560) this.terminalHeight = savedTermH;
     this.applyTheme();
     this.applyMotion();
     this.watchSystemMotion();
@@ -325,6 +357,22 @@ class SessionStore {
           this.updateTotal = e.payload.total ?? null;
         }
       });
+      this.unlistenTermOut = await listen<{ id: string; data: string }>('terminal-output', (e) => {
+        for (const fn of this.termOutputListeners) fn(e.payload.id, e.payload.data);
+      });
+      this.unlistenTermExit = await listen<{ id: string; exit_code: number | null }>('terminal-exit', (e) => {
+        const t = this.terminals.find((tab) => tab.id === e.payload.id);
+        if (t) {
+          t.alive = false;
+          t.exit_code = e.payload.exit_code;
+        }
+      });
+      void m.terminalListShells().then((list) => (this.terminalShells = list)).catch(() => {});
+      void m.terminalList().then((list) => {
+        this.terminals = list;
+        if (!this.activeTerminalId && list[0]) this.activeTerminalId = list[0].id;
+      }).catch(() => {});
+      void this.refreshWorkspaceExtras();
       void this.checkForUpdate();
       void this.checkWhatsNew();
       void this.loadPrefs();
@@ -354,6 +402,9 @@ class SessionStore {
     this.motionUnlisten?.();
     this.motionUnlisten = null;
     this.unlistenUpdate?.();
+    this.unlistenTermOut?.();
+    this.unlistenTermExit?.();
+    this.termOutputListeners.clear();
     this.fixtureTimers.forEach(clearTimeout);
     this.fixtureTimers = [];
   }
@@ -412,23 +463,26 @@ class SessionStore {
     }
   }
 
-  send(override?: string, pinsOverride?: PinRef[]): void {
+  send(override?: string, pinsOverride?: PinRef[], contextsOverride?: ContextRef[]): void {
     if (this.budgetBlocked) {
       this.budgetPrompt = true;
       return;
     }
-    const text = (override ?? this.draft).trim();
+    const rawText = (override ?? this.draft).trim();
     const images = this.attachments.map(({ mime, data }) => ({ mime, data }));
-    if (!text && images.length === 0) return;
-    const pins = pinsOverride ?? this.collectPins(text);
+    const pins = pinsOverride ?? this.collectPins(rawText);
+    const contexts = contextsOverride ?? this.collectContexts(rawText);
+    if (!rawText && images.length === 0 && contexts.length === 0 && pins.length === 0) return;
+    const text = rawText || (images.length > 0 ? '' : 'Analyze the attached context.');
     const dropped = override === undefined ? this.attachments : [];
     if (override === undefined) {
       this.draft = '';
       this.pinned = [];
+      this.contexts = [];
       this.attachments = [];
     }
     if (this.sessionState === 'running' || this.sessionState === 'awaiting_permission') {
-      this.queue.push({ text, pins, images });
+      this.queue.push({ text, pins, contexts, images });
       return;
     }
     const plan = this.planMode;
@@ -442,6 +496,7 @@ class SessionStore {
         text,
         ...(plan ? { plan: true } : {}),
         ...(pins.length ? { pins } : {}),
+        ...(contexts.length ? { contexts } : {}),
         ...(dropped.length ? { images: dropped.map((a) => a.url) } : {}),
       });
       this.turnBlockId = id;
@@ -461,7 +516,7 @@ class SessionStore {
         return;
       }
       void import('./ipc')
-        .then((m) => m.sessionSend(wire, pins, images))
+        .then((m) => m.sessionSend(wire, pins, contexts, images))
         .catch((err: unknown) => {
           this.sessionState = 'failed';
           this.pushError(String(err));
@@ -478,6 +533,52 @@ class SessionStore {
     } else {
       begin();
     }
+  }
+
+  private contextKey(c: ContextRef): string {
+    switch (c.kind) {
+      case 'git_diff':
+      case 'git_staged':
+        return c.kind;
+      case 'terminal':
+        return `terminal:${c.id ?? ''}`;
+      case 'url':
+        return `url:${c.url}`;
+      case 'folder':
+        return `folder:${c.path}`;
+    }
+  }
+
+  addContext(ctx: ContextRef): void {
+    const key = this.contextKey(ctx);
+    if (this.contexts.some((c) => this.contextKey(c) === key)) return;
+    this.contexts = [...this.contexts, ctx];
+  }
+
+  removeContext(index: number): void {
+    this.contexts = this.contexts.filter((_, i) => i !== index);
+  }
+
+  private collectContexts(text: string): ContextRef[] {
+    const out = [...this.contexts];
+    const pushUnique = (c: ContextRef): void => {
+      const k = this.contextKey(c);
+      if (!out.some((x) => this.contextKey(x) === k)) out.push(c);
+    };
+    for (const token of text.match(/@([^\s@]+)/g) ?? []) {
+      const clean = token.slice(1).replace(/[.,;:]+$/, '');
+      if (clean === 'git:diff') pushUnique({ kind: 'git_diff' });
+      else if (clean === 'git:staged') pushUnique({ kind: 'git_staged' });
+      else if (clean === 'terminal') pushUnique({ kind: 'terminal', id: this.activeTerminalId, lines: 120 });
+      else if (clean.startsWith('folder:')) {
+        const folder = clean.slice('folder:'.length);
+        if (folder) pushUnique({ kind: 'folder', path: folder });
+      } else if (clean.startsWith('url:')) {
+        const url = clean.slice('url:'.length);
+        if (/^https?:\/\//i.test(url)) pushUnique({ kind: 'url', url });
+      }
+    }
+    return out;
   }
 
   private collectPins(text: string): PinRef[] {
@@ -607,6 +708,241 @@ class SessionStore {
       this.changedFiles = await m.workspaceChanges();
     } catch {
     }
+  }
+
+  get reviewIndex(): number {
+    const p = this.viewer?.path;
+    if (!p) return -1;
+    return this.changedFiles.findIndex((f) => f.path === p);
+  }
+
+  nextChangedFile(): void {
+    if (this.changedFiles.length === 0) return;
+    const cur = this.reviewIndex;
+    const next = this.changedFiles[(cur + 1) % this.changedFiles.length];
+    if (next) void this.openDiff(next.path);
+  }
+
+  prevChangedFile(): void {
+    if (this.changedFiles.length === 0) return;
+    const cur = this.reviewIndex;
+    const prev = this.changedFiles[(cur <= 0 ? this.changedFiles.length : cur) - 1];
+    if (prev) void this.openDiff(prev.path);
+  }
+
+  async saveViewerFile(content: string): Promise<boolean> {
+    const v = this.viewer;
+    if (!v || !inTauri()) return false;
+    const m = await import('./ipc');
+    try {
+      await m.workspaceWriteFile(v.path, content);
+      await this.openFile(v.path, v.line);
+      void this.refreshChanges();
+      void this.refreshIndex();
+      this.setNotice(`Saved ${v.path}`);
+      return true;
+    } catch (e) {
+      this.note(`couldn't save ${v.path}: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
+  async revertChangedFile(path: string): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    try {
+      await m.workspaceRevertFile(path);
+      await this.refreshChanges();
+      void this.refreshIndex();
+      if (this.viewer?.path === path) {
+        if (this.changedFiles.some((f) => f.path === path)) await this.openDiff(path);
+        else this.closeViewer();
+      }
+      this.setNotice(`Reverted ${path}`);
+    } catch (e) {
+      this.note(`revert failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async revertDiffHunk(path: string, patch: string): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    try {
+      await m.workspaceRevertHunk(path, patch);
+      await this.refreshChanges();
+      void this.refreshIndex();
+      if (this.viewer?.path === path) {
+        if (this.changedFiles.some((f) => f.path === path)) await this.openDiff(path);
+        else this.closeViewer();
+      }
+      this.setNotice('Reverted hunk');
+    } catch (e) {
+      this.note(`hunk revert failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  askAiAboutLines(path: string, start: number | null, end: number | null): void {
+    this.pinFile(path, start, end);
+    const loc = start ? (end && end !== start ? `:${start}-${end}` : `:${start}`) : '';
+    if (!this.draft.trim()) {
+      this.draft = `Explain or review ${path}${loc}: `;
+    }
+    const ta = document.querySelector<HTMLTextAreaElement>('.composer textarea');
+    if (ta) {
+      ta.focus();
+      ta.setSelectionRange(this.draft.length, this.draft.length);
+    }
+  }
+
+  // ---- multi-tab terminal --------------------------------------------------
+
+  onTerminalOutput(fn: (id: string, data: string) => void): () => void {
+    this.termOutputListeners.add(fn);
+    return () => this.termOutputListeners.delete(fn);
+  }
+
+  async openTerminal(dock?: 'bottom' | 'right'): Promise<void> {
+    if (dock) {
+      this.terminalDock = dock;
+      localStorage.setItem('hate:term:dock', dock);
+    }
+    if (this.terminalDock === 'right') {
+      this.panelTab = 'terminal';
+      this.setPanel(true);
+    } else {
+      this.terminalOpen = true;
+    }
+    if (inTauri() && this.terminals.length === 0) {
+      await this.createTerminal();
+    }
+  }
+
+  toggleTerminal(): void {
+    const visible =
+      this.terminalDock === 'right'
+        ? this.panelOpen && this.panelTab === 'terminal'
+        : this.terminalOpen;
+    if (visible) {
+      if (this.terminalDock === 'right') {
+        this.setPanel(false);
+      } else {
+        this.terminalOpen = false;
+      }
+    } else {
+      void this.openTerminal();
+    }
+  }
+
+  setTerminalDock(dock: 'bottom' | 'right'): void {
+    this.terminalDock = dock;
+    localStorage.setItem('hate:term:dock', dock);
+    if (dock === 'right') {
+      this.terminalOpen = false;
+      this.panelTab = 'terminal';
+      this.setPanel(true);
+    } else {
+      if (this.panelTab === 'terminal') {
+        this.panelTab = this.workspacePath ? 'files' : 'activity';
+      }
+      this.terminalOpen = true;
+    }
+  }
+
+  setTerminalHeight(px: number): void {
+    const clamped = Math.min(560, Math.max(140, Math.round(px)));
+    this.terminalHeight = clamped;
+    localStorage.setItem('hate:term:height', String(clamped));
+  }
+
+  async createTerminal(shell?: string | null): Promise<void> {
+    if (!inTauri()) {
+      const id = `demo-${this.terminals.length + 1}`;
+      this.terminals = [
+        ...this.terminals,
+        { id, title: `Terminal ${this.terminals.length + 1}`, shell: shell ?? 'demo', cwd: this.workspacePath ?? '~', alive: true, exit_code: null },
+      ];
+      this.activeTerminalId = id;
+      return;
+    }
+    const m = await import('./ipc');
+    try {
+      const tab = await m.terminalCreate(this.workspacePath, shell ?? null);
+      this.terminals = [...this.terminals, tab];
+      this.activeTerminalId = tab.id;
+    } catch (e) {
+      this.note(`couldn't open terminal: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async closeTerminal(id: string): Promise<void> {
+    if (inTauri()) {
+      const m = await import('./ipc');
+      await m.terminalClose(id).catch(() => {});
+    }
+    this.terminals = this.terminals.filter((t) => t.id !== id);
+    if (this.activeTerminalId === id) {
+      this.activeTerminalId = this.terminals[0]?.id ?? null;
+    }
+    if (this.terminals.length === 0) {
+      if (this.terminalDock === 'bottom') this.terminalOpen = false;
+    }
+  }
+
+  async writeTerminal(id: string, data: string): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    await m.terminalWrite(id, data).catch(() => {});
+  }
+
+  async resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    await m.terminalResize(id, cols, rows).catch(() => {});
+  }
+
+  async readTerminalBuffer(id: string, raw = false, tailLines = 160): Promise<string> {
+    if (!inTauri()) return '';
+    const m = await import('./ipc');
+    return m.terminalReadBuffer(id, raw, tailLines).catch(() => '');
+  }
+
+  async cdTerminalToWorkspace(id?: string): Promise<void> {
+    const target = id ?? this.activeTerminalId;
+    if (!target || !this.workspacePath) return;
+    const tab = this.terminals.find((t) => t.id === target);
+    const isCmd = tab?.shell.toLowerCase().includes('cmd');
+    const cmd = isCmd ? `cd /d "${this.workspacePath}"\r` : `cd "${this.workspacePath}"\r`;
+    await this.writeTerminal(target, cmd);
+  }
+
+  attachTerminalToChat(id?: string): void {
+    const target = id ?? this.activeTerminalId;
+    if (!target) {
+      this.note('open a terminal tab first');
+      return;
+    }
+    this.addContext({ kind: 'terminal', id: target, lines: 120 });
+    document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus();
+  }
+
+  async askAiToFixTerminal(id?: string): Promise<void> {
+    const target = id ?? this.activeTerminalId;
+    if (!target) {
+      this.note('open a terminal tab first');
+      return;
+    }
+    this.send('Inspect the attached terminal output, explain the error, and help fix it.', [], [
+      { kind: 'terminal', id: target, lines: 140 },
+    ]);
+  }
+
+  // ---- bookmarks -----------------------------------------------------------
+
+  toggleBookmark(blockId: number): void {
+    const b = this.blocks.find((x) => x.id === blockId);
+    if (!b) return;
+    b.bookmarked = !b.bookmarked;
+    this.scheduleUiSave();
   }
 
   cancel(): void {
@@ -943,8 +1279,75 @@ class SessionStore {
       this.cacheRatio = 0;
       this.sessionBeganAt = null;
       this.note('branched into a new session');
+      void this.refreshBranches();
+      void this.refreshSessions();
     }
     this.send(trimmed, pins);
+  }
+
+  async refreshBranches(): Promise<void> {
+    if (!inTauri() || !this.sessionId) {
+      this.branchGroups = [];
+      return;
+    }
+    const m = await import('./ipc');
+    this.branchGroups = await m.sessionBranches(this.sessionId).catch(() => []);
+  }
+
+  async branchAfterBlock(blockId: number): Promise<void> {
+    if (this.running) {
+      this.note('wait for the current reply to finish before branching');
+      return;
+    }
+    const idx = this.blocks.findIndex((b) => b.id === blockId);
+    if (idx < 0) return;
+    const userCount = this.blocks.slice(0, idx + 1).filter((b) => b.kind === 'user').length;
+    const userIndex = userCount - 1;
+    if (userIndex < 0) return;
+    let turnEnd = this.blocks.length;
+    for (let i = idx + 1; i < this.blocks.length; i++) {
+      if (this.blocks[i]?.kind === 'user') {
+        turnEnd = i;
+        break;
+      }
+    }
+    const kept = this.blocks.slice(0, turnEnd);
+    if (!inTauri()) {
+      this.blocks = kept;
+      this.note('branched from here');
+      return;
+    }
+    const prevBlocks = this.blocks;
+    const prevTurns = this.sessionTurns;
+    this.blocks = kept;
+    this.sessionTurns = userIndex + 1;
+    const snap = this.uiSnapshot();
+    const userBlock = kept.filter((b) => b.kind === 'user').at(-1);
+    const baseTitle = (userBlock?.text ?? 'branch').slice(0, 48).trim() || 'branch';
+    const m = await import('./ipc');
+    try {
+      const res = await m.sessionBranchAfter(userIndex, `${baseTitle} (branch)`, snap);
+      this.sessionId = res.session_id;
+      this.queue = [];
+      this.costUsd = 0;
+      this.usage = { input: 0, cached_input: 0, output: 0, thinking: 0 };
+      this.sessionTotals = { input: 0, cached_input: 0, output: 0, thinking: 0 };
+      this.cacheRatio = 0;
+      this.sessionBeganAt = null;
+      localStorage.setItem(LAST_SESSION, res.session_id);
+      this.note('branched into a new session from here');
+      void this.refreshBranches();
+      void this.refreshSessions();
+    } catch (e) {
+      this.blocks = prevBlocks;
+      this.sessionTurns = prevTurns;
+      this.note(`couldn't branch: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async switchBranch(sessionId: string): Promise<void> {
+    if (!sessionId || sessionId === this.sessionId) return;
+    await this.openSession(sessionId);
   }
 
   // ---- export --------------------------------------------------------------
@@ -1370,6 +1773,7 @@ class SessionStore {
     this.closeViewer();
     this.pinned = [];
     void this.refreshIndex();
+    void this.refreshWorkspaceExtras();
   }
 
   async openFromHistory(s: SessionMeta): Promise<void> {
@@ -1416,6 +1820,8 @@ class SessionStore {
       await this.syncSelection(m);
       localStorage.setItem(LAST_SESSION, id);
       void this.refreshSessions();
+      void this.refreshBranches();
+      void this.refreshWorkspaceExtras();
     } finally {
       this.sessionBusy = false;
     }
@@ -1467,6 +1873,8 @@ class SessionStore {
 
   private resetConversation(): void {
     this.blocks = [];
+    this.branchGroups = [];
+    this.contexts = [];
     nextBlockId = 1;
     this.plan = [];
     this.usage = { input: 0, cached_input: 0, output: 0, thinking: 0 };
@@ -1694,6 +2102,117 @@ class SessionStore {
     }
   }
 
+  async refreshWorkspaceExtras(): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    this.customCommands = await m.customCommandsList().catch(() => []);
+    if (!this.workspacePath) {
+      this.worktree = null;
+      this.workspaceRules = [];
+      return;
+    }
+    const [wt, rules] = await Promise.all([
+      m.workspaceWorktreeStatus().catch(() => null),
+      m.workspaceRulesInfo().catch(() => []),
+    ]);
+    this.worktree = wt;
+    this.workspaceRules = rules;
+  }
+
+  async enterWorktree(branch?: string | null): Promise<void> {
+    if (!inTauri() || !this.workspacePath) return;
+    if (this.running) {
+      this.note('wait for the reply to finish before creating a worktree');
+      return;
+    }
+    await this.ensureSession();
+    const m = await import('./ipc');
+    try {
+      const wtPath = await m.workspaceWorktreeCreate(branch ?? null);
+      if (this.sessionMeta) this.sessionMeta.workspace = wtPath;
+      const row = this.sessions.find((s) => s.id === this.sessionId);
+      if (row) row.workspace = wtPath;
+      this.setFolder(wtPath);
+      this.setNotice('Isolated git worktree ready');
+    } catch (e) {
+      this.note(`couldn't create worktree: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async mergeBackWorktree(): Promise<void> {
+    if (!inTauri() || !this.worktree?.is_worktree) return;
+    if (this.running) {
+      this.note('wait for the reply to finish before merging');
+      return;
+    }
+    const m = await import('./ipc');
+    try {
+      const res = await m.workspaceWorktreeMergeBack();
+      this.setNotice(`Merged ${res.merged_branch} → ${res.target_branch}`);
+      await this.refreshWorkspaceExtras();
+    } catch (e) {
+      this.note(`merge back failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async discardWorktree(force = false): Promise<void> {
+    if (!inTauri() || !this.worktree?.is_worktree) return;
+    if (this.running) {
+      this.note('wait for the reply to finish before removing the worktree');
+      return;
+    }
+    const m = await import('./ipc');
+    try {
+      const mainRoot = await m.workspaceWorktreeRemove(force);
+      if (this.sessionMeta) this.sessionMeta.workspace = mainRoot;
+      const row = this.sessions.find((s) => s.id === this.sessionId);
+      if (row) row.workspace = mainRoot;
+      this.setFolder(mainRoot);
+      this.setNotice('Returned to main repository');
+    } catch (e) {
+      this.note(`couldn't remove worktree: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async createRulesFile(file = '.hate-agent.md'): Promise<void> {
+    if (!inTauri() || !this.workspacePath) return;
+    const m = await import('./ipc');
+    try {
+      const created = await m.workspaceCreateRules(file);
+      await this.refreshWorkspaceExtras();
+      await this.refreshIndex();
+      await this.openFile(created);
+    } catch (e) {
+      this.note(`couldn't create rules file: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  runCustomCommand(cmd: CustomCommandInfo, args = ''): void {
+    const hasArgPlaceholder = cmd.body.includes('$ARGUMENTS');
+    const expanded = cmd.body.replace(/\$ARGUMENTS/g, args).trim();
+    if (hasArgPlaceholder && !args.trim()) {
+      this.draft = expanded;
+      const ta = document.querySelector<HTMLTextAreaElement>('.composer textarea');
+      ta?.focus();
+      return;
+    }
+    this.send(expanded);
+  }
+
+  async saveCustomCommand(name: string, scope: 'workspace' | 'global', content: string): Promise<boolean> {
+    if (!inTauri()) return false;
+    const m = await import('./ipc');
+    try {
+      await m.customCommandSave(name, scope, content);
+      await this.refreshWorkspaceExtras();
+      this.setNotice(`Saved command /${name.replace(/^\//, '')}`);
+      return true;
+    } catch (e) {
+      this.note(`couldn't save command: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
   handleEvent(e: SessionEvent): void {
     switch (e.type) {
       case 'delta':
@@ -1878,6 +2397,7 @@ class SessionStore {
     this.turnIsPlan = false;
     if (completed) {
       void this.refreshChanges();
+      void this.refreshWorkspaceExtras();
       if (this.viewer) void this.refreshViewer();
     }
     if (completed && !this.planReady && this.queue.length > 0) {
@@ -1886,7 +2406,7 @@ class SessionStore {
         // Carry queued attachments back through the composer slot so the
         // normal send path picks them up.
         this.attachments = next.images.map((a) => ({ ...a, url: `data:${a.mime};base64,${a.data}` }));
-        queueMicrotask(() => this.send(next.text, next.pins));
+        queueMicrotask(() => this.send(next.text, next.pins, next.contexts));
       }
     }
   }

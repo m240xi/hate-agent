@@ -78,6 +78,7 @@ fn session_with(provider: Arc<dyn Provider>) -> hate_core::SessionHandle {
         mcp: None,
         skills: None,
         auto_skills: false,
+        terminal: None,
         context_window: 0,
     })
 }
@@ -352,6 +353,7 @@ async fn tool_calls_execute_and_feed_results_back() {
         mcp: None,
         skills: None,
         auto_skills: false,
+        terminal: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -465,6 +467,7 @@ async fn gated_tool_waits_for_permission_then_denies() {
         mcp: None,
         skills: None,
         auto_skills: false,
+        terminal: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -540,6 +543,7 @@ async fn allow_session_skips_repeat_prompts() {
         mcp: None,
         skills: None,
         auto_skills: false,
+        terminal: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -612,6 +616,7 @@ async fn compaction_bounds_journaled_history() {
         mcp: None,
         skills: None,
         auto_skills: false,
+        terminal: None,
         context_window: 400,
     });
     let mut rx = session.subscribe();
@@ -713,6 +718,7 @@ async fn stale_tool_outputs_elide_next_turn() {
         mcp: None,
         skills: None,
         auto_skills: false,
+        terminal: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -823,6 +829,7 @@ async fn skill_save_tool_persists_and_emits() {
         skills: Some(store.clone()),
         auto_skills: false,
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        terminal: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -891,6 +898,7 @@ async fn matching_skill_injected_into_system_prompt() {
         skills: Some(store),
         auto_skills: false,
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        terminal: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -943,6 +951,7 @@ async fn reflection_authors_skill_after_three_turns() {
         skills: Some(store.clone()),
         auto_skills: true,
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        terminal: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -997,6 +1006,7 @@ async fn set_provider_swaps_adapter_mid_session() {
         skills: None,
         auto_skills: false,
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        terminal: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -1067,6 +1077,7 @@ async fn system_prompt_names_current_model_after_swap() {
         skills: None,
         auto_skills: false,
         permissions: Arc::new(hate_core::PermissionHub::default()),
+        terminal: None,
         context_window: 0,
     });
     let mut rx = session.subscribe();
@@ -1111,6 +1122,7 @@ fn tool_session(
         mcp: None,
         skills: None,
         auto_skills: false,
+        terminal: None,
         context_window: 0,
     });
     (provider, session)

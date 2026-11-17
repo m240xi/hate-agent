@@ -447,6 +447,7 @@ async fn run(
         mcp: Some(mcp),
         skills,
         auto_skills,
+        terminal: None,
         context_window,
     });
 

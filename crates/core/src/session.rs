@@ -28,7 +28,7 @@ const EVENT_BUFFER: usize = 2048;
 
 #[derive(Debug, Clone)]
 pub struct Limits {
-    pub max_turns: u32,
+    /// Per-turn wall-clock budget; guards against a runaway turn, not the session.
     pub max_wall_clock: Duration,
     pub max_cost_usd: Option<f64>,
     pub max_tool_rounds: u32,
@@ -38,8 +38,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_turns: 40,
-            max_wall_clock: Duration::from_mins(20),
+            max_wall_clock: Duration::from_hours(2),
             max_cost_usd: None,
             max_tool_rounds: 40,
             max_tool_calls: 120,
@@ -234,7 +233,6 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
         pending_user: None,
         state: SessionState::Idle,
         turn,
-        task_started: Instant::now(),
         turn_started: Instant::now(),
         cancel: CancellationToken::new(),
         turn_done: None,
@@ -264,7 +262,6 @@ struct Actor {
     pending_user: Option<String>,
     state: SessionState,
     turn: TurnId,
-    task_started: Instant,
     turn_started: Instant,
     cancel: CancellationToken,
     turn_done: Option<mpsc::Receiver<TurnReport>>,
@@ -520,18 +517,6 @@ impl Actor {
     }
 
     fn check_limits(&self) -> Result<(), FailureReason> {
-        if self.turn.0 >= self.cfg.limits.max_turns {
-            return Err(FailureReason::LimitExceeded {
-                limit: "max_turns".to_string(),
-                value: u64::from(self.turn.0),
-            });
-        }
-        if self.task_started.elapsed() > self.cfg.limits.max_wall_clock {
-            return Err(FailureReason::LimitExceeded {
-                limit: "max_wall_clock".to_string(),
-                value: self.task_started.elapsed().as_secs(),
-            });
-        }
         if let Some(cap) = self.cfg.limits.max_cost_usd
             && self.cost_usd >= cap
         {
@@ -988,6 +973,18 @@ async fn run_turn(
                 .send(TurnReport::Failed {
                     error: ProviderError::Stream(format!(
                         "tool loop exceeded {max_tool_rounds} provider rounds"
+                    )),
+                    convo: convo.clone(),
+                })
+                .await;
+            return;
+        }
+        if started.elapsed() > limits.max_wall_clock {
+            let _ = done_tx
+                .send(TurnReport::Failed {
+                    error: ProviderError::Stream(format!(
+                        "turn exceeded the {}s wall-clock limit",
+                        limits.max_wall_clock.as_secs()
                     )),
                     convo: convo.clone(),
                 })

@@ -46,9 +46,13 @@
     const name = block.call?.name ?? '';
     return (
       TOOLS[name] ??
-      (name.startsWith('mcp__')
-        ? { icon: 'plug', tone: 'net' as Tone }
-        : { icon: 'terminal', tone: 'exec' as Tone })
+      (name.endsWith('__web_search')
+        ? { icon: 'search', tone: 'net' as Tone }
+        : name.endsWith('__web_fetch')
+          ? { icon: 'link', tone: 'net' as Tone }
+          : name.startsWith('mcp__')
+            ? { icon: 'plug', tone: 'net' as Tone }
+            : { icon: 'terminal', tone: 'exec' as Tone })
     );
   });
 
@@ -58,7 +62,14 @@
     const call = block.call;
     if (!call) return '';
     const args = call.args as Record<string, unknown>;
-    const path = typeof args?.path === 'string' ? args.path : typeof args?.query === 'string' ? args.query : '';
+    const path =
+      typeof args?.path === 'string'
+        ? args.path
+        : typeof args?.query === 'string'
+          ? args.query
+          : typeof args?.url === 'string'
+            ? args.url
+            : '';
     const cmd = typeof args?.command === 'string' ? args.command : '';
     const target = path || cmd || JSON.stringify(args ?? {}).slice(0, 60);
     return target;

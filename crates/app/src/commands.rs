@@ -100,15 +100,13 @@ async fn ensure_session(
     local: &local_runtime::LocalRuntimeState,
     app: &AppHandle,
 ) -> Result<SessionHandle, String> {
-    let (provider_override, model_override, restore_model) = {
+    let (existing_handle, provider_override, model_override, restore_model) = {
         let guard = state
             .inner
             .lock()
             .map_err(|_| "session lock poisoned".to_string())?;
-        if let Some(h) = guard.handle.as_ref() {
-            return Ok(h.clone());
-        }
         (
+            guard.handle.clone(),
             guard
                 .provider
                 .clone()
@@ -118,6 +116,35 @@ async fn ensure_session(
             guard.restore.as_ref().map(|r| r.model.clone()),
         )
     };
+
+    if let Some(h) = existing_handle {
+        if provider_override.as_deref() == Some(local_runtime::LOCAL_PROVIDER)
+            && local_runtime::live_base_url(local).await.is_none()
+        {
+            let pre_ctx = AuthContext::load().map_err(|e| e.to_string())?;
+            if let Some((_, pconf)) = provider_entry(&pre_ctx, Some(local_runtime::LOCAL_PROVIDER))
+            {
+                let desired_model = model_override
+                    .or(restore_model)
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| pconf.model.clone());
+                let (port, _) =
+                    local_runtime::ensure_model_running(app, local, &desired_model, false).await?;
+                let live_url = format!("http://127.0.0.1:{port}/v1");
+                let fresh = AuthContext::load().map_err(|e| e.to_string())?;
+                if let Ok((name, _, adapter)) =
+                    resolve_target(&fresh, Some(local_runtime::LOCAL_PROVIDER), Some(&live_url))
+                {
+                    let _ = h.command(Command::SetProvider {
+                        provider: adapter,
+                        provider_name: name,
+                        model: Some(desired_model),
+                    });
+                }
+            }
+        }
+        return Ok(h);
+    }
 
     let pre_ctx = AuthContext::load().map_err(|e| e.to_string())?;
     let mut live_local_url: Option<String> = None;
@@ -284,7 +311,8 @@ pub struct McpState {
 impl McpState {
     pub fn load() -> Self {
         let path = mcp_config_path();
-        let pending = hate_core::McpConfigFile::load(&path);
+        let marker = mcp_defaults_marker_path(&path);
+        let pending = load_mcp_with_defaults(&path, &marker);
         Self {
             hub: std::sync::Arc::new(hate_core::McpHub::new()),
             path,
@@ -298,6 +326,52 @@ fn mcp_config_path() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("hate-agent")
         .join("mcp.json")
+}
+
+fn mcp_defaults_marker_path(mcp_path: &std::path::Path) -> std::path::PathBuf {
+    mcp_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".mcp-defaults-v1")
+}
+
+fn load_mcp_with_defaults(
+    path: &std::path::Path,
+    marker: &std::path::Path,
+) -> Vec<hate_core::McpServerConfig> {
+    let mut servers = hate_core::McpConfigFile::load(path);
+    let self_cmd = crate::web_search_mcp::resolved_self_command();
+    let mut changed = false;
+
+    for s in &mut servers {
+        if crate::web_search_mcp::is_builtin_web_search(s)
+            && s.command.as_deref() != Some(self_cmd.as_str())
+        {
+            s.command = Some(self_cmd.clone());
+            changed = true;
+        }
+    }
+
+    if !marker.exists() {
+        let has_web_search = servers.iter().any(|s| {
+            s.name
+                .eq_ignore_ascii_case(crate::web_search_mcp::SERVER_NAME)
+                || crate::web_search_mcp::is_builtin_web_search(s)
+        });
+        if !has_web_search {
+            servers.push(crate::web_search_mcp::default_config());
+            changed = true;
+        }
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(marker, b"1");
+    }
+
+    if changed && let Err(e) = hate_core::McpHub::save_config(path, &servers) {
+        tracing::warn!(error = %e, path = %path.display(), "failed to persist default MCP config");
+    }
+    servers
 }
 
 fn checkpoint_root(key: &str) -> std::path::PathBuf {
@@ -982,14 +1056,27 @@ pub fn provider_upsert(
     ctx.config.save().map_err(|e| e.to_string())
 }
 
+pub fn on_local_model_deleted(state: &Sessions, deleted_id: &str, replacement: Option<&str>) {
+    if let Ok(mut slot) = state.inner.lock()
+        && slot.provider.as_deref() == Some(local_runtime::LOCAL_PROVIDER)
+        && slot.model.as_deref() == Some(deleted_id)
+    {
+        slot.model = replacement.map(str::to_string);
+        if !slot.handle.as_ref().is_some_and(|h| h.snapshot().running) {
+            slot.handle = None;
+        }
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn provider_remove(
     local: State<'_, local_runtime::LocalRuntimeState>,
+    sessions: State<'_, Sessions>,
     name: String,
 ) -> Result<(), String> {
     if name == local_runtime::LOCAL_PROVIDER {
-        let _ = local_runtime::local_runtime_stop(local).await;
+        local_runtime::stop_server_now(&local).await;
     }
     let mut ctx = AuthContext::load().map_err(|e| e.to_string())?;
     if !ctx.config.providers.contains_key(&name) {
@@ -1003,7 +1090,30 @@ pub async fn provider_remove(
     if ctx.config.default_provider.as_deref() == Some(name.as_str()) {
         ctx.config.default_provider = ctx.config.providers.keys().next().cloned();
     }
-    ctx.config.save().map_err(|e| e.to_string())
+    ctx.config.save().map_err(|e| e.to_string())?;
+
+    let fallback = ctx.config.default_provider.as_ref().and_then(|d| {
+        ctx.config
+            .providers
+            .get(d)
+            .map(|p| (d.clone(), p.model.clone()))
+    });
+    if let Ok(mut slot) = sessions.inner.lock()
+        && slot.provider.as_deref() == Some(name.as_str())
+    {
+        if let Some(h) = slot.handle.take() {
+            let _ = h.command(Command::Cancel);
+        }
+        slot.acp = false;
+        if let Some((fb_name, fb_model)) = fallback {
+            slot.provider = Some(fb_name);
+            slot.model = Some(fb_model);
+        } else {
+            slot.provider = None;
+            slot.model = None;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -2170,13 +2280,19 @@ fn validate_mcp_config(
     seen.push(name.clone());
     match dto.kind.as_str() {
         "stdio" => {
-            let command = dto
-                .command
-                .as_deref()
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-                .ok_or("stdio server needs a command")?
-                .to_string();
+            let raw_cmd = dto.command.as_deref().map_or("", str::trim);
+            let is_builtin = dto.args.first().map(String::as_str)
+                == Some(crate::web_search_mcp::MCP_FLAG)
+                && (raw_cmd.is_empty()
+                    || raw_cmd == crate::web_search_mcp::BUILTIN_COMMAND_TOKEN
+                    || raw_cmd == "hate-agent");
+            let command = if is_builtin {
+                crate::web_search_mcp::resolved_self_command()
+            } else if raw_cmd.is_empty() {
+                return Err("stdio server needs a command".to_string());
+            } else {
+                raw_cmd.to_string()
+            };
             Ok(hate_core::McpServerConfig {
                 name,
                 kind: "stdio".to_string(),
@@ -2483,5 +2599,92 @@ mod prefs_tests {
             Some("reduced")
         );
         assert_eq!(sane_motion(Some("fast".into())), None);
+    }
+}
+
+#[cfg(test)]
+mod mcp_default_tests {
+    use std::collections::BTreeMap;
+
+    use super::{McpServerConfigDto, load_mcp_with_defaults, validate_mcp_config};
+    use crate::web_search_mcp::{
+        BUILTIN_COMMAND_TOKEN, MCP_FLAG, SERVER_NAME, resolved_self_command,
+    };
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("hate-mcp-test-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn seeds_web_search_once_and_respects_user_removal() {
+        let dir = temp_dir("seed");
+        let mcp_path = dir.join("mcp.json");
+        let marker = dir.join(".mcp-defaults-v1");
+
+        let seeded = load_mcp_with_defaults(&mcp_path, &marker);
+        assert_eq!(seeded.len(), 1);
+        assert_eq!(seeded[0].name, SERVER_NAME);
+        assert_eq!(seeded[0].args, vec![MCP_FLAG.to_string()]);
+        assert!(marker.exists());
+        assert!(mcp_path.exists());
+
+        // Simulate user removing web_search and saving empty config.
+        hate_core::McpHub::save_config(&mcp_path, &[]).expect("save empty");
+        let reloaded = load_mcp_with_defaults(&mcp_path, &marker);
+        assert!(reloaded.is_empty(), "removed default must not be re-added");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refreshes_stale_builtin_command_path() {
+        let dir = temp_dir("refresh");
+        let mcp_path = dir.join("mcp.json");
+        let marker = dir.join(".mcp-defaults-v1");
+        std::fs::write(&marker, b"1").expect("marker");
+
+        let stale = hate_core::McpServerConfig {
+            name: SERVER_NAME.to_string(),
+            kind: "stdio".to_string(),
+            enabled: true,
+            command: Some("/old/path/hate-agent".to_string()),
+            args: vec![MCP_FLAG.to_string()],
+            env: BTreeMap::new(),
+            url: None,
+            headers: BTreeMap::new(),
+        };
+        hate_core::McpHub::save_config(&mcp_path, &[stale]).expect("save stale");
+
+        let refreshed = load_mcp_with_defaults(&mcp_path, &marker);
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(
+            refreshed[0].command.as_deref(),
+            Some(resolved_self_command().as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validates_builtin_command_tokens() {
+        let dto = McpServerConfigDto {
+            name: SERVER_NAME.to_string(),
+            kind: "stdio".to_string(),
+            enabled: true,
+            command: Some(BUILTIN_COMMAND_TOKEN.to_string()),
+            args: vec![MCP_FLAG.to_string()],
+            env: BTreeMap::new(),
+            url: None,
+            headers: BTreeMap::new(),
+        };
+        let mut seen = Vec::new();
+        let cfg = validate_mcp_config(&dto, &mut seen).expect("valid builtin");
+        assert_eq!(
+            cfg.command.as_deref(),
+            Some(resolved_self_command().as_str())
+        );
     }
 }

@@ -31,7 +31,7 @@
   );
 </script>
 
-<Popover align="left" width="240px">
+<Popover align="right" width="240px">
   {#snippet trigger()}
     <span class="tm-trigger-label">{currentLabel}</span>
     <Icon name="chevron-down" size={10} />

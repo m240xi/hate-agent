@@ -11,7 +11,7 @@ use specta::Type;
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex as AsyncMutex, OnceCell};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 pub const LOCAL_PROVIDER: &str = "local";
@@ -338,10 +338,12 @@ struct RunningServer {
 }
 
 pub struct LocalRuntimeState {
-    specs: OnceCell<HardwareSpecs>,
+    specs: AsyncMutex<Option<HardwareSpecs>>,
     server: AsyncMutex<Option<RunningServer>>,
     op_lock: AsyncMutex<()>,
     dl_cancel: Mutex<Option<CancellationToken>>,
+    launch_cancel: Mutex<Option<CancellationToken>>,
+    launching_model: Mutex<Option<String>>,
     downloading_model: Mutex<Option<String>>,
     downloading_runtime: Mutex<bool>,
 }
@@ -349,14 +351,20 @@ pub struct LocalRuntimeState {
 impl Default for LocalRuntimeState {
     fn default() -> Self {
         Self {
-            specs: OnceCell::new(),
+            specs: AsyncMutex::new(None),
             server: AsyncMutex::new(None),
             op_lock: AsyncMutex::new(()),
             dl_cancel: Mutex::new(None),
+            launch_cancel: Mutex::new(None),
+            launching_model: Mutex::new(None),
             downloading_model: Mutex::new(None),
             downloading_runtime: Mutex::new(false),
         }
     }
+}
+
+fn server_pid_path() -> PathBuf {
+    data_root().join("server.pid")
 }
 
 pub fn data_root() -> PathBuf {
@@ -864,28 +872,30 @@ fn probe_hardware_blocking() -> HardwareSpecs {
 }
 
 async fn get_specs(state: &LocalRuntimeState) -> HardwareSpecs {
-    let mut specs = state
-        .specs
-        .get_or_init(|| async {
-            tokio::task::spawn_blocking(probe_hardware_blocking)
-                .await
-                .unwrap_or_else(|_| HardwareSpecs {
-                    os: std::env::consts::OS.to_string(),
-                    arch: std::env::consts::ARCH.to_string(),
-                    cpu_name: "CPU".to_string(),
-                    cpu_cores: 4,
-                    ram_mb: 8_192,
-                    gpu_name: None,
-                    vram_mb: 0,
-                    unified_memory: false,
-                    effective_gpu_mb: 0,
-                    recommended_backend: "cpu".to_string(),
-                    available_backends: vec!["cpu".to_string()],
-                    disk_free_mb: 0,
-                })
-        })
-        .await
-        .clone();
+    let mut guard = state.specs.lock().await;
+    let mut specs = if let Some(cached) = guard.as_ref() {
+        cached.clone()
+    } else {
+        let probed = tokio::task::spawn_blocking(probe_hardware_blocking)
+            .await
+            .unwrap_or_else(|_| HardwareSpecs {
+                os: std::env::consts::OS.to_string(),
+                arch: std::env::consts::ARCH.to_string(),
+                cpu_name: "CPU".to_string(),
+                cpu_cores: 4,
+                ram_mb: 8_192,
+                gpu_name: None,
+                vram_mb: 0,
+                unified_memory: false,
+                effective_gpu_mb: 0,
+                recommended_backend: "cpu".to_string(),
+                available_backends: vec!["cpu".to_string()],
+                disk_free_mb: 0,
+            });
+        *guard = Some(probed.clone());
+        probed
+    };
+    drop(guard);
     specs.disk_free_mb = tokio::task::spawn_blocking(disk_free_mb_now)
         .await
         .unwrap_or(specs.disk_free_mb);
@@ -922,6 +932,7 @@ pub async fn build_status(state: &LocalRuntimeState) -> LocalRuntimeStatus {
                 )
             } else {
                 *guard = None;
+                let _ = std::fs::remove_file(server_pid_path());
                 (false, None, None, None)
             }
         } else {
@@ -1160,6 +1171,7 @@ fn find_llama_server_exe(root: &Path) -> Option<PathBuf> {
 async fn download_bytes_with_progress(
     client: &reqwest::Client,
     url: &str,
+    cancel: Option<&CancellationToken>,
     mut on_chunk: impl FnMut(u64, Option<u64>) + Send,
 ) -> Result<Vec<u8>, String> {
     let resp = client
@@ -1172,7 +1184,17 @@ async fn download_bytes_with_progress(
     let total = resp.content_length();
     let mut stream = resp.bytes_stream();
     let mut out = Vec::with_capacity(usize::try_from(total.unwrap_or(0)).unwrap_or(0));
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next_chunk = match cancel {
+            Some(tok) => tokio::select! {
+                () = tok.cancelled() => return Err("local server start cancelled".to_string()),
+                chunk = stream.next() => chunk,
+            },
+            None => stream.next().await,
+        };
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         let chunk = chunk.map_err(|e| format!("download failed: {e}"))?;
         out.extend_from_slice(&chunk);
         on_chunk(u64::try_from(out.len()).unwrap_or(u64::MAX), total);
@@ -1192,6 +1214,7 @@ async fn install_runtime_inner(
     app: &AppHandle,
     state: &LocalRuntimeState,
     backend_override: Option<&str>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<InstalledRuntime, String> {
     let specs = get_specs(state).await;
     let prefs = load_prefs();
@@ -1303,7 +1326,7 @@ async fn install_runtime_inner(
 
     let app2 = app.clone();
     let mut last_pct = u64::MAX;
-    let main_bytes = download_bytes_with_progress(&client, &main_url, |done, total| {
+    let main_bytes = download_bytes_with_progress(&client, &main_url, cancel, |done, total| {
         let pct = total.map_or(done / (1024 * 1024), |t| done * 100 / t.max(1));
         if pct != last_pct {
             last_pct = pct;
@@ -1325,7 +1348,7 @@ async fn install_runtime_inner(
     let extra_data = if let Some((ename, eurl, esha)) = extra {
         let mut last_epct = u64::MAX;
         let app3 = app.clone();
-        let ebytes = download_bytes_with_progress(&client, &eurl, |done, total| {
+        let ebytes = download_bytes_with_progress(&client, &eurl, cancel, |done, total| {
             let pct = total.map_or(done / (1024 * 1024), |t| done * 100 / t.max(1));
             if pct != last_epct {
                 last_epct = pct;
@@ -1447,8 +1470,78 @@ pub async fn live_base_url(state: &LocalRuntimeState) -> Option<String> {
 async fn stop_server_locked(slot: &mut Option<RunningServer>) {
     if let Some(mut srv) = slot.take() {
         let _ = srv.child.kill().await;
-        let _ = srv.child.wait().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), srv.child.wait()).await;
     }
+    let _ = std::fs::remove_file(server_pid_path());
+}
+
+async fn kill_orphaned_pid_if_any() {
+    let pid_path = server_pid_path();
+    let Ok(raw) = std::fs::read_to_string(&pid_path) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&pid_path);
+    let Ok(pid) = raw.trim().parse::<u32>() else {
+        return;
+    };
+    if pid == 0 {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(move || {
+        #[cfg(windows)]
+        {
+            let mut query = std::process::Command::new("tasklist");
+            query.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+            configure_hidden_command(&mut query);
+            if let Ok(out) = query.output()
+                && out.status.success()
+                && String::from_utf8_lossy(&out.stdout)
+                    .to_ascii_lowercase()
+                    .contains("llama-server")
+            {
+                let mut kill = std::process::Command::new("taskkill");
+                kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
+                configure_hidden_command(&mut kill);
+                let _ = kill.output();
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if let Ok(out) = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "comm="])
+                .output()
+                && out.status.success()
+                && String::from_utf8_lossy(&out.stdout)
+                    .to_ascii_lowercase()
+                    .contains("llama-server")
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .output();
+            }
+        }
+    })
+    .await;
+}
+
+pub fn cancel_in_flight_launch(state: &LocalRuntimeState) {
+    if let Ok(mut slot) = state.launch_cancel.lock()
+        && let Some(c) = slot.take()
+    {
+        c.cancel();
+    }
+    if let Ok(mut m) = state.launching_model.lock() {
+        *m = None;
+    }
+}
+
+pub async fn stop_server_now(state: &LocalRuntimeState) {
+    cancel_in_flight_launch(state);
+    {
+        let mut srv_guard = state.server.lock().await;
+        stop_server_locked(&mut srv_guard).await;
+    }
+    kill_orphaned_pid_if_any().await;
 }
 
 fn bind_local_port() -> Result<u16, String> {
@@ -1471,7 +1564,11 @@ async fn spawn_and_wait(
     threads: u32,
     configured_backend: &str,
     backend_label: &str,
+    cancel: &CancellationToken,
 ) -> Result<RunningServer, String> {
+    if cancel.is_cancelled() {
+        return Err("local server start cancelled".to_string());
+    }
     let port = bind_local_port()?;
 
     let mut cmd = Command::new(exe);
@@ -1503,6 +1600,10 @@ async fn spawn_and_wait(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to launch llama-server: {e}"))?;
+    if let Some(pid) = child.id() {
+        let _ = std::fs::create_dir_all(data_root());
+        let _ = std::fs::write(server_pid_path(), pid.to_string());
+    }
 
     let tail = Arc::new(Mutex::new(VecDeque::with_capacity(30)));
     if let Some(stderr) = child.stderr.take() {
@@ -1552,9 +1653,35 @@ async fn spawn_and_wait(
         }
         if tokio::time::Instant::now() >= deadline {
             let _ = child.kill().await;
+            let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+            let _ = std::fs::remove_file(server_pid_path());
             return Err("timed out waiting for local model server to load".to_string());
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::select! {
+            () = cancel.cancelled() => {
+                let _ = child.kill().await;
+                let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+                let _ = std::fs::remove_file(server_pid_path());
+                return Err("local server start cancelled".to_string());
+            }
+            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+    }
+}
+
+struct LaunchSlotGuard<'a> {
+    cancel: &'a Mutex<Option<CancellationToken>>,
+    model: &'a Mutex<Option<String>>,
+}
+
+impl Drop for LaunchSlotGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.cancel.lock() {
+            slot.take();
+        }
+        if let Ok(mut m) = self.model.lock() {
+            *m = None;
+        }
     }
 }
 
@@ -1565,6 +1692,17 @@ pub async fn ensure_model_running(
     make_default: bool,
 ) -> Result<(u16, String), String> {
     let _op = state.op_lock.lock().await;
+    let launch_tok = CancellationToken::new();
+    if let Ok(mut slot) = state.launch_cancel.lock() {
+        *slot = Some(launch_tok.clone());
+    }
+    if let Ok(mut m) = state.launching_model.lock() {
+        *m = Some(model_id.to_string());
+    }
+    let _launch_guard = LaunchSlotGuard {
+        cancel: &state.launch_cancel,
+        model: &state.launching_model,
+    };
     let specs = get_specs(state).await;
     let prefs = load_prefs();
     let desired_backend = if prefs.preferred_backend == "auto" {
@@ -1600,7 +1738,7 @@ pub async fn ensure_model_running(
         }
     }
 
-    let inst = install_runtime_inner(app, state, Some(&desired_backend)).await?;
+    let inst = install_runtime_inner(app, state, Some(&desired_backend), Some(&launch_tok)).await?;
     {
         let mut srv_guard = state.server.lock().await;
         stop_server_locked(&mut srv_guard).await;
@@ -1619,10 +1757,12 @@ pub async fn ensure_model_running(
         threads,
         &desired_backend,
         &inst.backend,
+        &launch_tok,
     )
     .await
     {
         Ok(srv) => srv,
+        Err(cancel_err) if launch_tok.is_cancelled() => return Err(cancel_err),
         Err(gpu_err) if want_gpu => {
             tracing::warn!(error = %gpu_err, "GPU launch failed, retrying local model on CPU");
             let _ = app.emit(
@@ -1641,13 +1781,16 @@ pub async fn ensure_model_running(
                 threads,
                 &desired_backend,
                 "cpu (fallback)",
+                &launch_tok,
             )
             .await
             {
                 Ok(srv) => srv,
+                Err(cancel_err) if launch_tok.is_cancelled() => return Err(cancel_err),
                 Err(cpu_ngl_err) if prefs.preferred_backend == "auto" && inst.backend != "cpu" => {
                     tracing::warn!(error = %cpu_ngl_err, "Retrying with pure CPU llama.cpp build");
-                    let cpu_inst = install_runtime_inner(app, state, Some("cpu")).await?;
+                    let cpu_inst =
+                        install_runtime_inner(app, state, Some("cpu"), Some(&launch_tok)).await?;
                     spawn_and_wait(
                         &cpu_inst.exe,
                         &model_path,
@@ -1657,10 +1800,15 @@ pub async fn ensure_model_running(
                         threads,
                         &desired_backend,
                         "cpu (safe mode)",
+                        &launch_tok,
                     )
                     .await
                     .map_err(|pure_err| {
-                        format!("{gpu_err}\nCPU fallback failed: {cpu_ngl_err}\nSafe CPU runtime failed: {pure_err}")
+                        if launch_tok.is_cancelled() {
+                            pure_err
+                        } else {
+                            format!("{gpu_err}\nCPU fallback failed: {cpu_ngl_err}\nSafe CPU runtime failed: {pure_err}")
+                        }
                     })?
                 }
                 Err(cpu_err) => {
@@ -1677,7 +1825,8 @@ pub async fn ensure_model_running(
                     "message": "GPU runtime could not start on this PC \u{2014} switched to CPU mode."
                 }),
             );
-            let cpu_inst = install_runtime_inner(app, state, Some("cpu")).await?;
+            let cpu_inst =
+                install_runtime_inner(app, state, Some("cpu"), Some(&launch_tok)).await?;
             spawn_and_wait(
                 &cpu_inst.exe,
                 &model_path,
@@ -1687,9 +1836,16 @@ pub async fn ensure_model_running(
                 threads,
                 &desired_backend,
                 "cpu (safe mode)",
+                &launch_tok,
             )
             .await
-            .map_err(|pure_err| format!("{err}\nSafe CPU runtime also failed: {pure_err}"))?
+            .map_err(|pure_err| {
+                if launch_tok.is_cancelled() {
+                    pure_err
+                } else {
+                    format!("{err}\nSafe CPU runtime also failed: {pure_err}")
+                }
+            })?
         }
         Err(err) => return Err(err),
     };
@@ -1715,11 +1871,13 @@ pub async fn ensure_model_running(
 }
 
 pub fn shutdown_sync(state: &LocalRuntimeState) {
+    cancel_in_flight_launch(state);
     if let Ok(mut guard) = state.server.try_lock()
         && let Some(mut srv) = guard.take()
     {
         let _ = srv.child.start_kill();
     }
+    let _ = std::fs::remove_file(server_pid_path());
 }
 
 #[tauri::command]
@@ -1727,6 +1885,18 @@ pub fn shutdown_sync(state: &LocalRuntimeState) {
 pub async fn local_runtime_status(
     state: State<'_, LocalRuntimeState>,
 ) -> Result<LocalRuntimeStatus, String> {
+    Ok(build_status(&state).await)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn local_runtime_refresh(
+    state: State<'_, LocalRuntimeState>,
+) -> Result<LocalRuntimeStatus, String> {
+    {
+        let mut guard = state.specs.lock().await;
+        *guard = None;
+    }
     Ok(build_status(&state).await)
 }
 
@@ -1760,7 +1930,7 @@ pub async fn local_runtime_install(
     backend: Option<String>,
 ) -> Result<LocalRuntimeStatus, String> {
     let _op = state.op_lock.lock().await;
-    install_runtime_inner(&app, &state, backend.as_deref()).await?;
+    install_runtime_inner(&app, &state, backend.as_deref(), None).await?;
     Ok(build_status(&state).await)
 }
 
@@ -1942,38 +2112,108 @@ pub fn local_model_download_cancel(state: State<'_, LocalRuntimeState>) {
     }
 }
 
+async fn remove_file_with_retry(path: &Path) -> Result<bool, String> {
+    for attempt in 0..15 {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) if attempt < 14 => {
+                tracing::debug!(path = %path.display(), error = %e, "retrying model file removal");
+                tokio::time::sleep(Duration::from_millis(120)).await;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "couldn't remove {}: {e} (close anything using it and retry)",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(false)
+}
+
+async fn delete_model_files(dir: &Path, model_id: &str) -> Result<bool, String> {
+    let mut targets: Vec<PathBuf> = Vec::new();
+    if let Some(entry) = catalog_by_id(model_id) {
+        targets.push(dir.join(entry.filename));
+        targets.push(dir.join(format!("{}.part", entry.filename)));
+    } else if let Ok(rd) = std::fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("gguf")
+                && p.file_stem().and_then(|s| s.to_str()) == Some(model_id)
+            {
+                let part = PathBuf::from(format!("{}.part", p.display()));
+                targets.push(p);
+                targets.push(part);
+            }
+        }
+    }
+    let mut deleted_any = false;
+    for p in targets {
+        if remove_file_with_retry(&p).await? {
+            deleted_any = true;
+        }
+    }
+    Ok(deleted_any)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn local_model_delete(
     state: State<'_, LocalRuntimeState>,
+    sessions: State<'_, crate::commands::Sessions>,
     model_id: String,
 ) -> Result<LocalRuntimeStatus, String> {
-    let _op = state.op_lock.lock().await;
-    {
-        let mut srv_guard = state.server.lock().await;
-        if srv_guard.as_ref().is_some_and(|s| s.model_id == model_id) {
-            stop_server_locked(&mut srv_guard).await;
+    let is_downloading = state
+        .downloading_model
+        .lock()
+        .is_ok_and(|g| g.as_deref() == Some(model_id.as_str()));
+    if is_downloading {
+        if let Ok(mut slot) = state.dl_cancel.lock()
+            && let Some(c) = slot.take()
+        {
+            c.cancel();
+        }
+        for _ in 0..20 {
+            let still = state
+                .downloading_model
+                .lock()
+                .is_ok_and(|g| g.as_deref() == Some(model_id.as_str()));
+            if !still {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    if let Some(entry) = catalog_by_id(&model_id) {
-        let p = models_dir().join(entry.filename);
-        let part = models_dir().join(format!("{}.part", entry.filename));
-        let _ = std::fs::remove_file(p);
-        let _ = std::fs::remove_file(part);
-    } else if let Some((p, _)) = resolve_model_path(&model_id) {
-        let _ = std::fs::remove_file(p);
+
+    let is_launching = state
+        .launching_model
+        .lock()
+        .is_ok_and(|g| g.as_deref() == Some(model_id.as_str()));
+    if is_launching {
+        cancel_in_flight_launch(&state);
     }
 
+    let is_running_this = {
+        let srv_guard = state.server.lock().await;
+        srv_guard.as_ref().is_some_and(|s| s.model_id == model_id)
+    };
+    if is_running_this {
+        stop_server_now(&state).await;
+    }
+
+    delete_model_files(&models_dir(), &model_id).await?;
+
+    let next_model = downloaded_models().into_iter().next().map(|(id, _, _)| id);
     if let Ok(mut ctx) = hate_auth::AuthContext::load()
         && let Some(local_conf) = ctx.config.providers.get_mut(LOCAL_PROVIDER)
         && local_conf.model == model_id
     {
-        let next = downloaded_models().into_iter().next().map(|(id, _, _)| id);
-        if let Some(next_id) = next {
-            local_conf.model = next_id;
-            let _ = ctx.config.save();
-        }
+        local_conf.model = next_model.clone().unwrap_or_default();
+        ctx.config.save().map_err(|e| e.to_string())?;
     }
+    crate::commands::on_local_model_deleted(&sessions, &model_id, next_model.as_deref());
 
     Ok(build_status(&state).await)
 }
@@ -1995,9 +2235,7 @@ pub async fn local_model_start(
 pub async fn local_runtime_stop(
     state: State<'_, LocalRuntimeState>,
 ) -> Result<LocalRuntimeStatus, String> {
-    let _op = state.op_lock.lock().await;
-    let mut srv_guard = state.server.lock().await;
-    stop_server_locked(&mut srv_guard).await;
+    stop_server_now(&state).await;
     Ok(build_status(&state).await)
 }
 
@@ -2168,5 +2406,49 @@ mod tests {
         assert!(specs.ram_mb >= 1024);
         assert!(specs.available_backends.contains(&"cpu".to_string()));
         assert_ne!(specs.recommended_backend, "");
+    }
+
+    #[tokio::test]
+    async fn delete_model_files_removes_catalog_custom_and_part_files() {
+        let tmp =
+            std::env::temp_dir().join(format!("hate_local_del_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let cat = &CATALOG[0];
+        let cat_file = tmp.join(cat.filename);
+        let cat_part = tmp.join(format!("{}.part", cat.filename));
+        std::fs::write(&cat_file, b"gguf").unwrap();
+        std::fs::write(&cat_part, b"part").unwrap();
+
+        assert!(delete_model_files(&tmp, cat.id).await.unwrap());
+        assert!(!cat_file.exists());
+        assert!(!cat_part.exists());
+
+        let custom_file = tmp.join("my-custom-model.gguf");
+        let custom_part = tmp.join("my-custom-model.gguf.part");
+        std::fs::write(&custom_file, b"custom").unwrap();
+        std::fs::write(&custom_part, b"part").unwrap();
+
+        assert!(delete_model_files(&tmp, "my-custom-model").await.unwrap());
+        assert!(!custom_file.exists());
+        assert!(!custom_part.exists());
+
+        assert!(!delete_model_files(&tmp, cat.id).await.unwrap());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn stop_server_now_does_not_block_on_op_lock() {
+        let state = LocalRuntimeState::default();
+        let _held = state.op_lock.lock().await;
+        let tok = CancellationToken::new();
+        *state.launch_cancel.lock().unwrap() = Some(tok.clone());
+        *state.launching_model.lock().unwrap() = Some("qwen3.5-9b".to_string());
+
+        tokio::time::timeout(Duration::from_secs(2), stop_server_now(&state))
+            .await
+            .expect("stop_server_now must not deadlock on op_lock");
+        assert!(tok.is_cancelled());
+        assert!(state.launching_model.lock().unwrap().is_none());
     }
 }

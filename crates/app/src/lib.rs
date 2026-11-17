@@ -6,9 +6,14 @@ mod images;
 mod local_runtime;
 mod presence;
 mod sessions_db;
+mod web_search_mcp;
 
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
+
+pub fn run_web_search_mcp() {
+    web_search_mcp::run_stdio_server_blocking();
+}
 
 pub fn run() {
     let builder = Builder::new().commands(collect_commands![
@@ -74,6 +79,7 @@ pub fn run() {
         antigravity::antigravity_login_cancel,
         antigravity::antigravity_logout,
         local_runtime::local_runtime_status,
+        local_runtime::local_runtime_refresh,
         local_runtime::local_runtime_set_prefs,
         local_runtime::local_runtime_install,
         local_runtime::local_model_download,

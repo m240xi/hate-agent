@@ -8,6 +8,9 @@
   import PlanBar from './PlanBar.svelte';
 
   let ta = $state<HTMLTextAreaElement | null>(null);
+  let wrap = $state<HTMLDivElement | null>(null);
+  let wrapCompact = $state(false);
+  let wrapTight = $state(false);
   let paletteOpen = $state(false);
   let pickerOpen = $state(false);
   let fileInput = $state<HTMLInputElement | null>(null);
@@ -15,6 +18,30 @@
   const folderName = $derived(
     session.workspacePath?.split(/[\\/]/).filter(Boolean).pop() ?? '',
   );
+
+  // Measure the composer width via ResizeObserver rather than `container-type:
+  // inline-size`: CSS layout containment creates both a stacking context (trapping
+  // popovers below `.glass-pane::after`) and a Backdrop Root (blocking glass
+  // `backdrop-filter` blur on the transcript behind popovers).
+  $effect(() => {
+    const el = wrap;
+    if (!el) return;
+    const update = (w: number): void => {
+      wrapCompact = w <= 560;
+      wrapTight = w <= 400;
+    };
+    const cs = getComputedStyle(el);
+    const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    update(el.clientWidth - padX);
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const w = entry.contentBoxSize?.[0]?.inlineSize ?? entry.contentRect.width;
+      update(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
 
   function onPaste(e: ClipboardEvent): void {
     const files = [...(e.clipboardData?.items ?? [])]
@@ -84,7 +111,12 @@
 </script>
 
 <PlanBar />
-<div class="composer-wrap">
+<div
+  class="composer-wrap"
+  class:compact={wrapCompact}
+  class:tight={wrapTight}
+  bind:this={wrap}
+>
   {#if session.queue.length > 0}
     <ul class="queue" aria-label="Queued messages">
       {#each session.queue as q, i}
@@ -292,28 +324,23 @@
     background: var(--bg-0);
     flex: none;
     min-width: 0;
-    container-type: inline-size;
   }
-  @container (max-width: 560px) {
-    .lbl {
-      display: none;
-    }
-    .plan-toggle {
-      width: 32px;
-      padding: 0;
-      justify-content: center;
-    }
-    .folder-chip {
-      max-width: 120px;
-    }
-    .composer-meta > :global(.pop:not(.pop-left)) {
-      max-width: 150px;
-    }
+  .composer-wrap.compact .lbl {
+    display: none;
   }
-  @container (max-width: 400px) {
-    .folder-name {
-      display: none;
-    }
+  .composer-wrap.compact .plan-toggle {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+  }
+  .composer-wrap.compact .folder-chip {
+    max-width: 120px;
+  }
+  .composer-wrap.compact .composer-meta > :global(.mp-pop) {
+    max-width: 150px;
+  }
+  .composer-wrap.tight .folder-name {
+    display: none;
   }
   .prompt-bar {
     display: flex;
@@ -597,12 +624,12 @@
     gap: 6px;
     padding: 4px 8px 8px 10px;
   }
-  .composer-meta > :global(.pop:not(.pop-left)) {
+  .composer-meta > :global(.mp-pop) {
     flex: 0 1 auto;
     min-width: 56px;
     max-width: 240px;
   }
-  .composer-meta > :global(.pop:not(.pop-left) .pop-trigger) {
+  .composer-meta > :global(.mp-pop .pop-trigger) {
     min-width: 0;
     max-width: 100%;
   }

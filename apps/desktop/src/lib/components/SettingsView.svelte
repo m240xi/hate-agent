@@ -239,6 +239,31 @@
     showMcpAdd = false;
   }
 
+  function addWebSearch(): void {
+    if (mcpRows.some((r) => r.name.toLowerCase() === 'web_search' || r.args?.[0] === '--mcp-web-search')) {
+      mcpError = 'web_search is already configured';
+      return;
+    }
+    mcpRows = [
+      ...mcpRows,
+      {
+        name: 'web_search',
+        kind: 'stdio',
+        enabled: true,
+        state: 'new',
+        tools: 0,
+        info: '',
+        command: 'builtin:web-search',
+        args: ['--mcp-web-search'],
+        env: {},
+        url: null,
+        headers: {},
+      },
+    ];
+    mcpError = null;
+    queueMcpSave();
+  }
+
   function addContext7(): void {
     if (mcpRows.some((r) => r.name.toLowerCase() === 'context7')) {
       mcpError = 'context7 is already configured';
@@ -670,7 +695,9 @@
                 </button>
               </div>
               <div class="mcp-sub muted mono">
-                {#if row.kind === 'stdio'}
+                {#if row.kind === 'stdio' && row.args?.[0] === '--mcp-web-search'}
+                  built-in · free web search &amp; page fetch (no API key)
+                {:else if row.kind === 'stdio'}
                   {[row.command, ...(row.args ?? [])].filter(Boolean).join(' ')}
                 {:else}
                   {row.url}
@@ -780,6 +807,9 @@
                 <Icon name="plus" size={11} />
                 Add a server
               </button>
+              <button class="btn ghost sm" onclick={addWebSearch}>
+                Add Web Search
+              </button>
               <button class="btn ghost sm" onclick={addContext7}>
                 Add Context7 docs
               </button>
@@ -856,6 +886,13 @@
         <div class="mcp-add-row">
           <button class="btn ghost mcp-add-btn" onclick={() => (showMcpAdd = true)}>
             <Icon name="plus" size={13} /> Add MCP server
+          </button>
+          <button
+            class="btn ghost mcp-add-btn"
+            onclick={addWebSearch}
+            title="Add the free built-in web search server"
+          >
+            <Icon name="search" size={13} /> Add Web Search
           </button>
           <button
             class="btn ghost mcp-add-btn"

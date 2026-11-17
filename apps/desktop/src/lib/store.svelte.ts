@@ -1180,6 +1180,27 @@ class SessionStore {
           .catch(() => [] as ProviderModel[]),
       ),
     );
+    const currentValid = this.providers.some((p) => p.name === this.providerName);
+    if (!currentValid) {
+      const def = this.providers.find((p) => p.is_default) ?? this.providers[0];
+      if (def) {
+        this.providerName = def.name;
+        this.provider = def.name;
+        this.model = def.model;
+      } else {
+        this.providerName = '';
+        this.provider = '';
+        this.model = '';
+      }
+    } else if (this.providerName === 'local') {
+      const localProv = this.providers.find((p) => p.name === 'local');
+      const localStillHasModel = lists
+        .flat()
+        .some((x) => x.provider === 'local' && x.id === this.model);
+      if (localProv && !localStillHasModel) {
+        this.model = localProv.model;
+      }
+    }
     try {
       const list = lists.length > 0 ? lists.flat() : await m.modelsList();
       this.models = filterChatModels(list);

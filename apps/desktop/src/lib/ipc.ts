@@ -530,6 +530,10 @@ export async function localRuntimeStatus(): Promise<LocalRuntimeStatus> {
   return invoke<LocalRuntimeStatus>('local_runtime_status');
 }
 
+export async function localRuntimeRefresh(): Promise<LocalRuntimeStatus> {
+  return invoke<LocalRuntimeStatus>('local_runtime_refresh');
+}
+
 export async function localRuntimeSetPrefs(
   preferred_backend: string | null,
   context_tokens: number | null,

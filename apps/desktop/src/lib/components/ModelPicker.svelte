@@ -200,7 +200,7 @@
   }
 </script>
 
-<Popover width="440px" onOpenChange={(o) => (panelOpen = o)}>
+<Popover class="mp-pop" width="440px" onOpenChange={(o) => (panelOpen = o)}>
   {#snippet trigger()}
     {#if session.providerName || session.provider}
       <span class="mp-trigger-logo" aria-hidden="true">

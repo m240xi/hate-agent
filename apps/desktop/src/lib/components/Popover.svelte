@@ -7,6 +7,7 @@
     onOpenChange?: (open: boolean) => void;
     align?: 'left' | 'right';
     width?: string;
+    class?: string;
   }
 
   let {
@@ -15,6 +16,7 @@
     onOpenChange,
     align = 'right',
     width,
+    class: className = '',
   }: Props = $props();
 
   let open = $state(false);
@@ -60,7 +62,7 @@
   onresize={() => open && measure()}
 />
 
-<div class="pop" class:pop-left={align === 'left'} bind:this={root}>
+<div class="pop {className}" class:pop-left={align === 'left'} bind:this={root}>
   <button
     type="button"
     class="pop-trigger"

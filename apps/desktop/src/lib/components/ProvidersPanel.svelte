@@ -149,7 +149,13 @@
         group: (p.group as AtlasItem['group']) || 'hosted',
         preset: p,
         installed: inst,
-        connected: inst ? (p.name === 'local' ? true : inst.auth_kind !== 'none') : false,
+        connected: inst
+          ? p.name === 'local'
+            ? localStatus
+              ? localStatus.server_running || localStatus.models.some((m) => m.downloaded)
+              : true
+            : inst.auth_kind !== 'none'
+          : false,
         isDefault: inst?.is_default ?? false,
         kind: inst?.kind ?? p.kind,
         baseUrl: inst?.base_url ?? p.base_url,
@@ -271,6 +277,7 @@
     confirmDeleteModel = null;
     error = null;
     localError = null;
+    localNotice = null;
     modelFilter = '';
     resetSetupState(key);
     if (key === 'local' && inTauri) void refreshLocalStatus();
@@ -468,7 +475,7 @@
       if (localStatus?.server_running && localStatus.active_model) {
         return `${localStatus.active_model} · live`;
       }
-      if (item.installed?.model) return item.installed.model;
+      if (item.installed?.model) return `${item.installed.model} · stopped`;
       if (localStatus?.specs?.gpu_name) return localStatus.specs.gpu_name;
       return 'On-device · zero setup';
     }
@@ -654,20 +661,31 @@
     if (confirmRemove !== p.name) {
       confirmRemove = p.name;
       if (confirmTimer) clearTimeout(confirmTimer);
-      confirmTimer = setTimeout(() => (confirmRemove = null), 4000);
+      confirmTimer = setTimeout(() => (confirmRemove = null), 8000);
       return;
     }
     confirmRemove = null;
     if (confirmTimer) clearTimeout(confirmTimer);
     const m = await import('../ipc');
     error = null;
+    if (p.name === 'local') {
+      localError = null;
+      localNotice = null;
+    }
+    let ok = false;
     try {
       if (p.kind === 'acp') await m.antigravityLogout().catch(() => {});
       await m.providerRemove(p.name);
+      ok = true;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      if (p.name === 'local') localError = msg;
+      else error = msg;
     }
     await refresh();
+    if (p.name === 'local' && ok) {
+      localNotice = 'Built-in Local disabled and local server stopped.';
+    }
     if (selectedItem?.preset) {
       resetSetupState(p.name);
     } else {
@@ -822,12 +840,23 @@
     return 'Exceeds Memory';
   }
 
-  async function refreshLocalStatus(): Promise<void> {
+  async function refreshLocalStatus(explicit = false): Promise<void> {
     if (!inTauri) return;
     localLoading = true;
+    if (explicit) {
+      localError = null;
+      localNotice = null;
+    }
     try {
       const m = await import('../ipc');
-      localStatus = await m.localRuntimeStatus();
+      localStatus = explicit
+        ? await m.localRuntimeRefresh()
+        : await m.localRuntimeStatus();
+      if (explicit) {
+        await refresh();
+        const dlCount = localStatus.models.filter((x) => x.downloaded).length;
+        localNotice = `Refreshed · ${dlCount} model${dlCount === 1 ? '' : 's'} downloaded · ${fmtGb(localStatus.specs.disk_free_mb)} free.`;
+      }
     } catch (e) {
       localError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -886,21 +915,25 @@
     await m.localModelDownloadCancel().catch(() => {});
   }
 
-  async function deleteLocalModel(modelId: string): Promise<void> {
-    if (confirmDeleteModel !== modelId) {
+  async function deleteLocalModel(modelId: string, label?: string, skipConfirm = false): Promise<void> {
+    if (!skipConfirm && confirmDeleteModel !== modelId) {
       confirmDeleteModel = modelId;
       if (confirmDeleteTimer) clearTimeout(confirmDeleteTimer);
-      confirmDeleteTimer = setTimeout(() => (confirmDeleteModel = null), 4000);
+      confirmDeleteTimer = setTimeout(() => (confirmDeleteModel = null), 8000);
       return;
     }
     confirmDeleteModel = null;
     if (confirmDeleteTimer) clearTimeout(confirmDeleteTimer);
     localBusy = `del:${modelId}`;
     localError = null;
+    localNotice = null;
     try {
       const m = await import('../ipc');
       localStatus = await m.localModelDelete(modelId);
       await refresh();
+      localNotice = skipConfirm
+        ? `Discarded partial download for ${label ?? modelId}.`
+        : `Uninstalled ${label ?? modelId}.`;
     } catch (e) {
       localError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -925,10 +958,11 @@
       }
       await refresh();
     } catch (e) {
-      localError = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/cancelled/i.test(msg)) localError = msg;
       await refreshLocalStatus();
     } finally {
-      localBusy = null;
+      if (localBusy === `start:${modelId}`) localBusy = null;
       localRuntimeDl = null;
     }
   }
@@ -936,13 +970,18 @@
   async function stopLocalServer(): Promise<void> {
     localBusy = 'stop';
     localError = null;
+    localNotice = null;
+    confirmDeleteModel = null;
+    confirmRemove = null;
     try {
       const m = await import('../ipc');
       localStatus = await m.localRuntimeStop();
+      await refresh();
+      localNotice = 'Local server stopped.';
     } catch (e) {
       localError = e instanceof Error ? e.message : String(e);
     } finally {
-      localBusy = null;
+      if (localBusy === 'stop') localBusy = null;
     }
   }
 
@@ -1421,16 +1460,20 @@
               </div>
             </div>
 
-            {#if p || (isBuiltInLocal && localStatus?.server_running)}
+            {#if p || (isBuiltInLocal && (localStatus?.server_running || localBusy?.startsWith('start:')))}
               <div class="stage-head-cta">
-                {#if isBuiltInLocal && localStatus?.server_running}
+                {#if isBuiltInLocal && (localStatus?.server_running || localBusy?.startsWith('start:'))}
                   <button
                     class="btn sm ghost"
                     onclick={() => void stopLocalServer()}
-                    disabled={localBusy !== null}
+                    disabled={localBusy === 'stop'}
                   >
                     <Icon name="stop" size={11} />
-                    {localBusy === 'stop' ? 'Stopping…' : 'Stop server'}
+                    {localBusy === 'stop'
+                      ? 'Stopping…'
+                      : localStatus?.server_running
+                        ? 'Stop server'
+                        : 'Cancel start'}
                   </button>
                 {/if}
                 {#if p}
@@ -1637,8 +1680,8 @@
                   </div>
                 {/if}
 
-                {#if localError}
-                  <p class="error-banner">{localError}</p>
+                {#if localError || error}
+                  <p class="error-banner">{localError ?? error}</p>
                 {/if}
 
                 <div class="deck-card">
@@ -1650,11 +1693,13 @@
                       </span>
                       <button
                         class="btn sm ghost"
-                        onclick={() => void refreshLocalStatus()}
+                        onclick={() => void refreshLocalStatus(true)}
                         disabled={localLoading}
                       >
-                        <Icon name="refresh" size={11} />
-                        {localLoading ? 'Scanning&hellip;' : 'Refresh'}
+                        <span class="icon-spin" class:spinning={localLoading}>
+                          <Icon name="refresh" size={11} />
+                        </span>
+                        {localLoading ? 'Scanning…' : 'Refresh'}
                       </button>
                     </div>
                   </div>
@@ -1764,16 +1809,27 @@
                             <button
                               class="remove-btn"
                               class:confirming={confirmDeleteModel === m.id}
-                              onclick={() => void deleteLocalModel(m.id)}
-                              disabled={localBusy !== null}
-                              title="Delete downloaded model file"
+                              onclick={() => void deleteLocalModel(m.id, m.name)}
+                              disabled={deletingThis || startingThis}
+                              title="Uninstall model from disk"
                             >
                               {deletingThis
-                                ? 'Deleting…'
+                                ? 'Uninstalling…'
                                 : confirmDeleteModel === m.id
-                                  ? 'Click again to delete'
-                                  : 'Delete'}
+                                  ? 'Click again to uninstall'
+                                  : 'Uninstall'}
                             </button>
+                            {#if confirmDeleteModel === m.id && !deletingThis}
+                              <button
+                                class="btn sm ghost"
+                                onclick={() => {
+                                  confirmDeleteModel = null;
+                                  if (confirmDeleteTimer) clearTimeout(confirmDeleteTimer);
+                                }}
+                              >
+                                Cancel
+                              </button>
+                            {/if}
                           {:else}
                             <button
                               class={m.recommended ? 'btn primary sm' : 'btn sm'}
@@ -1785,6 +1841,16 @@
                                 ? `Resume (${fmtGb(m.partial_mb)})`
                                 : `Download (${fmtGb(m.size_mb)})`}
                             </button>
+                            {#if m.partial_mb > 0}
+                              <button
+                                class="remove-btn"
+                                onclick={() => void deleteLocalModel(m.id, m.name, true)}
+                                disabled={deletingThis}
+                                title="Delete incomplete partial download"
+                              >
+                                {deletingThis ? 'Discarding…' : 'Discard'}
+                              </button>
+                            {/if}
                           {/if}
                         </div>
                       </div>
@@ -1812,13 +1878,27 @@
                     <span class="foot-note">
                       Stops the local server and removes Built-in Local from your active provider list (downloaded GGUF files stay on disk).
                     </span>
-                    <button
-                      class="remove-btn"
-                      class:confirming={confirmRemove === p.name}
-                      onclick={() => void removeProvider(p)}
-                    >
-                      {confirmRemove === p.name ? 'Click again to remove' : 'Disable local provider'}
-                    </button>
+                    <div class="danger-actions">
+                      <button
+                        class="remove-btn"
+                        class:confirming={confirmRemove === p.name}
+                        onclick={() => void removeProvider(p)}
+                        disabled={localBusy === 'stop'}
+                      >
+                        {confirmRemove === p.name ? 'Click again to disable' : 'Disable local provider'}
+                      </button>
+                      {#if confirmRemove === p.name}
+                        <button
+                          class="btn sm ghost"
+                          onclick={() => {
+                            confirmRemove = null;
+                            if (confirmTimer) clearTimeout(confirmTimer);
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      {/if}
+                    </div>
                   </div>
                 {/if}
               {/if}
@@ -2927,6 +3007,28 @@
     position: relative;
     margin-left: auto;
     flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .danger-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+  }
+  .icon-spin {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .icon-spin.spinning {
+    animation: spin-rot 0.8s linear infinite;
+  }
+  @keyframes spin-rot {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
   .active-badge {
     display: inline-flex;

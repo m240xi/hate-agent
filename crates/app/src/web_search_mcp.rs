@@ -847,9 +847,8 @@ pub fn parse_bing_html(html: &str, limit: usize) -> Vec<SearchHit> {
         let url = decode_bing_href(&href);
         let title = clean_inline_html(raw_title);
 
-        let snippet = extract_tag_inner(after_h2, "<p", "</p>")
-            .map(|s| clean_inline_html(&s))
-            .unwrap_or_default();
+        let snippet =
+            extract_tag_inner(after_h2, "<p", "</p>").map_or_default(|s| clean_inline_html(&s));
 
         if !title.is_empty() && (url.starts_with("http://") || url.starts_with("https://")) {
             hits.push(SearchHit {

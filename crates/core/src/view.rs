@@ -659,8 +659,7 @@ pub fn worktree_status(root: &Path) -> Result<WorktreeStatus, String> {
         None
     };
     let branch = git(&root_canon, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+        .map_or_default(|s| s.trim().to_string());
     let dirty = !git(&root_canon, &["status", "--porcelain"])
         .unwrap_or_default()
         .trim()

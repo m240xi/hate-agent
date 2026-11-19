@@ -15,7 +15,11 @@ const MAX_DELAY: Duration = Duration::from_secs(8);
 fn retriable(e: &ProviderError) -> bool {
     match e {
         ProviderError::Network(_) => true,
-        ProviderError::Http { status, .. } => *status == 429 || *status >= 500,
+        // 408/425/429/433 are the throttling and timeout shapes gateways
+        // actually emit; 433 is non-standard but common behind proxies.
+        ProviderError::Http { status, .. } => {
+            matches!(*status, 408 | 425 | 429 | 433) || *status >= 500
+        }
         ProviderError::Auth(_)
         | ProviderError::Decode(_)
         | ProviderError::Cancelled

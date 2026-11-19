@@ -309,6 +309,31 @@
     queueMcpSave();
   }
 
+  // Built-in web search: any key below upgrades the backend from scraping
+  // rate-limited engines to a real search API.
+  const WEB_SEARCH_KEYS = [
+    { key: 'BRAVE_API_KEY', label: 'Brave Search key', hint: 'api-dashboard.search.brave.com' },
+    { key: 'TAVILY_API_KEY', label: 'Tavily key', hint: 'tavily.com' },
+    { key: 'EXA_API_KEY', label: 'Exa key', hint: 'exa.ai' },
+    { key: 'SERPER_API_KEY', label: 'Serper key', hint: 'serper.dev' },
+    { key: 'SEARXNG_URL', label: 'SearXNG URL', hint: 'http://localhost:8080' }
+  ] as const;
+
+  function webSearchRow(): McpServerInfo | undefined {
+    return mcpRows.find((r) => r.kind === 'stdio' && r.args?.[0] === '--mcp-web-search');
+  }
+
+  function setWebSearchEnv(key: string, value: string): void {
+    const row = webSearchRow();
+    if (!row) return;
+    const env: Record<string, string> = { ...(row.env ?? {}) };
+    const trimmed = value.trim();
+    if (trimmed) env[key] = trimmed;
+    else delete env[key];
+    row.env = env;
+    queueMcpSave();
+  }
+
   function queueMcpSave(): void {
     mcpDirty = true;
     if (mcpSaveTimer) clearTimeout(mcpSaveTimer);
@@ -647,9 +672,40 @@
       </h2>
       <p class="group-hint muted">
         Model Context Protocol tools — stdio commands and HTTP endpoints.
-        Their tools reach the agent as <code class="mono">mcp__server__tool</code>;
+        Their tools reach the agent as        <code class="mono">mcp__server__tool</code>;
         anything not marked read-only asks permission, same as bash.
       </p>
+
+      {#if webSearchRow()}
+        <div class="card mcp-list web-search-keys">
+          <div class="mcp-row">
+            <div class="mcp-head">
+              <span class="mcp-name mono">Built-in web search</span>
+              <span class="mcp-kind">optional keys</span>
+            </div>
+            <p class="group-hint muted">
+              With no key the agent scrapes DuckDuckGo, Bing, Mojeek, Hacker News and Wikipedia,
+              which the engines throttle and bot-wall. Any key below makes that query go to a real
+              search API first. Stored in the <code class="mono">web_search</code> server env.
+            </p>
+            {#each WEB_SEARCH_KEYS as field (field.key)}
+              <label class="fld">
+                <span class="fld-label">{field.label}</span>
+                <input
+                  class="input mono"
+                  type={field.key === 'SEARXNG_URL' ? 'text' : 'password'}
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder={field.hint}
+                  value={webSearchRow()?.env?.[field.key] ?? ''}
+                  oninput={(e) =>
+                    setWebSearchEnv(field.key, (e.currentTarget as HTMLInputElement).value)}
+                />
+              </label>
+            {/each}
+          </div>
+        </div>
+      {/if}
 
       {#if mcpRows.length > 0}
         <div class="card mcp-list">

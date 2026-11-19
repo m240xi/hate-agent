@@ -509,6 +509,10 @@ async fn pump(
     let mut tool_order: Vec<usize> = Vec::new();
     let mut saw_finish = false;
     let mut saw_done_marker = false;
+    // Some gateways close the connection right after the last chunk instead
+    // of sending `finish_reason` or `[DONE]`. That is a truncated-looking but
+    // complete answer, so it only counts as an error when nothing arrived.
+    let mut received_content = false;
 
     macro_rules! flush_tools {
         () => {
@@ -555,6 +559,7 @@ async fn pump(
         let Some(choice) = chunk.choices.into_iter().next() else {
             continue;
         };
+        received_content = true;
         if let Some(delta) = choice.delta {
             if let Some(text) = delta.content
                 && !text.is_empty()
@@ -597,7 +602,10 @@ async fn pump(
     }
 
     flush_tools!();
-    if saw_done_marker || saw_finish {
+    if saw_done_marker || saw_finish || received_content {
+        if !saw_done_marker && !saw_finish {
+            warn!("provider stream ended without finish_reason/[DONE]; returning partial answer");
+        }
         let _ = tx.send(Ok(Delta::Done)).await;
     } else {
         let _ = tx

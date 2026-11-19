@@ -520,6 +520,9 @@ async fn pump(
     let mut output_tokens: u64 = 0;
     let mut usage_sent = false;
     let mut saw_stop = false;
+    // Mirrors the OpenAI path: a stream that ends without `message_stop`
+    // still delivered content, so treat it as a truncated-but-usable answer.
+    let mut received_content = false;
 
     loop {
         let frame = tokio::select! {
@@ -561,6 +564,7 @@ async fn pump(
                 };
             }
             "content_block_delta" => {
+                received_content = true;
                 let Some(delta) = payload.delta else { continue };
                 match delta.kind.as_str() {
                     "text_delta" => {
@@ -654,7 +658,10 @@ async fn pump(
         };
         let _ = tx.send(Ok(Delta::Usage(usage))).await;
     }
-    if saw_stop {
+    if saw_stop || received_content {
+        if !saw_stop {
+            warn!("anthropic stream ended without message_stop; returning partial answer");
+        }
         let _ = tx.send(Ok(Delta::Done)).await;
     } else {
         let _ = tx

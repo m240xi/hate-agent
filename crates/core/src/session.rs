@@ -1100,16 +1100,26 @@ async fn run_turn(
                                         convo: convo.clone(),
                                     })
                                     .await;
-                            } else {
-                                let _ = done_tx
-                                    .send(TurnReport::Failed {
-                                        error: ProviderError::Stream(
-                                            "provider stream ended without Delta::Done".to_string(),
-                                        ),
-                                        convo: convo.clone(),
-                                    })
-                                    .await;
+                                return;
                             }
+                            // A gateway that closed the socket after the last
+                            // chunk (no `Done`) still gave us a usable answer.
+                            // Only a stream that produced nothing is a failure.
+                            if !text.is_empty()
+                                || !thinking_text.is_empty()
+                                || !calls.is_empty()
+                            {
+                                warn!("provider stream ended without Delta::Done");
+                                break;
+                            }
+                            let _ = done_tx
+                                .send(TurnReport::Failed {
+                                    error: ProviderError::Stream(
+                                        "provider stream ended without Delta::Done".to_string(),
+                                    ),
+                                    convo: convo.clone(),
+                                })
+                                .await;
                             return;
                         }
                         Some(Err(e)) => {

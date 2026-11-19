@@ -125,12 +125,27 @@ async fn http_error_surfaces() {
 }
 
 #[tokio::test]
-async fn truncated_stream_is_error_not_done() {
+async fn truncated_stream_after_content_still_completes() {
+    // Gateways often close the socket right after the last chunk instead of
+    // sending finish_reason/[DONE]. The answer is usable, so the turn ends
+    // cleanly instead of failing the whole request.
     let body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
     let base = common::serve_once(200, "text/event-stream", body).await;
     let provider = OpenAiCompatProvider::new(base, cred());
+
     let items = collect(&provider).await;
     assert!(matches!(&items[0], Ok(Delta::Text(_))));
+    assert!(matches!(items.last(), Some(Ok(Delta::Done))));
+}
+
+#[tokio::test]
+async fn empty_stream_is_error() {
+    // Nothing at all arrived: a real failure, not a truncation.
+    let base = common::serve_once(200, "text/event-stream", "").await;
+    let provider = OpenAiCompatProvider::new(base, cred());
+
+    let items = collect(&provider).await;
+    assert!(!items.is_empty());
     assert!(matches!(items.last(), Some(Err(ProviderError::Stream(_)))));
 }
 

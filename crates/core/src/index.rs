@@ -219,7 +219,7 @@ pub fn build_repo_map(root: &Path, max_tokens: usize) -> Option<String> {
     Some(out)
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, bool)>, _truncated: &mut bool) {
+fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, bool)>, truncated: &mut bool) {
     let mut entries: Vec<(String, bool)> = Vec::new();
     let builder = ignore::WalkBuilder::new(dir)
         .hidden(true)
@@ -258,7 +258,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, bool)>, _truncated: &mut
         }
         entries.push((rel_s, is_dir));
         if entries.len() >= MAX_ENTRIES {
-            *_truncated = true;
+            *truncated = true;
             break;
         }
     }

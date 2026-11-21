@@ -36,6 +36,7 @@ pub fn hide_tokio_cmd(cmd: &mut TokioCommand) {
     let _ = cmd;
 }
 
+#[cfg_attr(not(windows), allow(clippy::unused_async))]
 pub(crate) async fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {

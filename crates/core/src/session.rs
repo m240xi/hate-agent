@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,21 +10,35 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::event::{AgentError, Event};
+use crate::index::build_repo_map;
 use crate::mcp::{MCP_PREFIX, McpHub};
 use crate::persist::{PersistCtx, PersistedSession};
-use crate::provider::{ChatRequest, Delta, Message, Provider, ProviderError, ThinkingLevel};
+use crate::provider::{
+    ChatRequest, Delta, Message, Provider, ProviderError, ThinkingLevel, ToolSpec,
+};
 use crate::skills::{self, Skill, SkillStore, build_digest, parse_reflection, text_signals};
 use crate::state::SessionState;
+use crate::subagent::{review_large_diff, run_subagent};
 use crate::terminal_bridge::TerminalToolkit;
+use crate::tool_search::{ToolCandidate, search_tools};
 use crate::tools::{ToolOutput, WorkspaceTools};
 use crate::types::{
     CheckpointId, CompactionReason, FailureReason, Outcome, PermissionDecision, PermissionRequest,
     SessionId, TokenUsage, ToolCall, TurnId, TurnOutcome,
 };
+use crate::verify::{VerifyBaseline, capture_baseline, diff_new_failures, run_verify_checks};
 use hate_context::O200kCounter;
 use hate_ledger::{Ledger, RecordRequest};
 
 const EVENT_BUFFER: usize = 2048;
+const MAX_ACTIVE_TOOLS: usize = 16;
+const MAX_DEFERRED_LOADS: u8 = 2;
+
+#[derive(Debug, Clone, Default)]
+struct DeferredState {
+    loaded: Vec<ToolSpec>,
+    loads: u8,
+}
 
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -65,6 +79,13 @@ pub struct SessionConfig {
 
 pub enum Command {
     UserMessage {
+        text: String,
+        images: Vec<crate::ImagePart>,
+    },
+    Steer {
+        text: String,
+    },
+    QueueUserMessage {
         text: String,
         images: Vec<crate::ImagePart>,
     },
@@ -185,6 +206,10 @@ enum TurnReport {
         tool_calls: u32,
         latency_ms: u64,
         cost_usd: Option<f64>,
+        tool_full_tokens: u32,
+        tool_sent_tokens: u32,
+        cache_hit_ratio: f32,
+        cache_break_reason: Option<String>,
     },
     Failed {
         error: ProviderError,
@@ -224,6 +249,8 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
         .as_ref()
         .map_or_default(|t| skills::workspace_signals(t.root()));
 
+    let repo_map_injected = !history.is_empty();
+    let last_model = cfg.model.clone();
     let actor = Actor {
         cfg,
         rx,
@@ -241,6 +268,12 @@ pub fn spawn_session(cfg: SessionConfig) -> SessionHandle {
         reflection_attempted: false,
         plan_directive: None,
         plan_just_ended: false,
+        repo_map_injected,
+        last_model,
+        steer_queue: Arc::new(Mutex::new(VecDeque::new())),
+        queued_turns: VecDeque::new(),
+        verify_baseline: Arc::new(Mutex::new(None)),
+        deferred: Arc::new(Mutex::new(DeferredState::default())),
         snapshot: snapshot.clone(),
     };
     tokio::spawn(actor.run());
@@ -270,6 +303,12 @@ struct Actor {
     reflection_attempted: bool,
     plan_directive: Option<&'static str>,
     plan_just_ended: bool,
+    repo_map_injected: bool,
+    last_model: String,
+    steer_queue: Arc<Mutex<VecDeque<String>>>,
+    queued_turns: VecDeque<(String, Vec<crate::ImagePart>)>,
+    verify_baseline: Arc<Mutex<Option<VerifyBaseline>>>,
+    deferred: Arc<Mutex<DeferredState>>,
     snapshot: Arc<std::sync::RwLock<SessionSnapshot>>,
 }
 
@@ -318,6 +357,30 @@ impl Actor {
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
             Command::UserMessage { text, images } => self.begin_turn(text, images),
+            Command::Steer { text } => {
+                let trimmed = text.trim().to_string();
+                if trimmed.is_empty() {
+                    return;
+                }
+                if self.turn_done.is_some() {
+                    self.steer_queue
+                        .lock()
+                        .expect("steer queue poisoned")
+                        .push_back(trimmed);
+                } else {
+                    self.begin_turn(trimmed, Vec::new());
+                }
+            }
+            Command::QueueUserMessage { text, images } => {
+                if text.trim().is_empty() && images.is_empty() {
+                    return;
+                }
+                if self.turn_done.is_some() {
+                    self.queued_turns.push_back((text, images));
+                } else {
+                    self.begin_turn(text, images);
+                }
+            }
             Command::Cancel => {
                 if self.turn_done.is_some() {
                     debug!("cancelling in-flight turn");
@@ -381,11 +444,14 @@ impl Actor {
             return;
         }
         let system = self.system_prompt();
-        let mut specs = self.cfg.tools.as_ref().map_or_default(|t| t.specs());
-        if let Some(hub) = self.cfg.mcp.as_ref() {
-            hub.kick_refresh();
-            specs.extend(hub.specs());
-        }
+        let deferred = self.deferred.lock().expect("deferred poisoned").clone();
+        let specs = build_session_specs(
+            self.cfg.tools.as_ref(),
+            self.cfg.terminal.as_ref(),
+            self.cfg.mcp.as_ref(),
+            self.cfg.skills.as_ref(),
+            &deferred,
+        );
         match force_compact(&mut self.history, &system, &specs) {
             Some((before, after)) => {
                 self.emit(Event::CompactionStarted {
@@ -405,7 +471,7 @@ impl Actor {
         let mut out = hate_prompt::SYSTEM_PROMPT.to_string();
         if let Some(ctx) = self.cfg.tools.as_ref().and_then(|t| t.project_context()) {
             out.push_str("\n\nProject instructions (from the workspace):\n");
-            out.push_str(ctx);
+            out.push_str(&ctx);
         }
         if let Some(term) = self.cfg.terminal.as_ref()
             && term.has_open_terminals()
@@ -458,6 +524,18 @@ impl Actor {
             }
             None => (text, false),
         };
+        let text = if self.repo_map_injected {
+            text
+        } else {
+            self.repo_map_injected = true;
+            if let Some(t) = self.cfg.tools.as_ref()
+                && let Some(map) = build_repo_map(t.root(), 800)
+            {
+                format!("{map}\n\n{text}")
+            } else {
+                text
+            }
+        };
         self.pending_user = Some(text.clone());
         self.set_snapshot();
 
@@ -486,6 +564,12 @@ impl Actor {
         let session_id = self.session_id;
         let turn_id = self.turn;
         let started = self.turn_started;
+        let deferred = Arc::clone(&self.deferred);
+        let verify_baseline = Arc::clone(&self.verify_baseline);
+        let steer_queue = Arc::clone(&self.steer_queue);
+        steer_queue.lock().expect("steer queue poisoned").clear();
+        let model_changed = self.turn.0 > 1 && self.last_model != model;
+        self.last_model.clone_from(&model);
 
         tokio::spawn(async move {
             run_turn(
@@ -511,6 +595,10 @@ impl Actor {
                 limits,
                 cost_before,
                 plan_mode,
+                model_changed,
+                deferred,
+                verify_baseline,
+                steer_queue,
             )
             .await;
         });
@@ -540,6 +628,7 @@ impl Actor {
 
     fn finish_turn(&mut self, rep: TurnReport) {
         let user_msg = self.pending_user.take().map(Message::user);
+        let mut completed_cleanly = false;
 
         match rep {
             TurnReport::Completed {
@@ -548,7 +637,12 @@ impl Actor {
                 tool_calls,
                 latency_ms,
                 cost_usd,
+                tool_full_tokens,
+                tool_sent_tokens,
+                cache_hit_ratio,
+                cache_break_reason,
             } => {
+                completed_cleanly = true;
                 self.adopt_convo(convo, user_msg);
                 if let Some(cost) = cost_usd {
                     self.cost_usd += cost;
@@ -560,16 +654,22 @@ impl Actor {
                     tool_calls,
                     elapsed_ms: latency_ms,
                     cost_usd,
+                    tool_full_tokens,
+                    tool_sent_tokens,
+                    cache_hit_ratio,
+                    cache_break_reason,
                 };
                 self.emit(Event::TurnComplete { outcome });
             }
             TurnReport::Failed { error, convo } => {
+                self.queued_turns.clear();
                 self.adopt_convo(convo, user_msg);
                 self.emit(Event::Failed {
                     reason: error.into(),
                 });
             }
             TurnReport::Cancelled { convo } => {
+                self.queued_turns.clear();
                 self.adopt_convo(convo, user_msg);
                 let outcome = TurnOutcome {
                     outcome: Outcome::Cancelled,
@@ -577,6 +677,10 @@ impl Actor {
                     tool_calls: 0,
                     elapsed_ms: self.turn_started.elapsed().as_millis() as u64,
                     cost_usd: None,
+                    tool_full_tokens: 0,
+                    tool_sent_tokens: 0,
+                    cache_hit_ratio: 0.0,
+                    cache_break_reason: None,
                 };
                 self.emit(Event::TurnComplete { outcome });
             }
@@ -590,6 +694,9 @@ impl Actor {
         self.persist_checkpoint();
         self.persist_now();
         self.maybe_reflect();
+        if completed_cleanly && let Some((next_text, next_images)) = self.queued_turns.pop_front() {
+            self.begin_turn(next_text, next_images);
+        }
     }
 
     fn maybe_reflect(&mut self) {
@@ -757,9 +864,15 @@ impl Actor {
     }
 }
 
+struct PendingPermission {
+    tx: oneshot::Sender<PermissionDecision>,
+    key: String,
+    rememberable: bool,
+}
+
 #[derive(Default)]
 pub struct PermissionHub {
-    pending: Mutex<HashMap<String, (oneshot::Sender<PermissionDecision>, String)>>,
+    pending: Mutex<HashMap<String, PendingPermission>>,
     allowed: Mutex<HashSet<String>>,
 }
 
@@ -783,18 +896,43 @@ impl PermissionHub {
         }
     }
 
-    fn is_allowed(&self, call: &ToolCall) -> bool {
-        self.allowed
-            .lock()
-            .expect("permission hub poisoned")
-            .contains(&Self::key_for(call))
+    fn is_rememberable(call: &ToolCall) -> bool {
+        if call.name.as_str() == "bash"
+            && let Some(cmd) = call.args.get("command").and_then(|v| v.as_str())
+        {
+            return crate::policy::classify_bash(cmd).class
+                != crate::policy::CommandClass::Destructive;
+        }
+        true
     }
 
-    fn insert(&self, id: String, tx: oneshot::Sender<PermissionDecision>, key: String) {
+    fn is_allowed(&self, call: &ToolCall) -> bool {
+        Self::is_rememberable(call)
+            && self
+                .allowed
+                .lock()
+                .expect("permission hub poisoned")
+                .contains(&Self::key_for(call))
+    }
+
+    fn insert(
+        &self,
+        id: String,
+        tx: oneshot::Sender<PermissionDecision>,
+        key: String,
+        rememberable: bool,
+    ) {
         self.pending
             .lock()
             .expect("permission hub poisoned")
-            .insert(id, (tx, key));
+            .insert(
+                id,
+                PendingPermission {
+                    tx,
+                    key,
+                    rememberable,
+                },
+            );
     }
 
     fn remove(&self, id: &str) {
@@ -810,10 +948,15 @@ impl PermissionHub {
             .lock()
             .expect("permission hub poisoned")
             .remove(id);
-        let Some((tx, key)) = entry else {
+        let Some(PendingPermission {
+            tx,
+            key,
+            rememberable,
+        }) = entry
+        else {
             return;
         };
-        if decision == PermissionDecision::AllowSession {
+        if decision == PermissionDecision::AllowSession && rememberable {
             self.allowed
                 .lock()
                 .expect("permission hub poisoned")
@@ -830,19 +973,26 @@ async fn gate_tool(
     call: &ToolCall,
     reason: String,
     detail: Option<String>,
+    diff_preview: Option<String>,
 ) -> Gate {
     if hub.is_allowed(call) {
         return Gate::Run;
     }
     let id = Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
-    hub.insert(id.clone(), tx, PermissionHub::key_for(call));
+    hub.insert(
+        id.clone(),
+        tx,
+        PermissionHub::key_for(call),
+        PermissionHub::is_rememberable(call),
+    );
     let _ = events.send(Event::PermissionRequested {
         request: PermissionRequest {
             id: id.clone(),
             call: call.clone(),
             reason,
             detail,
+            diff_preview,
         },
     });
     let decision = tokio::select! {
@@ -879,9 +1029,16 @@ impl ToolBackend<'_> {
         }
     }
 
+    fn diff_preview(&self, call: &ToolCall) -> Option<String> {
+        match self {
+            Self::Ws(t) => t.diff_preview(call),
+            _ => None,
+        }
+    }
+
     async fn execute(&self, call: &ToolCall, cancel: &CancellationToken) -> ToolOutput {
         match self {
-            Self::Ws(t) => t.execute(call).await,
+            Self::Ws(t) => t.execute(call, cancel).await,
             Self::Term(t) => t.execute(call),
             Self::Mcp(h) => h.execute(call, cancel).await,
             Self::Skill(s) => s.execute(call),
@@ -911,6 +1068,34 @@ fn error_backend<'a>(
         .expect("error_backend requires at least one tool backend")
 }
 
+fn build_session_specs(
+    tools: Option<&Arc<WorkspaceTools>>,
+    terminal: Option<&Arc<TerminalToolkit>>,
+    mcp: Option<&Arc<McpHub>>,
+    skills: Option<&Arc<SkillStore>>,
+    deferred: &DeferredState,
+) -> Vec<ToolSpec> {
+    let mut specs = match tools {
+        Some(t) => t.specs(),
+        None if mcp.is_some_and(|h| !h.configs().is_empty() || !h.specs().is_empty()) => {
+            vec![WorkspaceTools::tool_search_spec()]
+        }
+        None => Vec::new(),
+    };
+    if let Some(term) = terminal {
+        specs.extend(term.specs());
+    }
+    if let Some(store) = skills {
+        specs.extend(store.specs());
+    }
+    for s in &deferred.loaded {
+        if !specs.iter().any(|e| e.name == s.name) {
+            specs.push(s.clone());
+        }
+    }
+    specs
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_turn(
     provider: Arc<dyn Provider>,
@@ -935,29 +1120,42 @@ async fn run_turn(
     limits: Limits,
     cost_before: f64,
     plan_mode: bool,
+    model_changed: bool,
+    deferred_shared: Arc<Mutex<DeferredState>>,
+    verify_baseline: Arc<Mutex<Option<VerifyBaseline>>>,
+    steer_queue: Arc<Mutex<VecDeque<String>>>,
 ) {
+    const MAX_VERIFY_ATTEMPTS: u8 = 3;
+    const MAX_PARALLEL_SUBAGENTS: usize = 4;
+
     let max_tool_rounds = limits.max_tool_rounds;
     let max_tool_calls = limits.max_tool_calls;
 
     if let Some(t) = tools.as_ref() {
         t.reset_read_memo();
     }
-
-    let mut specs = tools.as_ref().map_or_default(|t| t.specs());
-    if let Some(term) = terminal.as_ref() {
-        specs.extend(term.specs());
-    }
     if let Some(hub) = mcp.as_ref() {
         hub.kick_refresh();
-        specs.extend(hub.specs());
     }
-    if let Some(store) = skills.as_ref() {
-        specs.extend(store.specs());
-    }
+
+    let mut deferred = deferred_shared.lock().expect("deferred poisoned").clone();
+    let mut specs = build_session_specs(
+        tools.as_ref(),
+        terminal.as_ref(),
+        mcp.as_ref(),
+        skills.as_ref(),
+        &deferred,
+    );
     let mut total_usage = TokenUsage::default();
     let mut total_cost: Option<f64> = None;
     let mut tool_calls_done = 0u32;
+    let mut tool_totals = (0u32, 0u32);
     let mut round = 0u32;
+    let mut edited_this_turn = false;
+    let mut verify_attempts = 0u8;
+    let mut tool_prefix_changed = false;
+    let mut last_cache_ratio = 0.0f32;
+    let mut last_break_reason: Option<String> = None;
 
     loop {
         if cancel.is_cancelled() {
@@ -1007,12 +1205,14 @@ async fn run_turn(
         }
         round += 1;
 
+        let mut compacted_this_round = false;
         if let Some((before, after, reason)) = maybe_compact(
             &mut convo,
             system.as_deref().unwrap_or(""),
             &specs,
             context_window,
         ) {
+            compacted_this_round = true;
             if let Some(t) = tools.as_ref() {
                 t.reset_read_memo();
             }
@@ -1023,7 +1223,14 @@ async fn run_turn(
             });
         }
 
-        let req = ChatRequest {
+        {
+            let mut sq = steer_queue.lock().expect("steer queue poisoned");
+            while let Some(note) = sq.pop_front() {
+                convo.push(Message::user(format!("[steering note from user]: {note}")));
+            }
+        }
+
+        let mut req = ChatRequest {
             model: model.clone(),
             system: system.clone(),
             messages: decayed_view(&convo),
@@ -1032,6 +1239,14 @@ async fn run_turn(
             temperature: None,
             thinking,
         };
+        let redacted = crate::policy::redact_chat_request(
+            &crate::policy::SecretRedactor::default(),
+            &mut req.system,
+            &mut req.messages,
+        );
+        if redacted > 0 {
+            debug!(count = redacted, "redacted outbound secret(s)");
+        }
 
         let round_started = Instant::now();
         let request_id = Uuid::new_v4().to_string();
@@ -1086,10 +1301,34 @@ async fn run_turn(
                                 O200kCounter::new()
                                     .map_or(0, |c| c.count_sync(&thinking_text) as u32)
                             };
+                            let ratio = compute_cache_ratio(usage.input, usage.cached_input);
+                            let break_reason = if (turn_id.0 > 1 || round > 1)
+                                && usage.input >= 1024
+                                && ratio < 0.5
+                            {
+                                if compacted_this_round {
+                                    Some("compaction".to_string())
+                                } else if tool_prefix_changed {
+                                    Some("tool_prefix_changed".to_string())
+                                } else if model_changed && round == 1 {
+                                    Some("model_changed".to_string())
+                                } else {
+                                    Some("low_cache_hit".to_string())
+                                }
+                            } else {
+                                None
+                            };
+                            last_cache_ratio = ratio;
+                            if break_reason.is_some() {
+                                last_break_reason.clone_from(&break_reason);
+                            }
+                            tool_prefix_changed = false;
                             emit(Event::TokensCounted {
                                 usage,
                                 turn: turn_id,
                                 thinking_est,
+                                cache_hit_ratio: ratio,
+                                cache_break_reason: break_reason,
                             });
                         }
                         Some(Ok(Delta::Done)) => break,
@@ -1169,6 +1408,50 @@ async fn run_turn(
         });
 
         if calls.is_empty() {
+            if edited_this_turn
+                && !plan_mode
+                && verify_attempts < MAX_VERIFY_ATTEMPTS
+                && let Some(t) = tools.as_ref()
+            {
+                let baseline = verify_baseline
+                    .lock()
+                    .expect("verify baseline poisoned")
+                    .clone();
+                if let Some(base) = baseline
+                    && !base.checks.is_empty()
+                {
+                    let current = run_verify_checks(t.root(), &base.checks, &cancel).await;
+                    if let Some(failure_msg) = diff_new_failures(&base, current) {
+                        verify_attempts += 1;
+                        convo.push(Message::user(failure_msg));
+                        continue;
+                    }
+                }
+            }
+
+            if edited_this_turn
+                && !plan_mode
+                && let Some(t) = tools.as_ref()
+                && t.root().join(".git").exists()
+                && let Ok(diff) = crate::view::diff_all(t.root(), false)
+            {
+                let changed_lines = diff
+                    .lines()
+                    .filter(|l| {
+                        (l.starts_with('+') && !l.starts_with("+++"))
+                            || (l.starts_with('-') && !l.starts_with("---"))
+                    })
+                    .count();
+                if changed_lines > 200
+                    && let Some(verdict) =
+                        review_large_diff(&provider, &model, &diff, &cancel).await
+                {
+                    emit(Event::Delta {
+                        text: format!("\n\n[diff review]\n{verdict}"),
+                    });
+                }
+            }
+
             let _ = done_tx
                 .send(TurnReport::Completed {
                     convo: convo.clone(),
@@ -1176,6 +1459,10 @@ async fn run_turn(
                     tool_calls: tool_calls_done,
                     latency_ms: started.elapsed().as_millis() as u64,
                     cost_usd: total_cost,
+                    tool_full_tokens: tool_totals.0,
+                    tool_sent_tokens: tool_totals.1,
+                    cache_hit_ratio: last_cache_ratio,
+                    cache_break_reason: last_break_reason,
                 })
                 .await;
             return;
@@ -1214,9 +1501,36 @@ async fn run_turn(
             for call in &calls {
                 emit(Event::ToolStarted { call: call.clone() });
             }
-            let outs = futures_util::future::join_all(calls.iter().map(|c| t.execute(c))).await;
+            let outs =
+                futures_util::future::join_all(calls.iter().map(|c| t.execute(c, &cancel))).await;
             for (call, out) in calls.into_iter().zip(outs) {
-                record_tool_result(&events, &mut convo, &call, out);
+                record_tool_result(&events, &mut convo, &call, out, &mut tool_totals);
+            }
+            continue;
+        }
+
+        if calls.iter().all(|c| c.name.as_str() == "spawn_agent")
+            && let Some(t) = tools.as_ref()
+        {
+            for call in &calls {
+                emit(Event::ToolStarted { call: call.clone() });
+            }
+            let batch_count = calls.len().min(MAX_PARALLEL_SUBAGENTS);
+            let reports = futures_util::future::join_all(
+                calls[..batch_count]
+                    .iter()
+                    .map(|c| run_subagent(&provider, &model, t, c, 0, &cancel)),
+            )
+            .await;
+            for (idx, call) in calls.into_iter().enumerate() {
+                let out = if idx < batch_count {
+                    subagent_tool_output(&reports[idx])
+                } else {
+                    t.tool_error(format!(
+                        "spawn_agent: max {MAX_PARALLEL_SUBAGENTS} parallel subagents per round"
+                    ))
+                };
+                record_tool_result(&events, &mut convo, &call, out, &mut tool_totals);
             }
             continue;
         }
@@ -1235,9 +1549,47 @@ async fn run_turn(
                          the user approves it before anything changes.",
                     call.name.as_str()
                 ));
-                record_tool_result(&events, &mut convo, &call, out);
+                record_tool_result(&events, &mut convo, &call, out, &mut tool_totals);
                 continue;
             }
+            if call.name.as_str() == "tool_search" {
+                let before_len = specs.len();
+                let out = run_tool_search(
+                    &call,
+                    &mut specs,
+                    &mut deferred,
+                    tools.as_ref(),
+                    mcp.as_ref(),
+                )
+                .await;
+                if specs.len() > before_len {
+                    tool_prefix_changed = true;
+                }
+                *deferred_shared.lock().expect("deferred poisoned") = deferred.clone();
+                record_tool_result(&events, &mut convo, &call, out, &mut tool_totals);
+                continue;
+            }
+            if call.name.as_str() == "spawn_agent" {
+                let out = match tools.as_ref() {
+                    Some(t) => {
+                        let rep = run_subagent(&provider, &model, t, &call, 0, &cancel).await;
+                        subagent_tool_output(&rep)
+                    }
+                    None => error_backend(
+                        mcp.as_ref(),
+                        tools.as_ref(),
+                        skills.as_ref(),
+                        terminal.as_ref(),
+                    )
+                    .tool_error("spawn_agent requires an attached workspace".to_string()),
+                };
+                record_tool_result(&events, &mut convo, &call, out, &mut tool_totals);
+                continue;
+            }
+            let is_file_mutation = matches!(
+                call.name.as_str(),
+                "write_file" | "edit_file" | "apply_patch"
+            );
             let backend = if call.name.as_str().starts_with(MCP_PREFIX) {
                 mcp.as_ref().map(ToolBackend::Mcp)
             } else if matches!(call.name.as_str(), "skill_view" | "skill_save") {
@@ -1250,9 +1602,32 @@ async fn run_turn(
             let out = match backend {
                 Some(b) => match b.gate_reason(&call) {
                     Some((reason, detail)) => {
-                        match gate_tool(&permissions, &cancel, &events, &call, reason, detail).await
+                        let diff_preview = b.diff_preview(&call);
+                        match gate_tool(
+                            &permissions,
+                            &cancel,
+                            &events,
+                            &call,
+                            reason,
+                            detail,
+                            diff_preview,
+                        )
+                        .await
                         {
-                            Gate::Run => b.execute(&call, &cancel).await,
+                            Gate::Run => {
+                                if is_file_mutation
+                                    && verify_baseline
+                                        .lock()
+                                        .expect("verify baseline poisoned")
+                                        .is_none()
+                                    && let Some(t) = tools.as_ref()
+                                {
+                                    let base = capture_baseline(t.root(), &cancel).await;
+                                    *verify_baseline.lock().expect("verify baseline poisoned") =
+                                        Some(base);
+                                }
+                                b.execute(&call, &cancel).await
+                            }
                             Gate::Denied(msg) => b.tool_error(msg),
                             Gate::Cancelled => {
                                 let _ = done_tx
@@ -1277,6 +1652,9 @@ async fn run_turn(
                     call.name.as_str()
                 )),
             };
+            if out.ok && is_file_mutation {
+                edited_this_turn = true;
+            }
             if out.ok
                 && call.name.as_str() == "skill_save"
                 && let Some(store) = skills.as_ref()
@@ -1300,7 +1678,7 @@ async fn run_turn(
             {
                 t.note_mutation();
             }
-            record_tool_result(&events, &mut convo, &call, out);
+            record_tool_result(&events, &mut convo, &call, out, &mut tool_totals);
         }
     }
 }
@@ -1345,10 +1723,147 @@ fn parse_plan_command(text: &str) -> Option<&str> {
     })
 }
 
+async fn run_tool_search(
+    call: &ToolCall,
+    specs: &mut Vec<ToolSpec>,
+    deferred: &mut DeferredState,
+    tools: Option<&Arc<WorkspaceTools>>,
+    mcp: Option<&Arc<McpHub>>,
+) -> ToolOutput {
+    let query = call
+        .args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map_or("", str::trim);
+    let counter = O200kCounter::new().ok();
+    let make_out = |text: String, ok: bool| -> ToolOutput {
+        let content = if ok { text } else { format!("error: {text}") };
+        let preview = content.chars().take(400).collect();
+        let tokens = counter.as_ref().map_or((content.len() / 4) as u32, |c| {
+            c.count_sync(&content) as u32
+        });
+        ToolOutput {
+            content,
+            preview,
+            raw_preview: None,
+            full_tokens: tokens,
+            sent_tokens: tokens,
+            ok,
+        }
+    };
+    if query.is_empty() {
+        return make_out("tool_search: missing `query`".to_string(), false);
+    }
+    let limit = call
+        .args
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(3)
+        .clamp(1, 3) as usize;
+
+    let mut candidates: Vec<ToolCandidate> = Vec::new();
+    if tools.is_some() {
+        for s in WorkspaceTools::deferred_specs() {
+            candidates.push(ToolCandidate::from_spec(s, ""));
+        }
+    }
+    if let Some(hub) = mcp {
+        candidates.extend(hub.catalog_for_search(query).await);
+    }
+
+    let ranked = search_tools(query, 8, &candidates);
+    if ranked.is_empty() {
+        return make_out(format!("no deferred tools matched {query:?}"), true);
+    }
+
+    let already: Vec<String> = ranked
+        .iter()
+        .filter(|s| specs.iter().any(|e| e.name == s.name))
+        .map(|s| s.name.as_str().to_string())
+        .collect();
+    let fresh: Vec<ToolSpec> = ranked
+        .into_iter()
+        .filter(|s| !specs.iter().any(|e| e.name == s.name))
+        .collect();
+
+    if fresh.is_empty() {
+        return make_out(
+            format!("already loaded matching tool(s): {}", already.join(", ")),
+            true,
+        );
+    }
+
+    let room = MAX_ACTIVE_TOOLS.saturating_sub(specs.len());
+    if deferred.loads >= MAX_DEFERRED_LOADS || room == 0 {
+        let skipped: Vec<&str> = fresh.iter().map(|s| s.name.as_str()).collect();
+        return make_out(
+            format!(
+                "deferred tool budget reached (max {MAX_DEFERRED_LOADS} loads / {MAX_ACTIVE_TOOLS} tools); unmatched loads skipped: {}",
+                skipped.join(", ")
+            ),
+            true,
+        );
+    }
+
+    let mut newly_loaded = Vec::new();
+    for mut spec in fresh.into_iter().take(limit.min(room)) {
+        if spec.name.as_str().starts_with(MCP_PREFIX)
+            && let Some(hub) = mcp
+            && let Some(live_spec) = hub.spec_for_tool(spec.name.as_str()).await
+        {
+            spec = live_spec;
+        }
+        if !specs.iter().any(|e| e.name == spec.name) {
+            specs.push(spec.clone());
+            deferred.loaded.push(spec.clone());
+            newly_loaded.push(spec);
+        }
+    }
+    if !newly_loaded.is_empty() {
+        deferred.loads = deferred.loads.saturating_add(1);
+    }
+
+    let mut out = format!("loaded {} tool(s):", newly_loaded.len());
+    for s in &newly_loaded {
+        let _ = write!(out, "\n- {}: {}", s.name.as_str(), s.description);
+    }
+    if !already.is_empty() {
+        let _ = write!(out, "\nalready loaded: {}", already.join(", "));
+    }
+    make_out(out, true)
+}
+
+fn subagent_tool_output(rep: &crate::subagent::SubagentReport) -> ToolOutput {
+    let content = rep.format_for_parent();
+    let preview = content.chars().take(400).collect();
+    let tokens = O200kCounter::new().map_or((content.len() / 4) as u32, |c| {
+        c.count_sync(&content) as u32
+    });
+    ToolOutput {
+        content,
+        preview,
+        raw_preview: None,
+        full_tokens: tokens,
+        sent_tokens: tokens,
+        ok: rep.ok,
+    }
+}
+
 fn plan_allows(name: &str) -> bool {
     WorkspaceTools::is_read_only(name)
+        || name == "tool_search"
+        || name == "spawn_agent"
         || name == "skill_view"
         || TerminalToolkit::is_read_only(name)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn compute_cache_ratio(input: u64, cached: u64) -> f32 {
+    if input == 0 {
+        0.0
+    } else {
+        (cached as f32 / input as f32).clamp(0.0, 1.0)
+    }
 }
 
 fn record_tool_result(
@@ -1356,7 +1871,11 @@ fn record_tool_result(
     convo: &mut Vec<Message>,
     call: &ToolCall,
     out: ToolOutput,
+    tool_totals: &mut (u32, u32),
 ) {
+    tool_totals.0 = tool_totals.0.saturating_add(out.full_tokens);
+    tool_totals.1 = tool_totals.1.saturating_add(out.sent_tokens);
+    let sent_preview = Some(out.content.chars().take(2000).collect());
     let _ = events.send(Event::ToolOutput {
         call_id: call.id.clone(),
         preview: out.preview,
@@ -1367,6 +1886,8 @@ fn record_tool_result(
         ok: out.ok,
         full_tokens: out.full_tokens,
         sent_tokens: out.sent_tokens,
+        full_preview: out.raw_preview,
+        sent_preview,
     });
     convo.push(Message::Tool {
         call_id: call.id.clone(),

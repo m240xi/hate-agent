@@ -43,6 +43,7 @@ pub struct Sessions {
 #[derive(Default)]
 struct SessionSlot {
     handle: Option<SessionHandle>,
+    tools: Option<std::sync::Arc<WorkspaceTools>>,
     key: Option<String>,
     mode: String,
     workspace: Option<String>,
@@ -203,10 +204,10 @@ async fn ensure_session(
         None => None,
     };
 
-    let tools = guard
-        .workspace
-        .clone()
-        .and_then(|p| match WorkspaceTools::new(&p) {
+    let tools = guard.workspace.clone().and_then(|p| {
+        let trust_store = hate_core::TrustStore::load();
+        let trusted = hate_core::inspect_repo_trust(std::path::Path::new(&p), &trust_store).trusted;
+        match WorkspaceTools::new_with_trust(&p, trusted) {
             Ok(t) => {
                 if let Some(key) = guard.key.as_deref() {
                     t.enable_checkpoints(checkpoint_root(key));
@@ -217,7 +218,9 @@ async fn ensure_session(
                 tracing::warn!(error = %e, "workspace tools unavailable");
                 None
             }
-        });
+        }
+    });
+    guard.tools.clone_from(&tools);
 
     let ledger = ledger_handle();
     let terminal = app
@@ -319,7 +322,7 @@ impl McpState {
         let marker = mcp_defaults_marker_path(&path);
         let pending = load_mcp_with_defaults(&path, &marker);
         Self {
-            hub: std::sync::Arc::new(hate_core::McpHub::new()),
+            hub: std::sync::Arc::new(hate_core::McpHub::with_default_cache()),
             path,
             pending,
         }
@@ -469,6 +472,40 @@ pub fn session_cancel(state: State<'_, Sessions>) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
+pub fn session_steer(state: State<'_, Sessions>, text: String) -> Result<(), String> {
+    let guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    let h = guard
+        .handle
+        .as_ref()
+        .ok_or_else(|| "no active session".to_string())?;
+    h.command(Command::Steer { text })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn session_queue(
+    state: State<'_, Sessions>,
+    local: State<'_, local_runtime::LocalRuntimeState>,
+    app: AppHandle,
+    text: String,
+    images: Option<Vec<ImageAttachment>>,
+) -> Result<(), String> {
+    let handle = ensure_session(&state, &local, &app).await?;
+    let parts = prepare_images(images.unwrap_or_default())?;
+    handle
+        .command(Command::QueueUserMessage {
+            text,
+            images: parts,
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn session_compact(state: State<'_, Sessions>) -> Result<(), String> {
     let guard = state
         .inner
@@ -517,6 +554,115 @@ pub fn session_rewind(state: State<'_, Sessions>, checkpoint_id: String) -> Resu
         hate_core::restore_checkpoint(std::path::Path::new(&ckpt_dir), std::path::Path::new(&ws))?;
     tracing::info!(checkpoint = %checkpoint_id, restored, "workspace rewound");
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindMode {
+    FilesOnly,
+    TranscriptOnly,
+    Both,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn session_rewind_split(
+    state: State<'_, Sessions>,
+    checkpoint_id: String,
+    mode: RewindMode,
+    user_index: Option<u32>,
+) -> Result<(), String> {
+    let want_files = matches!(mode, RewindMode::FilesOnly | RewindMode::Both);
+    let want_chat = matches!(mode, RewindMode::TranscriptOnly | RewindMode::Both);
+    if want_files
+        && (checkpoint_id.is_empty()
+            || checkpoint_id.contains(['/', '\\'])
+            || checkpoint_id.contains(".."))
+    {
+        return Err("invalid checkpoint id".to_string());
+    }
+    if want_chat {
+        ensure_idle(&state)?;
+        if user_index.is_none() {
+            return Err(
+                "this checkpoint has no associated turn index to rewind chat history".to_string(),
+            );
+        }
+    }
+    if want_files {
+        let guard = state
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        let key = guard.key.clone().ok_or("session has no checkpoint store")?;
+        let ws = guard
+            .workspace
+            .clone()
+            .ok_or("no folder attached to this chat")?;
+        let ckpt_dir = checkpoint_root(&key).join(&checkpoint_id);
+        let restored = hate_core::restore_checkpoint(&ckpt_dir, std::path::Path::new(&ws))?;
+        tracing::info!(checkpoint = %checkpoint_id, restored, ?mode, "workspace rewound");
+    }
+    if want_chat {
+        use hate_core::SessionJournal as _;
+        let idx = user_index.ok_or_else(|| "missing user index".to_string())?;
+        let mut guard = state
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        let key = guard
+            .key
+            .clone()
+            .ok_or_else(|| "no session is open".to_string())?;
+        let journal = SqliteJournal::new()?;
+        let mut persisted = journal
+            .load(&key)
+            .ok_or_else(|| "this session has no saved history yet".to_string())?;
+        truncate_to_user_index(&mut persisted.messages, idx)?;
+        persisted.turn = u32::try_from(
+            persisted
+                .messages
+                .iter()
+                .filter(|m| matches!(m, hate_core::provider::Message::User { .. }))
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        journal.save(&persisted);
+        guard.restore = Some(persisted);
+        guard.handle = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn session_checkpoint_diff(
+    state: State<'_, Sessions>,
+    checkpoint_id: String,
+    other_id: Option<String>,
+) -> Result<String, String> {
+    if checkpoint_id.is_empty()
+        || checkpoint_id.contains(['/', '\\'])
+        || checkpoint_id.contains("..")
+    {
+        return Err("invalid checkpoint id".to_string());
+    }
+    let guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    let key = guard.key.clone().ok_or("session has no checkpoint store")?;
+    let ws = guard
+        .workspace
+        .clone()
+        .ok_or("no folder attached to this chat")?;
+    let root = checkpoint_root(&key);
+    hate_core::checkpoint_diff(
+        &root,
+        &checkpoint_id,
+        other_id.as_deref(),
+        std::path::Path::new(&ws),
+    )
 }
 
 #[tauri::command]
@@ -1759,11 +1905,60 @@ pub(crate) fn set_workspace_path(state: &Sessions, path: Option<String>) -> Resu
         let db = db()?;
         db.set_workspace(&key, path.as_deref(), &guard.mode)?;
         if guard.handle.take().is_some() {
+            guard.tools = None;
             guard.acp = false;
             guard.restore = db.load(&key)?.and_then(|s| s.persisted);
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct RepoTrustStatusDto {
+    pub trusted: bool,
+    pub canonical_root: String,
+    pub rule_files: Vec<String>,
+    pub mcp_file: Option<String>,
+    pub mcp_servers: Vec<String>,
+}
+
+impl From<hate_core::RepoTrustReport> for RepoTrustStatusDto {
+    fn from(r: hate_core::RepoTrustReport) -> Self {
+        Self {
+            trusted: r.trusted,
+            canonical_root: r.canonical_root,
+            rule_files: r.rule_files,
+            mcp_file: r.mcp_file,
+            mcp_servers: r.mcp_servers,
+        }
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn workspace_trust_status(state: State<'_, Sessions>) -> Option<RepoTrustStatusDto> {
+    let root = workspace_root(&state).ok()?;
+    let store = hate_core::TrustStore::load();
+    Some(hate_core::inspect_repo_trust(&root, &store).into())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn workspace_trust_approve(
+    state: State<'_, Sessions>,
+    trust: bool,
+) -> Result<Option<RepoTrustStatusDto>, String> {
+    let root = workspace_root(&state)?;
+    let mut store = hate_core::TrustStore::load();
+    store.set_trusted(&root, trust)?;
+    let guard = state
+        .inner
+        .lock()
+        .map_err(|_| "session lock poisoned".to_string())?;
+    if let Some(tools) = &guard.tools {
+        tools.set_trusted(trust);
+    }
+    Ok(Some(hate_core::inspect_repo_trust(&root, &store).into()))
 }
 
 #[tauri::command]
@@ -1948,6 +2143,118 @@ pub fn session_rename(id: String, title: String) -> Result<(), String> {
         return Err("session titles are limited to 200 characters".to_string());
     }
     db()?.rename(&id, title)
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct WorktreeSessionDto {
+    pub session_id: String,
+    pub worktree_path: String,
+    pub branch: String,
+}
+
+/// Spawn an isolated git worktree + new session bound to that worktree so
+/// multiple agent tracks or model comparisons can run concurrently without
+/// editing the main working tree.
+#[tauri::command]
+#[specta::specta]
+pub fn session_spawn_worktree(
+    state: State<'_, Sessions>,
+    name: String,
+    base_workspace: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
+) -> Result<WorktreeSessionDto, String> {
+    let current_ws = {
+        let guard = state
+            .inner
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        guard.workspace.clone()
+    };
+    let root_str = base_workspace
+        .filter(|s| std::path::Path::new(s).is_dir())
+        .or(current_ws)
+        .ok_or_else(|| "no git workspace attached".to_string())?;
+    let root = std::path::Path::new(&root_str);
+
+    let base_root = match hate_core::view::worktree_status(root) {
+        Ok(st) if st.is_worktree => st
+            .main_root
+            .map_or_else(|| root.to_path_buf(), std::path::PathBuf::from),
+        _ => root.to_path_buf(),
+    };
+
+    let raw_name = name.trim();
+    let clean_slug: String = raw_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let slug = if clean_slug.is_empty() {
+        "track".to_string()
+    } else {
+        clean_slug
+    };
+
+    let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+    let branch = format!("hate/{slug}-{short_id}");
+    let dest = base_root.parent().map_or_else(
+        || {
+            dirs::data_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("hate-agent")
+                .join("worktrees")
+                .join(format!("{slug}-{short_id}"))
+        },
+        |p| p.join(".hate-worktrees").join(format!("{slug}-{short_id}")),
+    );
+
+    let wt_path = hate_core::view::worktree_create(&base_root, &dest, &branch)?;
+
+    let key = uuid::Uuid::new_v4().to_string();
+    let database = db()?;
+    database.create(&key, "code")?;
+    database.set_workspace(&key, Some(&wt_path), "code")?;
+    let title_suffix = if raw_name.is_empty() {
+        short_id
+    } else {
+        raw_name
+    };
+    let title = format!("track: {title_suffix}");
+    let _ = database.rename(&key, &title);
+
+    if model.is_some() || provider.is_some() {
+        use hate_core::SessionJournal as _;
+        if let Ok(journal) = SqliteJournal::new() {
+            journal.save(&PersistedSession {
+                key: key.clone(),
+                mode: "code".to_string(),
+                provider: provider.unwrap_or_default(),
+                model: model.unwrap_or_default(),
+                thinking: ThinkingLevel::Off,
+                workspace: Some(wt_path.clone()),
+                title,
+                messages: Vec::new(),
+                turn: 0,
+                usage: hate_core::TokenUsage::default(),
+                cost_usd: 0.0,
+                external: None,
+            });
+        }
+    }
+
+    Ok(WorktreeSessionDto {
+        session_id: key,
+        worktree_path: wt_path,
+        branch,
+    })
 }
 
 #[tauri::command]

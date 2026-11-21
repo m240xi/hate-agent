@@ -1,0 +1,8 @@
+{
+  "id": "02-refactor",
+  "name": "Unify label normalization across modules",
+  "prompt": "Extract a shared `normalize_slug` helper used by both `src/lib.rs` and `src/format.rs` so dashes are collapsed cleanly without leading/trailing hyphens and all unit tests pass.",
+  "verify_cmd": "cargo",
+  "verify_args": ["test", "--quiet"],
+  "expect_baseline_fail": true
+}

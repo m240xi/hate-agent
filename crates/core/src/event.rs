@@ -49,6 +49,10 @@ pub enum Event {
         ok: bool,
         full_tokens: u32,
         sent_tokens: u32,
+        #[serde(default)]
+        full_preview: Option<String>,
+        #[serde(default)]
+        sent_preview: Option<String>,
     },
     PermissionRequested {
         request: PermissionRequest,
@@ -57,6 +61,10 @@ pub enum Event {
         usage: TokenUsage,
         turn: TurnId,
         thinking_est: u32,
+        #[serde(default)]
+        cache_hit_ratio: f32,
+        #[serde(default)]
+        cache_break_reason: Option<String>,
     },
     CompactionStarted {
         reason: CompactionReason,

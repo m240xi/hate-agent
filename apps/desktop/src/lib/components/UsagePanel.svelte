@@ -52,6 +52,14 @@
     ),
   );
 
+  const p50CostPerReq = $derived(
+    median(
+      models
+        .filter((m) => m.totals.requests > 0)
+        .map((m) => m.totals.cost_usd / m.totals.requests),
+    ),
+  );
+
   function dayLabel(epoch: number): string {
     return new Date(epoch * 1000).toLocaleDateString(undefined, {
       month: 'short',
@@ -128,6 +136,11 @@
         <span class="stat-label mono">latency</span>
         <span class="stat-value">{p50Latency > 0 ? `${(p50Latency / 1000).toFixed(1)}s` : '—'}</span>
         <span class="stat-sub mono">mean per request</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label mono">saved (session)</span>
+        <span class="stat-value">{k(session.tokensSaved)}</span>
+        <span class="stat-sub mono">{p50CostPerReq > 0 ? `${money(p50CostPerReq)} p50/req` : 'tokens shaped'}</span>
       </div>
     </div>
 

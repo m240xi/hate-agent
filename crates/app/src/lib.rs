@@ -22,6 +22,8 @@ pub fn run() {
         commands::app_info,
         commands::session_send,
         commands::session_cancel,
+        commands::session_steer,
+        commands::session_queue,
         commands::session_compact,
         commands::session_answer,
         commands::session_respond_permission,
@@ -39,6 +41,8 @@ pub fn run() {
         commands::usage_overview,
         commands::export_save,
         commands::session_rewind,
+        commands::session_rewind_split,
+        commands::session_checkpoint_diff,
         commands::provider_upsert,
         commands::provider_remove,
         commands::skills_list,
@@ -55,6 +59,8 @@ pub fn run() {
         commands::auth_logout,
         commands::providers_list,
         commands::session_set_workspace,
+        commands::workspace_trust_status,
+        commands::workspace_trust_approve,
         commands::workspace_pick,
         commands::workspace_index,
         commands::workspace_read,
@@ -91,6 +97,7 @@ pub fn run() {
         commands::session_open,
         commands::session_delete,
         commands::session_rename,
+        commands::session_spawn_worktree,
         commands::session_save_ui,
         commands::update_check,
         commands::update_install,
@@ -152,7 +159,7 @@ pub fn run() {
                 let hub = mcp.hub.clone();
                 let pending = mcp.pending.clone();
                 tauri::async_runtime::spawn(async move {
-                    hub.configure(pending).await;
+                    hub.configure_lazy(pending).await;
                 });
             }
             app.manage(mcp);

@@ -213,15 +213,8 @@ pub fn write_file(root: &Path, rel: &str, content: &str) -> Result<u32, String> 
     Ok(u32::try_from(content.lines().count()).unwrap_or(u32::MAX))
 }
 
-#[cfg(windows)]
 fn quiet(cmd: &mut Command) -> &mut Command {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW)
-}
-
-#[cfg(not(windows))]
-fn quiet(cmd: &mut Command) -> &mut Command {
+    crate::process_util::hide_std_cmd(cmd);
     cmd
 }
 

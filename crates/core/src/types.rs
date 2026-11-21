@@ -116,6 +116,14 @@ pub struct TurnOutcome {
     pub tool_calls: u32,
     pub elapsed_ms: u64,
     pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub tool_full_tokens: u32,
+    #[serde(default)]
+    pub tool_sent_tokens: u32,
+    #[serde(default)]
+    pub cache_hit_ratio: f32,
+    #[serde(default)]
+    pub cache_break_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +133,8 @@ pub struct PermissionRequest {
     pub reason: String,
     #[serde(default)]
     pub detail: Option<String>,
+    #[serde(default)]
+    pub diff_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

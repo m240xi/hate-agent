@@ -16,6 +16,7 @@ export interface PermissionRequest {
   call: ToolCall;
   reason: string;
   detail?: string | null;
+  diff_preview?: string | null;
 }
 
 export interface TurnOutcome {
@@ -24,6 +25,10 @@ export interface TurnOutcome {
   tool_calls: number;
   elapsed_ms: number;
   cost_usd: number | null;
+  tool_full_tokens?: number;
+  tool_sent_tokens?: number;
+  cache_hit_ratio?: number;
+  cache_break_reason?: string | null;
 }
 
 export type FailureReason =
@@ -39,9 +44,24 @@ export type SessionEvent =
   | { type: 'image'; source: string; call_id: string | null }
   | { type: 'tool_started'; call: ToolCall }
   | { type: 'tool_output'; call_id: string; preview: string; tokens: number }
-  | { type: 'tool_finished'; call_id: string; ok: boolean; full_tokens: number; sent_tokens: number }
+  | {
+      type: 'tool_finished';
+      call_id: string;
+      ok: boolean;
+      full_tokens: number;
+      sent_tokens: number;
+      full_preview?: string | null;
+      sent_preview?: string | null;
+    }
   | { type: 'permission_requested'; request: PermissionRequest }
-  | { type: 'tokens_counted'; usage: TokenUsage; turn: number; thinking_est?: number }
+  | {
+      type: 'tokens_counted';
+      usage: TokenUsage;
+      turn: number;
+      thinking_est?: number;
+      cache_hit_ratio?: number;
+      cache_break_reason?: string | null;
+    }
   | { type: 'compaction_started'; reason: string; before: number; after: number }
   | { type: 'checkpoint_created'; id: string }
   | { type: 'skill_saved'; name: string; title: string; bytes: number }
@@ -98,6 +118,17 @@ export interface CheckpointEntry {
   id: string;
   label: string;
   at: string;
+  userIndex?: number;
+}
+
+export interface ToolAuditEntry {
+  callId: string;
+  name: string;
+  ok: boolean;
+  fullTokens: number;
+  sentTokens: number;
+  fullPreview: string | null;
+  sentPreview: string | null;
 }
 
 export interface ChangedFile {

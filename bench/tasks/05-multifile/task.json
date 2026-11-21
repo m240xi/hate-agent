@@ -1,0 +1,8 @@
+{
+  "id": "05-multifile",
+  "name": "Propagate priority across multi-file task store",
+  "prompt": "Add a `Priority` field/ordering to `TaskItem` across `src/model.rs`, `src/store.rs`, and `src/lib.rs` so high-priority tasks sort first and all tests pass.",
+  "verify_cmd": "cargo",
+  "verify_args": ["test", "--quiet"],
+  "expect_baseline_fail": true
+}

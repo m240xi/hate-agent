@@ -306,6 +306,21 @@
           {@render winControls()}
         </header>
         {@render updateBar()}
+        {#if session.repoTrust && !session.repoTrust.trusted && !session.trustDismissed && (session.repoTrust.rule_files.length > 0 || session.repoTrust.mcp_file)}
+          <div class="trustbar" role="region" aria-label="Workspace trust">
+            <Icon name="alert" size={13} />
+            <span class="mono">
+              Untrusted folder contains {[...session.repoTrust.rule_files, ...(session.repoTrust.mcp_file ? [session.repoTrust.mcp_file] : [])].join(', ')} — repo instructions are disabled until trusted.
+            </span>
+            <span class="spacer"></span>
+            <button class="update-btn mono" onclick={() => void session.approveRepoTrust(true)}>
+              Trust folder
+            </button>
+            <button class="update-x" onclick={() => (session.trustDismissed = true)} aria-label="Keep restricted">
+              Keep restricted
+            </button>
+          </div>
+        {/if}
         <div class="content">
           {#key session.mode}
             <div class="mode-view" in:fade={{ duration: 120 }}>
@@ -630,5 +645,18 @@
   }
   .spacer {
     flex: 1;
+  }
+  .trustbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 30px;
+    padding: 4px 12px;
+    flex: none;
+    font-size: 11.5px;
+    color: var(--fg-1);
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--border);
+    border-left: 2px solid var(--warn);
   }
 </style>

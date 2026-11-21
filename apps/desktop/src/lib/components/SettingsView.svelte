@@ -386,6 +386,9 @@
 
   function mcpStateLabel(row: McpServerInfo): string {
     if (row.state === 'connected') return `connected · ${row.tools} tool${row.tools === 1 ? '' : 's'}`;
+    if (row.state === 'idle') {
+      return row.tools > 0 ? `lazy · ${row.tools} cached` : 'lazy (on-demand)';
+    }
     if (row.state === 'connecting' || row.state === 'new') return 'saving…';
     if (row.state === 'disabled') return 'disabled';
     return 'error';

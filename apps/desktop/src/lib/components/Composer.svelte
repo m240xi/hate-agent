@@ -137,7 +137,7 @@
     <ul class="queue" aria-label="Queued messages">
       {#each session.queue as q, i}
         <li class="queued rise">
-          <span class="q-tag">queued</span>
+          <span class="q-tag">queued {i + 1}/{session.queue.length}</span>
           <span class="q-text">{q.text}</span>
           {#if q.pins.length > 0}
             <span class="q-pins mono" title={q.pins.map((p) => p.path).join('\n')}>
@@ -321,7 +321,15 @@
       <ThinkingMenu />
       {#if session.running}
         {#if session.draft.trim()}
-          <button class="send" onclick={() => session.send()} aria-label="Queue message" title="Queue (Enter)">
+          <button
+            class="steer-btn mono"
+            onclick={() => session.steer()}
+            aria-label="Steer active turn"
+            title="Inject a steering note before the next model step without cancelling"
+          >
+            Steer
+          </button>
+          <button class="send" onclick={() => session.send()} aria-label="Queue message" title="Queue follow-up (Enter)">
             <Icon name="arrow-up" size={15} />
           </button>
         {/if}
@@ -690,5 +698,18 @@
   .send.cancel {
     background: var(--fg-0);
     color: var(--bg-0);
+  }
+  .steer-btn {
+    padding: 5px 9px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+    color: var(--fg-1);
+    font-size: 11px;
+    flex: none;
+  }
+  .steer-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 </style>

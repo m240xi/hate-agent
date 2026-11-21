@@ -1,0 +1,8 @@
+{
+  "id": "04-tests",
+  "name": "Add edge-case tests for token bucket limiter",
+  "prompt": "Add thorough unit tests in `src/lib.rs` covering TokenBucket zero-capacity rejection, burst saturation on refill, and sequential drain behavior, keeping all tests green.",
+  "verify_cmd": "cargo",
+  "verify_args": ["test", "--quiet"],
+  "expect_baseline_fail": false
+}

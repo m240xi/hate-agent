@@ -81,6 +81,17 @@ export async function sessionCancel(): Promise<void> {
   return invoke<void>('session_cancel');
 }
 
+export async function sessionSteer(text: string): Promise<void> {
+  return invoke<void>('session_steer', { text });
+}
+
+export async function sessionQueue(
+  text: string,
+  images: Array<{ mime: string; data: string }> = [],
+): Promise<void> {
+  return invoke<void>('session_queue', { text, images });
+}
+
 export async function sessionCompact(): Promise<void> {
   return invoke<void>('session_compact');
 }
@@ -96,8 +107,25 @@ export async function sessionAnswer(text: string): Promise<void> {
   return invoke<void>('session_answer', { text });
 }
 
+export type RewindMode = 'files_only' | 'transcript_only' | 'both';
+
 export async function sessionRewind(checkpointId: string): Promise<void> {
   return invoke<void>('session_rewind', { checkpointId });
+}
+
+export async function sessionRewindSplit(
+  checkpointId: string,
+  mode: RewindMode,
+  userIndex: number | null,
+): Promise<void> {
+  return invoke<void>('session_rewind_split', { checkpointId, mode, userIndex });
+}
+
+export async function sessionCheckpointDiff(
+  checkpointId: string,
+  otherId: string | null = null,
+): Promise<string> {
+  return invoke<string>('session_checkpoint_diff', { checkpointId, otherId });
 }
 
 export interface NousLoginInfo {
@@ -632,6 +660,26 @@ export async function customCommandSave(
   return invoke<string>('custom_command_save', { name, scope, content });
 }
 
+export interface WorktreeSessionDto {
+  session_id: string;
+  worktree_path: string;
+  branch: string;
+}
+
+export async function sessionSpawnWorktree(
+  name: string,
+  baseWorkspace?: string | null,
+  model?: string | null,
+  provider?: string | null,
+): Promise<WorktreeSessionDto> {
+  return invoke<WorktreeSessionDto>('session_spawn_worktree', {
+    name,
+    baseWorkspace: baseWorkspace ?? null,
+    model: model ?? null,
+    provider: provider ?? null,
+  });
+}
+
 export async function workspaceWorktreeStatus(): Promise<import('./types').WorktreeStatus> {
   return invoke<import('./types').WorktreeStatus>('workspace_worktree_status');
 }
@@ -696,4 +744,20 @@ export async function terminalReadBuffer(
     raw: raw ?? null,
     tailLines: tailLines ?? null,
   });
+}
+
+export interface RepoTrustStatus {
+  trusted: boolean;
+  canonical_root: string;
+  rule_files: string[];
+  mcp_file: string | null;
+  mcp_servers: string[];
+}
+
+export async function workspaceTrustStatus(): Promise<RepoTrustStatus | null> {
+  return invoke<RepoTrustStatus | null>('workspace_trust_status');
+}
+
+export async function workspaceTrustApprove(trust: boolean): Promise<RepoTrustStatus | null> {
+  return invoke<RepoTrustStatus | null>('workspace_trust_approve', { trust });
 }

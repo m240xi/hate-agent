@@ -28,6 +28,7 @@ import type {
   SymbolHit,
   TerminalTabInfo,
   TokenUsage,
+  ToolAuditEntry,
   TranscriptBlock,
   TurnOutcome,
   WorkspaceRuleInfo,
@@ -159,6 +160,7 @@ class SessionStore {
   usage = $state<TokenUsage>({ input: 0, cached_input: 0, output: 0, thinking: 0 });
   budgetTokens = 200_000;
   checkpoints = $state<CheckpointEntry[]>([]);
+  checkpointDiffPreview = $state<{ id: string; diff: string } | null>(null);
   changedFiles = $state<ChangedFile[]>([]);
   model = $state('');
   provider = $state('');
@@ -179,6 +181,9 @@ class SessionStore {
   sessionTotals = $state<TokenUsage>({ input: 0, cached_input: 0, output: 0, thinking: 0 });
   ctxUsed = $state(0);
   agentCtxSize = $state(0);
+  tokensSaved = $state(0);
+  cacheBreakReason = $state<string | null>(null);
+  toolAudits = $state<ToolAuditEntry[]>([]);
 
   draft = $state('');
   attachments = $state<PendingImage[]>([]);
@@ -218,6 +223,8 @@ class SessionStore {
 
   updateAvailable = $state<{ version: string; notes: string | null } | null>(null);
   updateState = $state<'downloading' | 'installing' | 'error' | null>(null);
+  repoTrust = $state<import('./ipc').RepoTrustStatus | null>(null);
+  trustDismissed = $state(false);
   updateDownloaded = $state(0);
   updateTotal = $state<number | null>(null);
   whatsNew = $state<{ version: string; notes: string | null } | null>(null);
@@ -461,6 +468,31 @@ class SessionStore {
       this.updateState = 'error';
       this.note(`update failed: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  steer(override?: string): void {
+    const raw = (override ?? this.draft).trim();
+    if (!raw) return;
+    if (override === undefined) {
+      this.draft = '';
+    }
+    if (!this.running) {
+      this.send(raw);
+      return;
+    }
+    this.blocks.push({
+      id: nextBlockId++,
+      kind: 'text',
+      text: `[steer] ${raw}`,
+      streaming: false,
+      local: true,
+    });
+    if (!inTauri()) return;
+    void import('./ipc')
+      .then((m) => m.sessionSteer(raw))
+      .catch((err: unknown) => {
+        this.note(`steer failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
   }
 
   send(override?: string, pinsOverride?: PinRef[], contextsOverride?: ContextRef[]): void {
@@ -1549,24 +1581,76 @@ class SessionStore {
     }
   }
 
-  async rewindCheckpoint(id: string): Promise<void> {
+  async rewindCheckpoint(
+    id: string,
+    mode: 'files_only' | 'transcript_only' | 'both' = 'files_only',
+  ): Promise<void> {
     if (!inTauri()) return;
+    const cp = this.checkpoints.find((c) => c.id === id);
+    const userIndex = cp?.userIndex ?? null;
     try {
-      const { sessionRewind } = await import('./ipc');
-      await sessionRewind(id);
+      const { sessionRewindSplit } = await import('./ipc');
+      await sessionRewindSplit(id, mode, userIndex);
+      if (mode === 'transcript_only' || mode === 'both') {
+        if (userIndex !== null) {
+          let seen = 0;
+          const cutIdx = this.blocks.findIndex((b) => {
+            if (b.kind === 'user') {
+              if (seen === userIndex) return true;
+              seen += 1;
+            }
+            return false;
+          });
+          if (cutIdx >= 0) {
+            this.blocks = this.blocks.slice(0, cutIdx);
+            this.sessionTurns = userIndex;
+            this.checkpoints = this.checkpoints.filter(
+              (c) => (c.userIndex ?? 0) < userIndex,
+            );
+          }
+        }
+      }
+      const label =
+        mode === 'files_only'
+          ? 'files'
+          : mode === 'transcript_only'
+            ? 'transcript'
+            : 'files & transcript';
       this.blocks.push({
         id: nextBlockId++,
         kind: 'text',
-        text: `⏪ files rewound to checkpoint ${id.slice(0, 8)}`,
+        text: `rewound ${label} to checkpoint ${id.slice(0, 8)}`,
         streaming: false,
+        local: true,
       });
-      void this.refreshIndex();
+      if (mode !== 'transcript_only') {
+        void this.refreshIndex();
+        void this.refreshChanges();
+      }
     } catch (e) {
       this.blocks.push({
         id: nextBlockId++,
         kind: 'error',
         text: `rewind failed: ${e instanceof Error ? e.message : String(e)}`,
       });
+    }
+  }
+
+  async loadCheckpointDiff(id: string): Promise<void> {
+    if (this.checkpointDiffPreview?.id === id) {
+      this.checkpointDiffPreview = null;
+      return;
+    }
+    if (!inTauri()) return;
+    try {
+      const { sessionCheckpointDiff } = await import('./ipc');
+      const diff = await sessionCheckpointDiff(id, null);
+      this.checkpointDiffPreview = {
+        id,
+        diff: diff.trim() || '(no changes vs workspace)',
+      };
+    } catch (e) {
+      this.note(`checkpoint diff failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -1889,6 +1973,9 @@ class SessionStore {
     this.agentCtxSize = 0;
     this.costUsd = 0;
     this.cacheRatio = 0;
+    this.tokensSaved = 0;
+    this.cacheBreakReason = null;
+    this.toolAudits = [];
     this.draft = '';
     this.pendingPermission = null;
     this.awaitingPrompt = null;
@@ -2109,14 +2196,34 @@ class SessionStore {
     if (!this.workspacePath) {
       this.worktree = null;
       this.workspaceRules = [];
+      this.repoTrust = null;
+      this.trustDismissed = false;
       return;
     }
-    const [wt, rules] = await Promise.all([
+    const [wt, rules, trust] = await Promise.all([
       m.workspaceWorktreeStatus().catch(() => null),
       m.workspaceRulesInfo().catch(() => []),
+      m.workspaceTrustStatus().catch(() => null),
     ]);
     this.worktree = wt;
     this.workspaceRules = rules;
+    if (this.repoTrust?.canonical_root !== trust?.canonical_root) {
+      this.trustDismissed = false;
+    }
+    this.repoTrust = trust;
+  }
+
+  async approveRepoTrust(trust: boolean): Promise<void> {
+    if (!inTauri()) return;
+    const m = await import('./ipc');
+    try {
+      const updated = await m.workspaceTrustApprove(trust);
+      this.repoTrust = updated;
+      this.trustDismissed = !trust;
+      this.note(trust ? 'workspace trusted — project rules enabled' : 'workspace kept restricted');
+    } catch (e) {
+      this.note(`trust update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   async enterWorktree(branch?: string | null): Promise<void> {
@@ -2171,6 +2278,61 @@ class SessionStore {
       this.setNotice('Returned to main repository');
     } catch (e) {
       this.note(`couldn't remove worktree: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async spawnWorktreeTrack(
+    name = `track-${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+    model?: string,
+    provider?: string,
+    openNow = true,
+  ): Promise<{ session_id: string; worktree_path: string; branch: string } | null> {
+    if (!inTauri() || !this.workspacePath) return null;
+    const m = await import('./ipc');
+    try {
+      const dto = await m.sessionSpawnWorktree(
+        name,
+        this.workspacePath,
+        model ?? (this.model || null),
+        provider ?? (this.providerName || this.provider || null),
+      );
+      await this.refreshSessions();
+      if (openNow && !this.running) {
+        await this.openSession(dto.session_id);
+        if (this.mode !== 'chat') this.setMode('chat');
+      }
+      this.setNotice(`Worktree track ${dto.branch} ready`);
+      return dto;
+    } catch (e) {
+      this.note(`couldn't spawn track: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  async compareModelsInWorktrees(
+    prompt: string,
+    targets: Array<{ provider: string; model: string }>,
+  ): Promise<void> {
+    if (!inTauri() || !this.workspacePath || targets.length === 0) return;
+    const trimmed = prompt.trim();
+    if (!trimmed) {
+      this.note('enter a prompt to compare models');
+      return;
+    }
+    const created: Array<{ session_id: string; worktree_path: string; branch: string }> = [];
+    for (const t of targets) {
+      const dto = await this.spawnWorktreeTrack(t.model, t.model, t.provider, false);
+      if (dto) created.push(dto);
+    }
+    if (created.length === 0) return;
+    await this.refreshSessions();
+    if (!this.running && created[0]) {
+      await this.openSession(created[0].session_id);
+      if (this.mode !== 'chat') this.setMode('chat');
+      this.draft = trimmed;
+      this.setNotice(
+        `Created ${created.length} worktree tracks — switch between them in the sidebar`,
+      );
     }
   }
 
@@ -2256,6 +2418,20 @@ class SessionStore {
           b.fullTokens = e.full_tokens;
           b.sentTokens = e.sent_tokens;
         }
+        const saved = Math.max(0, e.full_tokens - e.sent_tokens);
+        if (saved > 0) {
+          this.tokensSaved += saved;
+        }
+        const audit: ToolAuditEntry = {
+          callId: e.call_id,
+          name: b?.call?.name ?? 'tool',
+          ok: e.ok,
+          fullTokens: e.full_tokens,
+          sentTokens: e.sent_tokens,
+          fullPreview: e.full_preview ?? null,
+          sentPreview: e.sent_preview ?? b?.preview ?? null,
+        };
+        this.toolAudits = [audit, ...this.toolAudits].slice(0, 12);
         break;
       }
       case 'permission_requested':
@@ -2266,6 +2442,9 @@ class SessionStore {
         this.usage = { ...e.usage };
         this.ctxUsed = e.usage.input;
         this.recomputeDerived();
+        if (e.cache_break_reason) {
+          this.cacheBreakReason = e.cache_break_reason;
+        }
         this.attributeUsage(e.usage, e.thinking_est ?? 0);
         break;
       case 'compaction_started':
@@ -2278,12 +2457,19 @@ class SessionStore {
         });
         this.ctxUsed = e.after;
         break;
-      case 'checkpoint_created':
+      case 'checkpoint_created': {
+        const userCount = this.blocks.filter((b) => b.kind === 'user').length;
         this.checkpoints = [
-          { id: e.id, label: 'checkpoint', at: new Date().toLocaleTimeString() },
+          {
+            id: e.id,
+            label: 'checkpoint',
+            at: new Date().toLocaleTimeString(),
+            userIndex: userCount > 0 ? userCount - 1 : 0,
+          },
           ...this.checkpoints,
         ];
         break;
+      }
       case 'skill_saved':
         this.blocks.push({
           id: nextBlockId++,
@@ -2301,6 +2487,9 @@ class SessionStore {
         t.output += e.outcome.usage.output;
         t.thinking += e.outcome.usage.thinking;
         this.costUsd = e.outcome.cost_usd ?? this.costUsd;
+        if (e.outcome.cache_break_reason) {
+          this.cacheBreakReason = e.outcome.cache_break_reason;
+        }
         this.recomputeDerived();
         this.sessionState = 'done';
         this.finishStreamingBlocks();

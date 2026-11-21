@@ -174,6 +174,7 @@ impl TerminalToolkit {
                 ToolOutput {
                     content: sent,
                     preview,
+                    raw_preview: None,
                     full_tokens: full_tokens.max(sent_tokens),
                     sent_tokens,
                     ok: true,
@@ -186,6 +187,7 @@ impl TerminalToolkit {
                 ToolOutput {
                     content,
                     preview,
+                    raw_preview: None,
                     full_tokens: tokens,
                     sent_tokens: tokens,
                     ok: false,

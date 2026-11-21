@@ -16,6 +16,39 @@
   let renaming = $state<string | null>(null);
   let draftTitle = $state('');
   let searchEl = $state<HTMLInputElement | null>(null);
+  let compareOpen = $state(false);
+  let comparePrompt = $state('');
+  let compareA = $state('');
+  let compareB = $state('');
+
+  function isWorktreeSession(s: SessionMeta): boolean {
+    return (
+      Boolean(s.workspace?.includes('.hate-worktrees')) ||
+      Boolean(s.workspace?.includes('/worktrees/')) ||
+      Boolean(s.workspace?.includes('\\worktrees\\'))
+    );
+  }
+
+  function openCompare(): void {
+    compareOpen = !compareOpen;
+    if (compareOpen && session.models.length > 0) {
+      compareA = compareA || session.models[0]?.id || session.model;
+      compareB = compareB || session.models[1]?.id || session.models[0]?.id || session.model;
+    }
+  }
+
+  async function runCompare(): Promise<void> {
+    const pick = (id: string) => {
+      const found = session.models.find((m) => m.id === id);
+      return {
+        provider: found?.provider || session.providerName || session.provider,
+        model: found?.id || id || session.model,
+      };
+    };
+    await session.compareModelsInWorktrees(comparePrompt, [pick(compareA), pick(compareB)]);
+    compareOpen = false;
+    comparePrompt = '';
+  }
 
   const filtered = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -182,6 +215,47 @@
         <span>Search chats</span>
       </button>
     {/if}
+    {#if session.workspacePath && session.worktree?.is_git}
+      <button
+        class="action"
+        onclick={() => void session.spawnWorktreeTrack()}
+        title="Create a new isolated git worktree session track"
+      >
+        <Icon name="branch" size={15} />
+        <span>New worktree track</span>
+      </button>
+      {#if session.models.length >= 2}
+        <button
+          class="action"
+          onclick={openCompare}
+          title="Spawn two isolated worktree tracks to compare models"
+        >
+          <Icon name="branch" size={15} />
+          <span>Compare models</span>
+        </button>
+      {/if}
+      {#if compareOpen}
+        <div class="compare-box">
+          <select class="cmp-sel mono" bind:value={compareA} aria-label="Model A">
+            {#each session.models as m (m.id + (m.provider ?? ''))}
+              <option value={m.id}>{m.id}</option>
+            {/each}
+          </select>
+          <select class="cmp-sel mono" bind:value={compareB} aria-label="Model B">
+            {#each session.models as m (m.id + (m.provider ?? ''))}
+              <option value={m.id}>{m.id}</option>
+            {/each}
+          </select>
+          <input
+            class="cmp-in"
+            bind:value={comparePrompt}
+            placeholder="Shared prompt…"
+            aria-label="Prompt for model comparison"
+          />
+          <button class="cmp-go mono" onclick={() => void runCompare()}>Spawn tracks</button>
+        </div>
+      {/if}
+    {/if}
   </nav>
 
   <div class="history">
@@ -232,7 +306,7 @@
                     <span class="row-title">{s.title || 'Untitled'}</span>
                     {#if s.workspace}
                       <span class="tag" title={s.workspace}>
-                        <Icon name="folder" size={10} />
+                        <Icon name={isWorktreeSession(s) ? 'branch' : 'folder'} size={10} />
                         {workspaceOf(s)}
                       </span>
                     {/if}
@@ -487,6 +561,34 @@
   .row:hover .tag,
   .row:focus-within .tag {
     display: none;
+  }
+  .compare-box {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 6px;
+    margin: 2px 2px 4px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .cmp-sel,
+  .cmp-in {
+    width: 100%;
+    font-size: 11px;
+    padding: 4px 6px;
+    background: var(--bg-0);
+    color: var(--fg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .cmp-go {
+    padding: 4px 8px;
+    font-size: 11px;
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: var(--accent-fg);
+    text-align: center;
   }
   .row-title {
     flex: 1;

@@ -164,6 +164,30 @@ impl Actor {
     async fn on_command(&mut self, cmd: Command) {
         match cmd {
             Command::UserMessage { text, images } => self.start_turn(text, images).await,
+            Command::Steer { text } => {
+                if self.turn.is_none() {
+                    self.start_turn(text, Vec::new()).await;
+                } else {
+                    self.emit(Event::Error {
+                        error: AgentError::Internal(
+                            "Antigravity external turns don't support mid-turn steering"
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
+            Command::QueueUserMessage { text, images } => {
+                if self.turn.is_none() {
+                    self.start_turn(text, images).await;
+                } else {
+                    self.emit(Event::Error {
+                        error: AgentError::Internal(
+                            "Antigravity external turns don't support mid-turn queueing"
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
             Command::Cancel => self.cancel(),
             Command::RespondPermission {
                 request_id,
@@ -369,6 +393,8 @@ impl Actor {
                     ok: false,
                     full_tokens: 0,
                     sent_tokens: 0,
+                    full_preview: None,
+                    sent_preview: None,
                 });
             }
         }
@@ -399,6 +425,10 @@ impl Actor {
                         tool_calls: turn.tool_calls,
                         elapsed_ms,
                         cost_usd: (self.cost_usd > 0.0).then_some(self.cost_usd),
+                        tool_full_tokens: 0,
+                        tool_sent_tokens: 0,
+                        cache_hit_ratio: 0.0,
+                        cache_break_reason: None,
                     },
                 });
             }
@@ -417,6 +447,10 @@ impl Actor {
                             tool_calls: turn.tool_calls,
                             elapsed_ms,
                             cost_usd: None,
+                            tool_full_tokens: 0,
+                            tool_sent_tokens: 0,
+                            cache_hit_ratio: 0.0,
+                            cache_break_reason: None,
                         },
                     });
                     return;
@@ -581,6 +615,8 @@ impl Actor {
                 ok: status == Some("completed"),
                 full_tokens: 0,
                 sent_tokens: 0,
+                full_preview: None,
+                sent_preview: None,
             });
         }
     }
@@ -630,6 +666,7 @@ impl Actor {
                 },
                 reason: title,
                 detail,
+                diff_preview: None,
             },
         });
     }

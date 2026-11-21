@@ -1,9 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
+use hate_context::O200kCounter;
 use serde::Serialize;
 
 use crate::tools::SKIP_DIRS;
@@ -14,6 +16,22 @@ const MAX_FILE_BYTES: u64 = 256 * 1024;
 const MAX_FILE_LINES: usize = 4_000;
 const MAX_FILE_SYMBOLS: usize = 300;
 const MAX_SYMBOLS: usize = 20_000;
+const MAX_SYMBOLS_ALL: usize = 50_000;
+const ENTRY_POINT_NAMES: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "Makefile",
+    "main.rs",
+    "lib.rs",
+    "index.ts",
+    "index.tsx",
+    "index.js",
+    "main.ts",
+    "main.go",
+    "app.py",
+    "main.py",
+    "App.svelte",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -80,7 +98,7 @@ pub fn build_index(root: &Path) -> io::Result<WorkspaceIndex> {
             continue;
         }
         scanned += 1;
-        collect_symbols(&root.join(rel), rel, &mut symbols);
+        collect_symbols_mode(&root.join(rel), rel, false, MAX_SYMBOLS, &mut symbols);
     }
 
     Ok(WorkspaceIndex {
@@ -97,14 +115,27 @@ const SOURCE_EXTS: &[&str] = &[
 ];
 
 pub fn collect_workspace_symbols(root: &Path) -> Vec<SymbolHit> {
+    collect_workspace_symbols_mode(root, false)
+}
+
+pub fn collect_workspace_symbols_all(root: &Path) -> Vec<SymbolHit> {
+    collect_workspace_symbols_mode(root, true)
+}
+
+fn collect_workspace_symbols_mode(root: &Path, include_refs_calls: bool) -> Vec<SymbolHit> {
     let mut entries: Vec<(String, bool)> = Vec::new();
     let mut truncated = false;
     walk(root, root, &mut entries, &mut truncated);
 
+    let cap = if include_refs_calls {
+        MAX_SYMBOLS_ALL
+    } else {
+        MAX_SYMBOLS
+    };
     let mut symbols = Vec::new();
     let mut scanned = 0usize;
     for (rel, is_dir) in &entries {
-        if symbols.len() >= MAX_SYMBOLS || scanned >= MAX_SYMBOL_FILES {
+        if symbols.len() >= cap || scanned >= MAX_SYMBOL_FILES {
             break;
         }
         let is_source = Path::new(rel)
@@ -115,53 +146,125 @@ pub fn collect_workspace_symbols(root: &Path) -> Vec<SymbolHit> {
             continue;
         }
         scanned += 1;
-        collect_symbols(&root.join(rel), rel, &mut symbols);
+        collect_symbols_mode(&root.join(rel), rel, include_refs_calls, cap, &mut symbols);
     }
     symbols
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, bool)>, truncated: &mut bool) {
-    if out.len() >= MAX_ENTRIES {
-        *truncated = true;
-        return;
+pub fn build_repo_map(root: &Path, max_tokens: usize) -> Option<String> {
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    let mut truncated = false;
+    walk(root, root, &mut entries, &mut truncated);
+    if entries.is_empty() {
+        return None;
     }
-    let Ok(rd) = fs::read_dir(dir) else { return };
-    let mut kids: Vec<(String, PathBuf, bool)> = rd
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            let ft = e.file_type().ok()?;
-            if ft.is_symlink() {
-                return None;
-            }
-            let name = e.file_name().to_string_lossy().into_owned();
-            Some((name, e.path(), ft.is_dir()))
-        })
-        .collect();
-    kids.sort_by(|a, b| (!a.2, &a.0).cmp(&(!b.2, &b.0)));
 
-    for (name, path, is_dir) in kids {
-        if out.len() >= MAX_ENTRIES {
-            *truncated = true;
-            return;
-        }
-        if is_dir {
-            if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
-                continue;
+    let mut top_dirs: Vec<String> = Vec::new();
+    let mut entry_points: Vec<String> = Vec::new();
+    let mut file_defs: Vec<(String, usize)> = Vec::new();
+    let mut scanned = 0usize;
+
+    for (rel, is_dir) in &entries {
+        if *is_dir {
+            if !rel.contains('/') {
+                top_dirs.push(rel.clone());
             }
-            let Ok(rel) = path.strip_prefix(root) else {
-                continue;
-            };
-            let rel_s = rel.to_string_lossy().replace('\\', "/");
-            out.push((rel_s.clone(), true));
-            walk(root, &path, out, truncated);
-        } else {
-            let Ok(rel) = path.strip_prefix(root) else {
-                continue;
-            };
-            let rel_s = rel.to_string_lossy().replace('\\', "/");
-            out.push((rel_s, false));
+            continue;
+        }
+        let fname = Path::new(rel)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if ENTRY_POINT_NAMES.contains(&fname) && entry_points.len() < 12 {
+            entry_points.push(rel.clone());
+        }
+        let is_source = Path::new(rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| SOURCE_EXTS.contains(&e.to_ascii_lowercase().as_str()));
+        if is_source && scanned < 400 {
+            scanned += 1;
+            let defs = collect_file_symbols(&root.join(rel), rel).len();
+            if defs > 0 {
+                file_defs.push((rel.clone(), defs));
+            }
         }
     }
+
+    file_defs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut out = String::from("[repo_map — workspace structure]");
+    if !top_dirs.is_empty() {
+        let shown: Vec<String> = top_dirs.iter().take(20).map(|d| format!("{d}/")).collect();
+        let _ = write!(out, "\ndirs: {}", shown.join(", "));
+    }
+    if !entry_points.is_empty() {
+        let _ = write!(out, "\nentry points: {}", entry_points.join(", "));
+    }
+    if !file_defs.is_empty() {
+        out.push_str("\nkey files (defs):");
+        let counter = O200kCounter::new().ok();
+        for (path, defs) in file_defs.into_iter().take(40) {
+            let line = format!("\n- {path} ({defs})");
+            let next_tokens = counter.as_ref().map_or((out.len() + line.len()) / 4, |c| {
+                c.count_sync(&(out.clone() + &line)) as usize
+            });
+            if next_tokens > max_tokens {
+                out.push_str("\n- …");
+                break;
+            }
+            out.push_str(&line);
+        }
+    }
+    Some(out)
+}
+
+fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, bool)>, _truncated: &mut bool) {
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    let builder = ignore::WalkBuilder::new(dir)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(true)
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(|ent| {
+            if ent.depth() == 0 {
+                return true;
+            }
+            let name = ent.file_name().to_string_lossy();
+            if name.starts_with('.') {
+                return false;
+            }
+            if ent.file_type().is_some_and(|ft| ft.is_dir()) && SKIP_DIRS.contains(&name.as_ref()) {
+                return false;
+            }
+            true
+        })
+        .build();
+
+    for res in builder {
+        let Ok(ent) = res else { continue };
+        if ent.depth() == 0 {
+            continue;
+        }
+        let is_dir = ent.file_type().is_some_and(|ft| ft.is_dir());
+        let Ok(rel) = ent.path().strip_prefix(root) else {
+            continue;
+        };
+        let rel_s = rel.to_string_lossy().replace('\\', "/");
+        if rel_s.is_empty() {
+            continue;
+        }
+        entries.push((rel_s, is_dir));
+        if entries.len() >= MAX_ENTRIES {
+            *_truncated = true;
+            break;
+        }
+    }
+
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    out.extend(entries);
 }
 
 fn build_tree(entries: &[(String, bool)], statuses: &HashMap<String, char>) -> Vec<FileNode> {
@@ -221,12 +324,10 @@ fn build_tree(entries: &[(String, bool)], statuses: &HashMap<String, char>) -> V
 }
 
 fn git_status(root: &Path) -> HashMap<String, char> {
-    let Ok(out) = Command::new("git")
-        .args(["-C"])
-        .arg(root)
-        .args(["status", "--porcelain"])
-        .output()
-    else {
+    let mut cmd = Command::new("git");
+    cmd.args(["-C"]).arg(root).args(["status", "--porcelain"]);
+    crate::process_util::hide_std_cmd(&mut cmd);
+    let Ok(out) = cmd.output() else {
         return HashMap::new();
     };
     if !out.status.success() {
@@ -333,7 +434,19 @@ const DEF_KEYWORDS: &[&str] = &[
 
 const SECONDARY_KINDS: &[&str] = &["class", "struct", "interface", "enum"];
 
-fn collect_symbols(path: &Path, rel: &str, out: &mut Vec<SymbolHit>) {
+pub(crate) fn collect_file_symbols(path: &Path, rel: &str) -> Vec<SymbolHit> {
+    let mut out = Vec::new();
+    collect_symbols_mode(path, rel, false, MAX_SYMBOLS, &mut out);
+    out
+}
+
+fn collect_symbols_mode(
+    path: &Path,
+    rel: &str,
+    include_refs_calls: bool,
+    cap: usize,
+    out: &mut Vec<SymbolHit>,
+) {
     let Ok(meta) = fs::metadata(path) else { return };
     if meta.len() > MAX_FILE_BYTES || !looks_text(path) {
         return;
@@ -341,9 +454,14 @@ fn collect_symbols(path: &Path, rel: &str, out: &mut Vec<SymbolHit>) {
     let Ok(text) = fs::read_to_string(path) else {
         return;
     };
+    if let Some(lang) = tree_sitter_language_for(path)
+        && collect_tree_sitter_symbols(&lang, &text, rel, include_refs_calls, cap, out)
+    {
+        return;
+    }
     let mut found = 0usize;
     for (i, line) in text.lines().enumerate() {
-        if i >= MAX_FILE_LINES || found >= MAX_FILE_SYMBOLS || out.len() >= MAX_SYMBOLS {
+        if i >= MAX_FILE_LINES || found >= MAX_FILE_SYMBOLS || out.len() >= cap {
             break;
         }
         let Some(name) = decl_name(line) else {
@@ -357,6 +475,184 @@ fn collect_symbols(path: &Path, rel: &str, out: &mut Vec<SymbolHit>) {
         });
         found += 1;
     }
+}
+
+fn tree_sitter_language_for(path: &Path) -> Option<tree_sitter::Language> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
+        "ts" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+        "js" | "jsx" | "mjs" | "cjs" => Some(tree_sitter_javascript::LANGUAGE.into()),
+        "py" => Some(tree_sitter_python::LANGUAGE.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        _ => None,
+    }
+}
+
+fn collect_tree_sitter_symbols(
+    lang: &tree_sitter::Language,
+    text: &str,
+    rel: &str,
+    include_refs_calls: bool,
+    cap: usize,
+    out: &mut Vec<SymbolHit>,
+) -> bool {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(lang).is_err() {
+        return false;
+    }
+    let Some(tree) = parser.parse(text.as_bytes(), None) else {
+        return false;
+    };
+
+    let bytes = text.as_bytes();
+    let mut seen: HashSet<(String, u32, u8)> = HashSet::new();
+    let mut def_count = 0usize;
+    let mut ref_count = 0usize;
+    let mut stack = vec![tree.root_node()];
+
+    let mut push_hit = |name: &str, line: u32, kind: SymKind, out: &mut Vec<SymbolHit>| {
+        if out.len() >= cap {
+            return;
+        }
+        let tag = match kind {
+            SymKind::Def => 0,
+            SymKind::Call => 1,
+            SymKind::Ref => 2,
+        };
+        if kind == SymKind::Def {
+            if def_count >= MAX_FILE_SYMBOLS {
+                return;
+            }
+            def_count += 1;
+        } else {
+            if !include_refs_calls || ref_count >= MAX_FILE_SYMBOLS {
+                return;
+            }
+            ref_count += 1;
+        }
+        let clean = name.trim();
+        if clean.is_empty() || !seen.insert((clean.to_string(), line, tag)) {
+            return;
+        }
+        out.push(SymbolHit {
+            name: clean.to_string(),
+            path: rel.to_string(),
+            line,
+            kind,
+        });
+    };
+
+    while let Some(node) = stack.pop() {
+        if out.len() >= cap {
+            break;
+        }
+        let kind_str = node.kind();
+        let line = (node.start_position().row + 1) as u32;
+
+        if is_def_node(kind_str) {
+            if let Some(name) = extract_def_name(node, bytes) {
+                push_hit(name, line, SymKind::Def, out);
+            }
+        } else if include_refs_calls && is_call_node(kind_str) {
+            if let Some(name) = extract_call_name(node, bytes) {
+                push_hit(name, line, SymKind::Call, out);
+            }
+        } else if include_refs_calls
+            && matches!(kind_str, "type_identifier" | "field_identifier")
+            && !node
+                .parent()
+                .is_some_and(|p| is_def_node(p.kind()) || is_call_node(p.kind()))
+            && let Ok(txt) = node.utf8_text(bytes)
+        {
+            push_hit(txt, line, SymKind::Ref, out);
+        }
+
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+    true
+}
+
+fn is_def_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_item"
+            | "struct_item"
+            | "enum_item"
+            | "trait_item"
+            | "impl_item"
+            | "mod_item"
+            | "type_item"
+            | "const_item"
+            | "static_item"
+            | "macro_definition"
+            | "function_declaration"
+            | "method_definition"
+            | "method_declaration"
+            | "class_declaration"
+            | "class_definition"
+            | "function_definition"
+            | "interface_declaration"
+            | "type_alias_declaration"
+            | "enum_declaration"
+            | "type_spec"
+            | "variable_declarator"
+    )
+}
+
+fn is_call_node(kind: &str) -> bool {
+    matches!(kind, "call_expression" | "call" | "macro_invocation")
+}
+
+fn extract_def_name<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
+    if node.kind() == "impl_item" {
+        let ty = node.child_by_field_name("type")?;
+        return tail_ident_text(ty, bytes);
+    }
+    if node.kind() == "variable_declarator" {
+        // Only treat variable_declarator as a top-level/export or function-valued definition.
+        let val = node.child_by_field_name("value");
+        let is_fn = val.is_some_and(|v| {
+            matches!(
+                v.kind(),
+                "arrow_function" | "function_expression" | "function"
+            )
+        });
+        let top = node
+            .parent()
+            .and_then(|p| p.parent())
+            .is_some_and(|gp| matches!(gp.kind(), "program" | "export_statement"));
+        if !is_fn && !top {
+            return None;
+        }
+    }
+    let name_node = node.child_by_field_name("name")?;
+    tail_ident_text(name_node, bytes)
+}
+
+fn extract_call_name<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
+    let target = if node.kind() == "macro_invocation" {
+        node.child_by_field_name("macro")?
+    } else {
+        node.child_by_field_name("function")?
+    };
+    tail_ident_text(target, bytes)
+}
+
+fn tail_ident_text<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
+    let txt = node.utf8_text(bytes).ok()?.trim();
+    let head = txt.split('<').next().unwrap_or(txt).trim();
+    let tail = head
+        .rsplit(['.', ':', '>'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(head)
+        .trim();
+    (!tail.is_empty()).then_some(tail)
 }
 
 fn looks_text(path: &Path) -> bool {
@@ -506,5 +802,54 @@ mod tests {
         assert!(sym_names.contains(&"Deep"));
         assert!(!sym_names.contains(&"nope"));
         assert!(!sym_names.contains(&"hidden"));
+    }
+
+    #[test]
+    fn tree_sitter_extracts_defs_calls_refs_and_repo_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join(".gitignore"), "ignored_dir/\n").unwrap();
+        fs::create_dir_all(root.join("ignored_dir")).unwrap();
+        fs::write(root.join("ignored_dir/skip.rs"), "fn ignored_fn() {}\n").unwrap();
+        fs::write(
+            root.join("src/main.rs"),
+            "struct Config { port: u16 }\nfn helper(cfg: Config) {}\nfn main() { helper(Config { port: 1 }); }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/app.ts"),
+            "export interface User { id: string }\nexport const greet = (u: User) => u.id;\n",
+        )
+        .unwrap();
+
+        let all = collect_workspace_symbols_all(root);
+        assert!(
+            all.iter()
+                .any(|h| h.name == "helper" && h.kind == SymKind::Def)
+        );
+        assert!(
+            all.iter()
+                .any(|h| h.name == "helper" && h.kind == SymKind::Call)
+        );
+        assert!(
+            all.iter()
+                .any(|h| h.name == "Config" && h.kind == SymKind::Ref)
+        );
+        assert!(
+            all.iter()
+                .any(|h| h.name == "User" && h.kind == SymKind::Def)
+        );
+        assert!(
+            all.iter()
+                .any(|h| h.name == "greet" && h.kind == SymKind::Def)
+        );
+        assert!(!all.iter().any(|h| h.name == "ignored_fn"));
+
+        let map = build_repo_map(root, 800).expect("repo map built");
+        assert!(map.contains("src/"));
+        assert!(map.contains("src/main.rs"));
+        let tokens = O200kCounter::new().unwrap().count_sync(&map);
+        assert!(tokens <= 800, "repo_map was {tokens} tokens");
     }
 }

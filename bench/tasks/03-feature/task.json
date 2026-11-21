@@ -1,0 +1,8 @@
+{
+  "id": "03-feature",
+  "name": "Implement duration parser feature",
+  "prompt": "Implement `parse_duration_ms(input: &str) -> Option<u64>` in `src/lib.rs` supporting `ms`, `s`, and `m` suffixes with whitespace trimming so all unit tests pass.",
+  "verify_cmd": "cargo",
+  "verify_args": ["test", "--quiet"],
+  "expect_baseline_fail": true
+}

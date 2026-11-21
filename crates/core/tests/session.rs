@@ -445,7 +445,7 @@ async fn gated_tool_waits_for_permission_then_denies() {
                 Delta::ToolCall(ToolCall {
                     id: "c1".into(),
                     name: ToolName::new("bash"),
-                    args: json!({"command": "echo hi"}),
+                    args: json!({"command": "touch blocked.txt"}),
                 }),
                 Delta::Done,
             ],
@@ -1170,6 +1170,7 @@ async fn read_batches_keep_order_and_duplicate_reads_cost_a_stub() {
                 ok,
                 full_tokens,
                 sent_tokens,
+                ..
             } => {
                 assert!(ok);
                 finished.push((call_id, full_tokens, sent_tokens));
@@ -1321,4 +1322,548 @@ async fn plan_turn_in_chat_session_names_no_workspace_tools() {
     let seen = provider.seen.lock().unwrap();
     assert!(seen[0].contains("organise my week") && seen[0].contains("[plan mode —"));
     assert!(!seen[0].contains("read_file"), "{}", seen[0]);
+}
+
+#[tokio::test]
+async fn tool_search_appends_deferred_tools_without_mutating_prefix() {
+    struct CapturingTools {
+        rounds: std::sync::Mutex<std::collections::VecDeque<Vec<Delta>>>,
+        tool_lists: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl Provider for CapturingTools {
+        fn stream(
+            &self,
+            req: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> BoxStream<'static, Result<Delta, ProviderError>> {
+            self.tool_lists.lock().unwrap().push(
+                req.tools
+                    .iter()
+                    .map(|t| t.name.as_str().to_string())
+                    .collect(),
+            );
+            let script = self
+                .rounds
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| vec![Delta::Done]);
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            tokio::spawn(async move {
+                for d in script {
+                    if tx.send(Ok(d)).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            Box::pin(futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)))
+        }
+
+        fn count_tokens<'a>(
+            &'a self,
+            _req: &'a ChatRequest,
+        ) -> BoxFuture<'a, Result<u64, ProviderError>> {
+            Box::pin(async { Ok(0) })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                vision: false,
+                tools: true,
+                cache: CacheMode::None,
+                thinking: false,
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "pub fn alpha() {}\n").unwrap();
+
+    let provider = Arc::new(CapturingTools {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+            vec![
+                Delta::ToolCall(hate_core::ToolCall {
+                    id: "s1".into(),
+                    name: hate_core::ToolName::new("tool_search"),
+                    args: serde_json::json!({"query": "outline symbol headings", "limit": 1}),
+                }),
+                Delta::Done,
+            ],
+            vec![
+                Delta::ToolCall(hate_core::ToolCall {
+                    id: "o1".into(),
+                    name: hate_core::ToolName::new("outline"),
+                    args: serde_json::json!({"path": "lib.rs"}),
+                }),
+                Delta::Done,
+            ],
+            vec![Delta::Text("done".into()), Delta::Done],
+        ])),
+        tool_lists: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider: provider.clone(),
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: Some(Arc::new(
+            hate_core::WorkspaceTools::new(dir.path()).unwrap(),
+        )),
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        mcp: None,
+        skills: None,
+        auto_skills: false,
+        terminal: None,
+        context_window: 0,
+    });
+    let mut rx = session.subscribe();
+    drive_turn(&session, &mut rx, "inspect lib.rs outline").await;
+
+    let lists = provider.tool_lists.lock().unwrap();
+    assert_eq!(lists.len(), 3);
+    // Round 1 has only Tier 1 tools (no `outline` yet).
+    assert!(!lists[0].iter().any(|n| n == "outline"));
+    // Round 2 keeps the exact Tier 1 prefix and appends `outline` at the end.
+    assert_eq!(&lists[1][..lists[0].len()], lists[0].as_slice());
+    assert_eq!(lists[1].last().map(String::as_str), Some("outline"));
+}
+
+#[tokio::test]
+async fn permission_request_carries_diff_preview_for_write_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "old line\n").unwrap();
+    let (_p, session) = tool_session(
+        dir.path(),
+        vec![
+            vec![
+                Delta::ToolCall(hate_core::ToolCall {
+                    id: "w1".into(),
+                    name: hate_core::ToolName::new("write_file"),
+                    args: serde_json::json!({"path": "a.txt", "content": "new line\n"}),
+                }),
+                Delta::Done,
+            ],
+            vec![Delta::Text("ok".into()), Delta::Done],
+        ],
+        Limits::default(),
+    );
+    let mut rx = session.subscribe();
+    session.command(Command::user("update a.txt")).unwrap();
+
+    let mut saw_diff = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ev {
+            Event::PermissionRequested { request } => {
+                let diff = request.diff_preview.expect("write_file has diff_preview");
+                assert!(
+                    diff.contains("-old line") && diff.contains("+new line"),
+                    "{diff}"
+                );
+                saw_diff = true;
+                session
+                    .command(Command::RespondPermission {
+                        request_id: request.id,
+                        decision: "allow".into(),
+                    })
+                    .unwrap();
+            }
+            Event::TurnComplete { .. } => break,
+            Event::Failed { reason } => panic!("failed: {reason:?}"),
+            _ => {}
+        }
+    }
+    assert!(saw_diff);
+}
+
+#[tokio::test]
+async fn outbound_secrets_are_redacted_and_destructive_bash_never_remembered() {
+    let dir = tempfile::tempdir().unwrap();
+    let (provider, session) = tool_session(
+        dir.path(),
+        vec![
+            vec![
+                Delta::ToolCall(hate_core::ToolCall {
+                    id: "d1".into(),
+                    name: hate_core::ToolName::new("bash"),
+                    args: serde_json::json!({"command": "rm -rf nonexistent_tmp_dir_test"}),
+                }),
+                Delta::Done,
+            ],
+            vec![
+                Delta::ToolCall(hate_core::ToolCall {
+                    id: "d2".into(),
+                    name: hate_core::ToolName::new("bash"),
+                    args: serde_json::json!({"command": "rm -rf nonexistent_tmp_dir_test"}),
+                }),
+                Delta::Done,
+            ],
+            vec![Delta::Text("done".into()), Delta::Done],
+        ],
+        Limits::default(),
+    );
+    let mut rx = session.subscribe();
+    session
+        .command(Command::user(
+            "use sk-proj-abcdefghijklmnopqrstuvwxyz1234 please",
+        ))
+        .unwrap();
+
+    let mut prompts = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ev {
+            Event::PermissionRequested { request } => {
+                prompts += 1;
+                // Click "Run & remember" on the destructive command: it should still prompt again!
+                session
+                    .command(Command::RespondPermission {
+                        request_id: request.id,
+                        decision: "allow_session".into(),
+                    })
+                    .unwrap();
+            }
+            Event::TurnComplete { .. } => break,
+            Event::Failed { reason } => panic!("failed: {reason:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(prompts, 2, "destructive command must never be remembered");
+    let seen = provider.seen.lock().unwrap();
+    assert!(
+        !seen[0].contains("sk-proj-abcdefghijklmnopqrstuvwxyz1234"),
+        "secret leaked in outbound request: {}",
+        seen[0]
+    );
+    assert!(seen[0].contains("[REDACTED:API_KEY]"), "{}", seen[0]);
+}
+
+#[tokio::test]
+async fn repo_map_injects_in_s4_not_s0_and_spawn_agent_isolates_history() {
+    struct InspectProvider {
+        rounds: std::sync::Mutex<std::collections::VecDeque<Vec<Delta>>>,
+        reqs: std::sync::Mutex<Vec<(Option<String>, String, usize)>>,
+    }
+
+    impl Provider for InspectProvider {
+        fn stream(
+            &self,
+            req: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> BoxStream<'static, Result<Delta, ProviderError>> {
+            self.reqs.lock().unwrap().push((
+                req.system.clone(),
+                serde_json::to_string(&req.messages).unwrap(),
+                req.tools.len(),
+            ));
+            let script = self
+                .rounds
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| vec![Delta::Text("child summary".into()), Delta::Done]);
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            tokio::spawn(async move {
+                for d in script {
+                    if tx.send(Ok(d)).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            Box::pin(futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)))
+        }
+
+        fn count_tokens<'a>(
+            &'a self,
+            _req: &'a ChatRequest,
+        ) -> BoxFuture<'a, Result<u64, ProviderError>> {
+            Box::pin(async { Ok(0) })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                vision: false,
+                tools: true,
+                cache: CacheMode::None,
+                thinking: false,
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn alpha() {}\n").unwrap();
+
+    let provider = Arc::new(InspectProvider {
+        rounds: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+            // Parent round 1: calls spawn_agent
+            vec![
+                Delta::ToolCall(hate_core::ToolCall {
+                    id: "sa1".into(),
+                    name: hate_core::ToolName::new("spawn_agent"),
+                    args: serde_json::json!({
+                        "task": "summarize src/main.rs",
+                        "tools": ["read_file"]
+                    }),
+                }),
+                Delta::Done,
+            ],
+            // Child round 1: calls read_file
+            vec![
+                Delta::ToolCall(hate_core::ToolCall {
+                    id: "r1".into(),
+                    name: hate_core::ToolName::new("read_file"),
+                    args: serde_json::json!({"path": "src/main.rs"}),
+                }),
+                Delta::Done,
+            ],
+            // Child round 2: final answer
+            vec![
+                Delta::Text("found fn alpha in src/main.rs".into()),
+                Delta::Done,
+            ],
+            // Parent round 2: final answer
+            vec![Delta::Text("parent done".into()), Delta::Done],
+        ])),
+        reqs: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let session = spawn_session(SessionConfig {
+        provider: provider.clone(),
+        model: "test".to_string(),
+        provider_name: "mock".to_string(),
+        thinking: hate_core::ThinkingLevel::Off,
+        limits: Limits::default(),
+        ledger: None,
+        persist: None,
+        tools: Some(Arc::new(
+            hate_core::WorkspaceTools::new(dir.path()).unwrap(),
+        )),
+        permissions: Arc::new(hate_core::PermissionHub::default()),
+        mcp: None,
+        skills: None,
+        auto_skills: false,
+        terminal: None,
+        context_window: 0,
+    });
+    let mut rx = session.subscribe();
+    drive_turn(&session, &mut rx, "SECRET_PARENT_TOKEN investigate").await;
+
+    let reqs = provider.reqs.lock().unwrap();
+    assert_eq!(reqs.len(), 4);
+    // Parent round 1: repo_map is in S4 messages, NOT in S0 system prompt.
+    let parent_sys = reqs[0].0.as_deref().unwrap_or("");
+    assert!(!parent_sys.contains("repo_map"), "{parent_sys}");
+    assert!(reqs[0].1.contains("[repo_map"), "{}", reqs[0].1);
+    assert!(reqs[0].1.contains("src/main.rs"), "{}", reqs[0].1);
+
+    // Child subagent has isolated history (no parent prompt token) and only 1 allowed tool.
+    assert!(!reqs[1].1.contains("SECRET_PARENT_TOKEN"), "{}", reqs[1].1);
+    assert_eq!(reqs[1].2, 1);
+
+    // Parent round 2 received the subagent summary.
+    assert!(
+        reqs[3].1.contains("found fn alpha in src/main.rs"),
+        "{}",
+        reqs[3].1
+    );
+}
+
+#[tokio::test]
+async fn verification_loop_reenters_on_new_failure_and_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"verify_tmp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "pub fn ok() -> i32 { 1 }\n").unwrap();
+
+    let (provider, session) = tool_session(
+        dir.path(),
+        vec![
+            // Round 1: introduce a compile error in src/lib.rs
+            vec![
+                Delta::ToolCall(hate_core::ToolCall {
+                    id: "w1".into(),
+                    name: hate_core::ToolName::new("write_file"),
+                    args: serde_json::json!({
+                        "path": "src/lib.rs",
+                        "content": "pub fn ok() -> i32 { \"broken\" }\n"
+                    }),
+                }),
+                Delta::Done,
+            ],
+            // Round 2: tries to finish without checking; verification should force another round
+            vec![Delta::Text("looks good".into()), Delta::Done],
+            // Round 3: receives verification failure and fixes src/lib.rs
+            vec![
+                Delta::ToolCall(hate_core::ToolCall {
+                    id: "w2".into(),
+                    name: hate_core::ToolName::new("write_file"),
+                    args: serde_json::json!({
+                        "path": "src/lib.rs",
+                        "content": "pub fn ok() -> i32 { 2 }\n"
+                    }),
+                }),
+                Delta::Done,
+            ],
+            // Round 4: finishes cleanly after verification passes
+            vec![Delta::Text("fixed and verified".into()), Delta::Done],
+        ],
+        Limits::default(),
+    );
+
+    let mut rx = session.subscribe();
+    session
+        .command(Command::user("update ok()".to_string()))
+        .expect("command");
+    let mut final_text = String::new();
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::PermissionRequested { request, .. } => {
+                session
+                    .command(Command::RespondPermission {
+                        request_id: request.id,
+                        decision: "allow_session".to_string(),
+                    })
+                    .expect("perm");
+            }
+            Event::Delta { text } => final_text.push_str(&text),
+            Event::TurnComplete { .. } => {
+                assert!(final_text.contains("fixed and verified"), "{final_text}");
+                break;
+            }
+            Event::Failed { reason } => panic!("turn failed: {reason:?}"),
+            _ => {}
+        }
+    }
+
+    let seen = provider.seen.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    assert!(
+        seen[2].contains("[verification failed"),
+        "expected verification feedback on round 3, got: {}",
+        seen[2]
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+        "pub fn ok() -> i32 { 2 }\n"
+    );
+}
+
+#[tokio::test]
+async fn mid_turn_steer_injects_between_tool_rounds() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+
+    let (provider, session) = tool_session(
+        dir.path(),
+        vec![
+            vec![read_call("r1", "a.txt"), Delta::Done],
+            vec![Delta::Text("steered ok".into()), Delta::Done],
+        ],
+        Limits::default(),
+    );
+    let mut rx = session.subscribe();
+    session
+        .command(Command::user("initial task".to_string()))
+        .expect("user");
+
+    let mut steered = false;
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::ToolStarted { .. } if !steered => {
+                steered = true;
+                session
+                    .command(Command::Steer {
+                        text: "FOCUS_ON_ERROR_HANDLING".to_string(),
+                    })
+                    .expect("steer");
+            }
+            Event::TurnComplete { .. } => break,
+            Event::Failed { reason } => panic!("turn failed: {reason:?}"),
+            _ => {}
+        }
+    }
+
+    assert!(steered);
+    let seen = provider.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(
+        seen[1].contains("[steering note from user]: FOCUS_ON_ERROR_HANDLING"),
+        "{}",
+        seen[1]
+    );
+}
+
+#[tokio::test]
+async fn queued_follow_up_runs_after_turn_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+
+    let (provider, session) = tool_session(
+        dir.path(),
+        vec![
+            vec![read_call("r1", "a.txt"), Delta::Done],
+            vec![Delta::Text("first done".into()), Delta::Done],
+            vec![Delta::Text("second done".into()), Delta::Done],
+        ],
+        Limits::default(),
+    );
+    let mut rx = session.subscribe();
+    session
+        .command(Command::user("first task".to_string()))
+        .expect("first");
+
+    let mut queued = false;
+    let mut completions = 0usize;
+    loop {
+        match rx.recv().await.expect("stream") {
+            Event::ToolStarted { .. } if !queued => {
+                queued = true;
+                session
+                    .command(Command::QueueUserMessage {
+                        text: "second queued task".to_string(),
+                        images: Vec::new(),
+                    })
+                    .expect("queue");
+            }
+            Event::TurnComplete { outcome } => {
+                assert!(matches!(outcome.outcome, Outcome::Completed));
+                completions += 1;
+                if completions == 2 {
+                    break;
+                }
+            }
+            Event::Failed { reason } => panic!("turn failed: {reason:?}"),
+            _ => {}
+        }
+    }
+
+    let seen = provider.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert!(seen[2].contains("second queued task"), "{}", seen[2]);
 }

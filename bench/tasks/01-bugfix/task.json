@@ -1,0 +1,8 @@
+{
+  "id": "01-bugfix",
+  "name": "Fix off-by-one slice pagination bug",
+  "prompt": "Fix the off-by-one pagination calculation in `paginate_slice` in `src/lib.rs` so all unit tests pass without panicking.",
+  "verify_cmd": "cargo",
+  "verify_args": ["test", "--quiet"],
+  "expect_baseline_fail": true
+}

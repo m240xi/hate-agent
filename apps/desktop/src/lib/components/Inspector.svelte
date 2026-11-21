@@ -43,6 +43,24 @@
   const sessionTokTotal = $derived(
     session.sessionTotals.input + session.sessionTotals.output,
   );
+
+  let auditOpen = $state(false);
+  let selectedAuditId = $state<string | null>(null);
+
+  const waterfall = $derived.by(() => {
+    const u = session.usage;
+    const cached = Math.min(u.cached_input, u.input);
+    const freshIn = Math.max(0, u.input - cached);
+    const out = u.output;
+    const think = u.thinking;
+    const total = Math.max(1, cached + freshIn + out + think);
+    return {
+      cachedPct: (cached / total) * 100,
+      freshPct: (freshIn / total) * 100,
+      outPct: (out / total) * 100,
+      thinkPct: (think / total) * 100,
+    };
+  });
 </script>
 
 <div class="inspector">
@@ -78,6 +96,17 @@
         style:width="{Math.min(100, session.ctxRatio * 100)}%"
       ></div>
     </div>
+    <div
+      class="waterfall"
+      role="img"
+      aria-label="turn token breakdown"
+      title="cached / uncached input / output / thinking"
+    >
+      <span class="wf-seg wf-cached" style:width="{waterfall.cachedPct}%"></span>
+      <span class="wf-seg wf-fresh" style:width="{waterfall.freshPct}%"></span>
+      <span class="wf-seg wf-out" style:width="{waterfall.outPct}%"></span>
+      <span class="wf-seg wf-think" style:width="{waterfall.thinkPct}%"></span>
+    </div>
     <div class="meter-nums mono">
       <span title="context window fill">ctx {fmt(session.ctxUsed)}/{fmtCtx(session.ctxLimit)}</span>
       <span>{fmt(session.usage.input)} in</span>
@@ -87,8 +116,48 @@
     </div>
     <div class="cost-row mono">
       <span title="session cache hit ratio — cached input / total input">cache hit {Math.round(session.cacheRatio * 100)}%</span>
+      <span title="tokens trimmed by shaping & deduplication">saved {fmt(session.tokensSaved)}</span>
       <span>${session.costUsd.toFixed(4)}</span>
     </div>
+    {#if session.cacheBreakReason}
+      <div class="cache-warn mono" title="Prefix cache hit dropped below 50%">
+        cache break: {session.cacheBreakReason}
+      </div>
+    {/if}
+    {#if session.toolAudits.length > 0}
+      <div class="audit-drawer">
+        <button class="cp-rewind" onclick={() => (auditOpen = !auditOpen)}>
+          {auditOpen ? 'hide model view' : `what the model saw (${session.toolAudits.length})`}
+        </button>
+        {#if auditOpen}
+          <ul class="audit-list">
+            {#each session.toolAudits as a (a.callId)}
+              <li class="audit-item">
+                <button
+                  class="audit-head mono"
+                  onclick={() => (selectedAuditId = selectedAuditId === a.callId ? null : a.callId)}
+                >
+                  <span>{a.name}</span>
+                  <span class="dim">
+                    {fmt(a.sentTokens)}/{fmt(a.fullTokens)} tok
+                  </span>
+                </button>
+                {#if selectedAuditId === a.callId}
+                  <div class="audit-body">
+                    {#if a.fullPreview}
+                      <div class="audit-lbl mono">raw (before shaping)</div>
+                      <pre class="cp-diff mono">{a.fullPreview}</pre>
+                    {/if}
+                    <div class="audit-lbl mono">sent to model</div>
+                    <pre class="cp-diff mono">{a.sentPreview ?? '(empty)'}</pre>
+                  </div>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {/if}
     <div class="model-row mono">
       <span class="prov-chip dim">
         {#if session.providerName || session.provider}
@@ -194,18 +263,48 @@
       </div>
     {:else}
       <ul class="cps">
-        {#each session.checkpoints as cp}
-          <li class="cp">
-            <span class="cp-id mono" title={cp.id}>{cp.id.slice(0, 8)}</span>
-            <span class="cp-label">{cp.label}</span>
-            <span class="cp-at mono dim">{cp.at}</span>
-            <button
-              class="cp-rewind"
-              title="Restore this folder's files to this checkpoint"
-              onclick={() => session.rewindCheckpoint(cp.id)}
-            >
-              rewind
-            </button>
+        {#each session.checkpoints as cp (cp.id)}
+          <li class="cp-wrap">
+            <div class="cp">
+              <span class="cp-id mono" title={cp.id}>{cp.id.slice(0, 8)}</span>
+              <span class="cp-label">{cp.label}</span>
+              <span class="cp-at mono dim">{cp.at}</span>
+            </div>
+            <div class="cp-actions">
+              <button
+                class="cp-rewind"
+                title="Show diff between this checkpoint and current workspace"
+                onclick={() => void session.loadCheckpointDiff(cp.id)}
+              >
+                {session.checkpointDiffPreview?.id === cp.id ? 'hide' : 'diff'}
+              </button>
+              <button
+                class="cp-rewind"
+                title="Restore files only (keep conversation)"
+                onclick={() => void session.rewindCheckpoint(cp.id, 'files_only')}
+              >
+                files
+              </button>
+              <button
+                class="cp-rewind"
+                disabled={session.running || cp.userIndex === undefined}
+                title="Rewind chat transcript only (keep workspace files)"
+                onclick={() => void session.rewindCheckpoint(cp.id, 'transcript_only')}
+              >
+                chat
+              </button>
+              <button
+                class="cp-rewind danger"
+                disabled={session.running || cp.userIndex === undefined}
+                title="Restore both files and chat transcript"
+                onclick={() => void session.rewindCheckpoint(cp.id, 'both')}
+              >
+                both
+              </button>
+            </div>
+            {#if session.checkpointDiffPreview?.id === cp.id}
+              <pre class="cp-diff mono">{session.checkpointDiffPreview.diff}</pre>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -385,6 +484,75 @@
     background: var(--accent);
     transition: width var(--motion);
   }
+  .waterfall {
+    display: flex;
+    height: 4px;
+    border-radius: 2px;
+    overflow: hidden;
+    background: var(--bg-3);
+    margin-bottom: 6px;
+    gap: 1px;
+  }
+  .wf-seg {
+    height: 100%;
+    min-width: 0;
+  }
+  .wf-cached {
+    background: var(--ok);
+  }
+  .wf-fresh {
+    background: var(--accent);
+  }
+  .wf-out {
+    background: var(--warn);
+  }
+  .wf-think {
+    background: var(--fg-3);
+  }
+  .cache-warn {
+    margin-top: 6px;
+    padding: 3px 6px;
+    font-size: 10px;
+    color: var(--warn);
+    border: 1px solid var(--warn);
+    border-radius: var(--radius);
+  }
+  .audit-drawer {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .audit-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .audit-item {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px 6px;
+    background: var(--bg-2);
+  }
+  .audit-head {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    font-size: 10.5px;
+    color: var(--fg-1);
+    text-align: left;
+  }
+  .audit-body {
+    margin-top: 4px;
+  }
+  .audit-lbl {
+    font-size: 9.5px;
+    color: var(--fg-3);
+    margin-top: 4px;
+  }
   .meter-nums {
     display: flex;
     gap: 10px;
@@ -429,6 +597,34 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
+  }
+  .cp-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .cp-wrap:last-child {
+    border-bottom: none;
+  }
+  .cp-actions {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .cp-diff {
+    margin: 2px 0 0;
+    padding: 6px 8px;
+    max-height: 150px;
+    overflow: auto;
+    font-size: 10px;
+    line-height: 1.4;
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    white-space: pre;
+    color: var(--fg-1);
   }
   .cp {
     display: flex;

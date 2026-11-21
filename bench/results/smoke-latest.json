@@ -1,0 +1,71 @@
+{
+  "mode": "smoke",
+  "provider": null,
+  "model": null,
+  "timestamp_epoch": 1795216260,
+  "summary": {
+    "passed": 5,
+    "total": 5,
+    "tokens_per_completed_task": 0.0,
+    "cache_hit_ratio": 0.0,
+    "cost_usd": 0.0,
+    "elapsed_ms": 5326
+  },
+  "tasks": [
+    {
+      "id": "01-bugfix",
+      "name": "Fix off-by-one slice pagination bug",
+      "passed": true,
+      "elapsed_ms": 628,
+      "input_tokens": 0,
+      "cached_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "detail": "compiled cleanly; baseline bug failed as expected"
+    },
+    {
+      "id": "02-refactor",
+      "name": "Unify label normalization across modules",
+      "passed": true,
+      "elapsed_ms": 783,
+      "input_tokens": 0,
+      "cached_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "detail": "compiled cleanly; baseline bug failed as expected"
+    },
+    {
+      "id": "03-feature",
+      "name": "Implement duration parser feature",
+      "passed": true,
+      "elapsed_ms": 607,
+      "input_tokens": 0,
+      "cached_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "detail": "compiled cleanly; baseline bug failed as expected"
+    },
+    {
+      "id": "04-tests",
+      "name": "Add edge-case tests for token bucket limiter",
+      "passed": true,
+      "elapsed_ms": 2626,
+      "input_tokens": 0,
+      "cached_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "detail": "compiled cleanly; baseline check passed"
+    },
+    {
+      "id": "05-multifile",
+      "name": "Propagate priority across multi-file task store",
+      "passed": true,
+      "elapsed_ms": 682,
+      "input_tokens": 0,
+      "cached_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "detail": "compiled cleanly; baseline bug failed as expected"
+    }
+  ]
+}

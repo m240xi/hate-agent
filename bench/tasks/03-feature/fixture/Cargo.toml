@@ -1,0 +1,6 @@
+[package]
+name = "bench_03_feature"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

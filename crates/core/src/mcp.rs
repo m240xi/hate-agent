@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -15,12 +15,14 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use crate::provider::ToolSpec;
+use crate::tool_search::ToolCandidate;
 use crate::tools::{FULL_COUNT_CAP, SENT_CAP, ToolOutput, shape};
 use crate::types::{ToolCall, ToolName};
 
 pub const MCP_PREFIX: &str = "mcp__";
 const CALL_TIMEOUT: Duration = Duration::from_secs(180);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const IDLE_STOP_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_SERVERS: usize = 16;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_TOOLS_PER_SERVER: usize = 48;
@@ -87,8 +89,10 @@ struct McpServer {
     service: RunningService<RoleClient, ()>,
     tools: Vec<McpTool>,
     info: String,
+    last_used: Mutex<Instant>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct McpTool {
     wire: String,
     orig: String,
@@ -96,9 +100,19 @@ struct McpTool {
     read_only: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedServerCatalog {
+    fingerprint: u64,
+    info: String,
+    tools: Vec<McpTool>,
+}
+
 pub struct McpHub {
     servers: RwLock<Vec<Arc<McpServer>>>,
     configs: RwLock<Vec<McpServerConfig>>,
+    catalog: RwLock<HashMap<String, CachedServerCatalog>>,
+    failed: RwLock<HashMap<String, String>>,
+    cache_path: RwLock<Option<PathBuf>>,
     reload: tokio::sync::Mutex<()>,
     configuring: std::sync::atomic::AtomicUsize,
     last_sweep: Mutex<Option<Instant>>,
@@ -110,6 +124,9 @@ impl McpHub {
         Self {
             servers: RwLock::new(Vec::new()),
             configs: RwLock::new(Vec::new()),
+            catalog: RwLock::new(HashMap::new()),
+            failed: RwLock::new(HashMap::new()),
+            cache_path: RwLock::new(None),
             reload: tokio::sync::Mutex::new(()),
             configuring: std::sync::atomic::AtomicUsize::new(0),
             last_sweep: Mutex::new(None),
@@ -117,13 +134,63 @@ impl McpHub {
         }
     }
 
-    pub async fn from_config_file(path: &Path) -> Self {
+    pub fn with_default_cache() -> Self {
         let hub = Self::new();
+        let path = dirs::data_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("hate-agent")
+            .join("mcp-catalog.json");
+        hub.load_catalog_cache(&path);
+        *hub.cache_path.write().expect("cache_path poisoned") = Some(path);
+        hub
+    }
+
+    pub async fn from_config_file(path: &Path) -> Self {
+        let hub = Self::with_default_cache();
         let servers = McpConfigFile::load(path);
         if !servers.is_empty() {
-            hub.configure(servers).await;
+            hub.configure_lazy(servers).await;
         }
         hub
+    }
+
+    fn load_catalog_cache(&self, path: &Path) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        if let Ok(map) = serde_json::from_str::<HashMap<String, CachedServerCatalog>>(&text) {
+            *self.catalog.write().expect("mcp catalog poisoned") = map;
+        }
+    }
+
+    fn save_catalog_cache(&self) {
+        let Some(path) = self.cache_path.read().expect("cache_path poisoned").clone() else {
+            return;
+        };
+        let snapshot = self.catalog.read().expect("mcp catalog poisoned").clone();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn record_catalog(&self, cfg: &McpServerConfig, srv: &McpServer) {
+        let fp = config_fingerprint(cfg);
+        self.catalog.write().expect("mcp catalog poisoned").insert(
+            cfg.name.clone(),
+            CachedServerCatalog {
+                fingerprint: fp,
+                info: srv.info.clone(),
+                tools: srv.tools.clone(),
+            },
+        );
+        self.failed
+            .write()
+            .expect("mcp failed poisoned")
+            .remove(&cfg.name);
+        self.save_catalog_cache();
     }
 
     pub fn save_config(path: &Path, configs: &[McpServerConfig]) -> Result<(), String> {
@@ -137,12 +204,26 @@ impl McpHub {
         std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
     }
 
+    /// Store MCP configs for lazy on-demand startup without spawning servers eagerly.
+    pub async fn configure_lazy(&self, configs: Vec<McpServerConfig>) {
+        let _guard = self.reload.lock().await;
+        self.configs
+            .write()
+            .expect("mcp configs poisoned")
+            .clone_from(&configs);
+        self.failed.write().expect("mcp failed poisoned").clear();
+        // Drop any live servers whose config was removed, disabled, or changed.
+        let mut live = self.servers.write().expect("mcp servers poisoned");
+        live.retain(|s| configs.iter().any(|c| c.enabled && c.name == s.name));
+    }
+
     pub async fn configure(&self, configs: Vec<McpServerConfig>) {
         let _guard = self.reload.lock().await;
         self.configs
             .write()
             .expect("mcp configs poisoned")
             .clone_from(&configs);
+        self.failed.write().expect("mcp failed poisoned").clear();
 
         let enabled: Vec<McpServerConfig> = configs
             .into_iter()
@@ -152,23 +233,37 @@ impl McpHub {
         self.configuring
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let results = futures_util::future::join_all(enabled.iter().map(|cfg| async move {
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await {
-                Ok(Ok(s)) => Some(s),
-                Ok(Err(e)) => {
-                    tracing::warn!(server = %cfg.name, error = %e, "mcp server failed to connect");
-                    None
-                }
-                Err(_) => {
-                    tracing::warn!(server = %cfg.name, "mcp server connect timed out");
-                    None
-                }
-            }
+            let res = tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await;
+            (cfg.clone(), res)
         }))
         .await;
         self.configuring
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        *self.servers.write().expect("mcp servers poisoned") =
-            results.into_iter().flatten().collect();
+
+        let mut connected = Vec::new();
+        for (cfg, res) in results {
+            match res {
+                Ok(Ok(s)) => {
+                    self.record_catalog(&cfg, &s);
+                    connected.push(s);
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(server = %cfg.name, error = %e, "mcp server failed to connect");
+                    self.failed
+                        .write()
+                        .expect("mcp failed poisoned")
+                        .insert(cfg.name.clone(), e);
+                }
+                Err(_) => {
+                    tracing::warn!(server = %cfg.name, "mcp server connect timed out");
+                    self.failed
+                        .write()
+                        .expect("mcp failed poisoned")
+                        .insert(cfg.name.clone(), "connect timed out".to_string());
+                }
+            }
+        }
+        *self.servers.write().expect("mcp servers poisoned") = connected;
     }
 
     fn is_live(&self, name: &str) -> bool {
@@ -179,11 +274,7 @@ impl McpHub {
             .any(|s| s.name == name && !s.tools.is_empty())
     }
 
-    /// Retry enabled servers that aren't live yet. Servers can appear
-    /// after the app starts (Roblox Studio launches later, a proxy takes
-    /// time to expose tools), so the hub re-checks on demand instead of
-    /// only at configure time. Throttled: returns `false` when a sweep
-    /// ran within [`SWEEP_INTERVAL`].
+    /// Connect all enabled servers that aren't live yet (used by explicit UI refresh).
     pub async fn ensure_live(&self, force: bool) -> bool {
         {
             let mut last = self.last_sweep.lock().expect("sweep poisoned");
@@ -206,35 +297,291 @@ impl McpHub {
         self.configuring
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let results = futures_util::future::join_all(missing.iter().map(|cfg| async move {
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await {
-                Ok(Ok(s)) => Some(s),
-                Ok(Err(e)) => {
-                    tracing::debug!(server = %cfg.name, error = %e, "mcp retry failed");
-                    None
-                }
-                Err(_) => {
-                    tracing::debug!(server = %cfg.name, "mcp retry timed out");
-                    None
-                }
-            }
+            let res = tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await;
+            (cfg.clone(), res)
         }))
         .await;
         self.configuring
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         let mut servers = self.servers.write().expect("mcp servers poisoned");
-        for s in results.into_iter().flatten() {
-            servers.retain(|x| x.name != s.name);
-            servers.push(s);
+        for (cfg, res) in results {
+            match res {
+                Ok(Ok(s)) => {
+                    self.record_catalog(&cfg, &s);
+                    servers.retain(|x| x.name != s.name);
+                    servers.push(s);
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(server = %cfg.name, error = %e, "mcp retry failed");
+                    self.failed
+                        .write()
+                        .expect("mcp failed poisoned")
+                        .insert(cfg.name, e);
+                }
+                Err(_) => {
+                    tracing::debug!(server = %cfg.name, "mcp retry timed out");
+                    self.failed
+                        .write()
+                        .expect("mcp failed poisoned")
+                        .insert(cfg.name, "connect timed out".to_string());
+                }
+            }
         }
         true
     }
 
-    /// Fire-and-forget sweep for hot paths (turn start): never blocks
-    /// the turn, the new tools show up on the next one.
+    /// Disconnect MCP servers that have been idle for `max_idle`.
+    pub fn idle_evict(&self, max_idle: Duration) -> usize {
+        let mut evicted = Vec::new();
+        {
+            let mut servers = self.servers.write().expect("mcp servers poisoned");
+            let mut idx = 0usize;
+            while idx < servers.len() {
+                let expired = servers[idx]
+                    .last_used
+                    .lock()
+                    .expect("last_used poisoned")
+                    .elapsed()
+                    >= max_idle;
+                if expired {
+                    evicted.push(servers.remove(idx));
+                } else {
+                    idx += 1;
+                }
+            }
+        }
+        let count = evicted.len();
+        drop(evicted);
+        count
+    }
+
+    /// Connect a single enabled server on demand (lazy startup).
+    pub async fn connect_server(&self, name: &str) -> Result<Vec<ToolSpec>, String> {
+        if let Some(existing) = self
+            .servers
+            .read()
+            .expect("mcp servers poisoned")
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+        {
+            *existing.last_used.lock().expect("last_used poisoned") = Instant::now();
+            return Ok(existing.tools.iter().map(|t| t.spec.clone()).collect());
+        }
+        let cfg = self
+            .configs
+            .read()
+            .expect("mcp configs poisoned")
+            .iter()
+            .find(|c| c.enabled && c.name == name)
+            .cloned()
+            .ok_or_else(|| format!("MCP server `{name}` is not configured or disabled"))?;
+
+        let _guard = self.reload.lock().await;
+        if let Some(existing) = self
+            .servers
+            .read()
+            .expect("mcp servers poisoned")
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+        {
+            *existing.last_used.lock().expect("last_used poisoned") = Instant::now();
+            return Ok(existing.tools.iter().map(|t| t.spec.clone()).collect());
+        }
+        self.configuring
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let res = tokio::time::timeout(CONNECT_TIMEOUT, connect(&cfg)).await;
+        self.configuring
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        let srv = match res {
+            Ok(Ok(s)) => {
+                self.record_catalog(&cfg, &s);
+                s
+            }
+            Ok(Err(e)) => {
+                self.failed
+                    .write()
+                    .expect("mcp failed poisoned")
+                    .insert(cfg.name.clone(), e.clone());
+                return Err(e);
+            }
+            Err(_) => {
+                let msg = "connect timed out".to_string();
+                self.failed
+                    .write()
+                    .expect("mcp failed poisoned")
+                    .insert(cfg.name.clone(), msg.clone());
+                return Err(msg);
+            }
+        };
+        let tools = srv.tools.iter().map(|t| t.spec.clone()).collect();
+        let mut servers = self.servers.write().expect("mcp servers poisoned");
+        servers.retain(|x| x.name != srv.name);
+        servers.push(srv);
+        Ok(tools)
+    }
+
+    async fn ensure_server_for_tool(&self, wire: &str) -> Result<(), String> {
+        if self
+            .servers
+            .read()
+            .expect("mcp servers poisoned")
+            .iter()
+            .any(|s| s.tools.iter().any(|t| t.wire == wire))
+        {
+            return Ok(());
+        }
+        let target_server = self.server_name_for_tool(wire);
+        if let Some(name) = target_server {
+            self.connect_server(&name).await?;
+            return Ok(());
+        }
+        // Fallback: connect any enabled uncataloged servers whose slug prefixes `wire`.
+        let candidates: Vec<String> = self
+            .configs()
+            .into_iter()
+            .filter(|c| {
+                c.enabled
+                    && !self.is_live(&c.name)
+                    && wire.starts_with(&format!("{MCP_PREFIX}{}__", slugify(&c.name)))
+            })
+            .map(|c| c.name)
+            .collect();
+        for name in candidates {
+            let _ = self.connect_server(&name).await;
+        }
+        Ok(())
+    }
+
+    fn server_name_for_tool(&self, wire: &str) -> Option<String> {
+        if let Some(s) = self
+            .servers
+            .read()
+            .expect("mcp servers poisoned")
+            .iter()
+            .find(|s| s.tools.iter().any(|t| t.wire == wire))
+        {
+            return Some(s.name.clone());
+        }
+        let configs = self.configs();
+        let catalog = self.catalog.read().expect("mcp catalog poisoned");
+        for c in &configs {
+            if !c.enabled {
+                continue;
+            }
+            if let Some(entry) = catalog.get(&c.name)
+                && entry.fingerprint == config_fingerprint(c)
+                && entry.tools.iter().any(|t| t.wire == wire)
+            {
+                return Some(c.name.clone());
+            }
+        }
+        None
+    }
+
+    /// Return BM25 search candidates across live and cached MCP tools, lazily connecting
+    /// uncataloged servers only when `query` hints at them or `mcp`.
+    pub async fn catalog_for_search(&self, query: &str) -> Vec<ToolCandidate> {
+        let q_lower = query.to_ascii_lowercase();
+        let to_connect: Vec<String> = {
+            let configs = self.configs();
+            let catalog = self.catalog.read().expect("mcp catalog poisoned");
+            configs
+                .into_iter()
+                .filter(|c| {
+                    if !c.enabled || self.is_live(&c.name) {
+                        return false;
+                    }
+                    let has_cached = catalog
+                        .get(&c.name)
+                        .is_some_and(|e| e.fingerprint == config_fingerprint(c));
+                    if has_cached {
+                        return false;
+                    }
+                    let slug = slugify(&c.name);
+                    q_lower.contains("mcp")
+                        || q_lower.contains(&c.name.to_ascii_lowercase())
+                        || q_lower.contains(&slug)
+                        || slug
+                            .split('_')
+                            .any(|part| part.len() >= 3 && q_lower.contains(part))
+                })
+                .map(|c| c.name)
+                .collect()
+        };
+        for name in to_connect {
+            let _ = self.connect_server(&name).await;
+        }
+        self.catalog_candidates()
+    }
+
+    pub fn catalog_candidates(&self) -> Vec<ToolCandidate> {
+        let mut out = Vec::new();
+        let live = self.servers.read().expect("mcp servers poisoned");
+        let configs = self.configs();
+        let catalog = self.catalog.read().expect("mcp catalog poisoned");
+
+        for c in &configs {
+            if !c.enabled {
+                continue;
+            }
+            if let Some(srv) = live.iter().find(|s| s.name == c.name) {
+                for t in &srv.tools {
+                    out.push(ToolCandidate::from_spec(t.spec.clone(), &c.name));
+                }
+            } else if let Some(entry) = catalog.get(&c.name)
+                && entry.fingerprint == config_fingerprint(c)
+            {
+                for t in &entry.tools {
+                    out.push(ToolCandidate::from_spec(t.spec.clone(), &c.name));
+                }
+            }
+        }
+        // Include any directly attached live servers (e.g. duplex test servers without configs).
+        for srv in live.iter() {
+            if !configs.iter().any(|c| c.name == srv.name) {
+                for t in &srv.tools {
+                    out.push(ToolCandidate::from_spec(t.spec.clone(), &srv.name));
+                }
+            }
+        }
+        out
+    }
+
+    pub async fn spec_for_tool(&self, wire: &str) -> Option<ToolSpec> {
+        if let Some(spec) = self
+            .servers
+            .read()
+            .expect("mcp servers poisoned")
+            .iter()
+            .find_map(|s| {
+                s.tools
+                    .iter()
+                    .find(|t| t.wire == wire)
+                    .map(|t| t.spec.clone())
+            })
+        {
+            return Some(spec);
+        }
+        let _ = self.ensure_server_for_tool(wire).await;
+        self.servers
+            .read()
+            .expect("mcp servers poisoned")
+            .iter()
+            .find_map(|s| {
+                s.tools
+                    .iter()
+                    .find(|t| t.wire == wire)
+                    .map(|t| t.spec.clone())
+            })
+    }
+
+    /// Fire-and-forget maintenance sweep on turn start: evict idle servers after 5 minutes.
     pub fn kick_refresh(self: &Arc<Self>) {
         let hub = Arc::clone(self);
         tokio::spawn(async move {
-            hub.ensure_live(false).await;
+            let _ = hub.idle_evict(IDLE_STOP_TIMEOUT);
         });
     }
 
@@ -244,12 +591,18 @@ impl McpHub {
 
     pub fn status(&self) -> Vec<McpServerStatus> {
         let live = self.servers.read().expect("mcp servers poisoned");
+        let catalog = self.catalog.read().expect("mcp catalog poisoned");
+        let failed = self.failed.read().expect("mcp failed poisoned");
         self.configs
             .read()
             .expect("mcp configs poisoned")
             .iter()
             .map(|c| {
                 let connected = live.iter().find(|s| s.name == c.name);
+                let cached = catalog
+                    .get(&c.name)
+                    .filter(|e| e.fingerprint == config_fingerprint(c));
+                let err = failed.get(&c.name);
                 McpServerStatus {
                     name: c.name.clone(),
                     kind: c.kind.clone(),
@@ -260,12 +613,20 @@ impl McpHub {
                         "connected".to_string()
                     } else if self.configuring.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                         "connecting".to_string()
-                    } else {
+                    } else if err.is_some() {
                         "error".to_string()
+                    } else {
+                        "idle".to_string()
                     },
-                    tools: connected.map_or(0, |s| s.tools.len()),
-                    info: connected.map_or_else(String::new, |s| s.info.clone()),
-                    detail: String::new(),
+                    tools: connected
+                        .map(|s| s.tools.len())
+                        .or_else(|| cached.map(|e| e.tools.len()))
+                        .unwrap_or(0),
+                    info: connected
+                        .map(|s| s.info.clone())
+                        .or_else(|| cached.map(|e| e.info.clone()))
+                        .unwrap_or_default(),
+                    detail: err.cloned().unwrap_or_default(),
                 }
             })
             .collect()
@@ -289,7 +650,17 @@ impl McpHub {
                     .find(|t| t.wire == call.name.as_str())
                     .map(|t| (s.name.clone(), t.orig.clone(), t.read_only))
             })
-        }?;
+        }
+        .or_else(|| {
+            let catalog = self.catalog.read().expect("mcp catalog poisoned");
+            catalog.iter().find_map(|(srv_name, entry)| {
+                entry
+                    .tools
+                    .iter()
+                    .find(|t| t.wire == call.name.as_str())
+                    .map(|t| (srv_name.clone(), t.orig.clone(), t.read_only))
+            })
+        })?;
         let (server, orig, read_only) = found;
         if read_only {
             return None;
@@ -300,6 +671,9 @@ impl McpHub {
     }
 
     pub async fn execute(&self, call: &ToolCall, cancel: &CancellationToken) -> ToolOutput {
+        if let Err(e) = self.ensure_server_for_tool(call.name.as_str()).await {
+            return self.err(format!("MCP server connect failed: {e}"));
+        }
         let Some(server) = self
             .servers
             .read()
@@ -310,6 +684,7 @@ impl McpHub {
         else {
             return self.err(format!("unknown MCP tool `{}`", call.name));
         };
+        *server.last_used.lock().expect("last_used poisoned") = Instant::now();
         let Some(tool) = server.tools.iter().find(|t| t.wire == call.name.as_str()) else {
             return self.err(format!("unknown MCP tool `{}`", call.name));
         };
@@ -328,6 +703,7 @@ impl McpHub {
             () = cancel.cancelled() => return self.err("cancelled".to_string()),
             r = tokio::time::timeout(CALL_TIMEOUT, server.service.call_tool(params)) => r,
         };
+        *server.last_used.lock().expect("last_used poisoned") = Instant::now();
         match result {
             Ok(Ok(res)) => {
                 let is_err = res.is_error.unwrap_or(false);
@@ -358,10 +734,12 @@ impl McpHub {
         match result {
             Ok(full) => {
                 let sent = shape(&full, SENT_CAP);
+                let raw_preview = (full != sent).then(|| full.chars().take(2000).collect());
                 let preview: String = sent.chars().take(400).collect();
                 ToolOutput {
                     full_tokens: self.count_capped(&full),
                     sent_tokens: self.counter.count_sync(&sent) as u32,
+                    raw_preview,
                     content: sent,
                     preview,
                     ok: true,
@@ -372,6 +750,7 @@ impl McpHub {
                 ToolOutput {
                     full_tokens: self.counter.count_sync(&content) as u32,
                     sent_tokens: self.counter.count_sync(&content) as u32,
+                    raw_preview: None,
                     content,
                     preview: e.chars().take(400).collect(),
                     ok: false,
@@ -514,7 +893,40 @@ async fn finish_connect(
         service,
         tools,
         info,
+        last_used: Mutex::new(Instant::now()),
     }))
+}
+
+fn config_fingerprint(cfg: &McpServerConfig) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    feed(cfg.name.as_bytes());
+    feed(cfg.kind.as_bytes());
+    if let Some(cmd) = &cfg.command {
+        feed(cmd.as_bytes());
+    }
+    for a in &cfg.args {
+        feed(a.as_bytes());
+    }
+    for (k, v) in &cfg.env {
+        feed(k.as_bytes());
+        feed(v.as_bytes());
+    }
+    if let Some(url) = &cfg.url {
+        feed(url.as_bytes());
+    }
+    for (k, v) in &cfg.headers {
+        feed(k.as_bytes());
+        feed(v.as_bytes());
+    }
+    h
 }
 
 fn sanitize_schema(schema: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
@@ -815,6 +1227,45 @@ mod tests {
         let out2 = hub.execute(&bad, &CancellationToken::new()).await;
         assert!(!out2.ok);
         assert!(out2.content.contains("unknown MCP tool"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lazy_catalog_and_idle_evict() {
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(fake_server(server_io));
+        let service = ().serve(client_io).await.expect("mcp handshake");
+        let srv = finish_connect("fake", service).await.expect("tools/list");
+
+        let cfg = McpServerConfig {
+            name: "fake".into(),
+            kind: "stdio".into(),
+            enabled: true,
+            command: Some("fake-bin".into()),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            url: None,
+            headers: BTreeMap::new(),
+        };
+
+        let hub = McpHub::new();
+        hub.configure_lazy(vec![cfg.clone()]).await;
+        assert!(hub.servers.read().expect("servers").is_empty());
+        assert_eq!(hub.status()[0].state, "idle");
+
+        hub.record_catalog(&cfg, &srv);
+        assert_eq!(hub.status()[0].tools, 2);
+        let cands = hub.catalog_candidates();
+        assert_eq!(cands.len(), 2);
+
+        // Simulate a connected server becoming idle past max_idle.
+        *srv.last_used.lock().expect("last_used") = Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .unwrap_or_else(Instant::now);
+        hub.servers.write().expect("servers").push(srv);
+        assert_eq!(hub.idle_evict(Duration::from_secs(300)), 1);
+        assert!(hub.servers.read().expect("servers").is_empty());
 
         server.abort();
     }

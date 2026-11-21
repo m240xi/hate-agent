@@ -38,6 +38,9 @@ enum Commands {
         /// Reasoning effort: off, low, medium, high.
         #[arg(short, long)]
         thinking: Option<String>,
+        /// Trust workspace instructions and repo MCP config without prompting.
+        #[arg(long)]
+        trust: bool,
     },
     /// List models the configured provider exposes.
     Models {
@@ -108,7 +111,8 @@ async fn main() {
             provider,
             model,
             thinking,
-        } => run(prompt, provider, model, thinking).await,
+            trust,
+        } => run(prompt, provider, model, thinking, trust).await,
         Commands::Models { provider } => models(provider).await,
     };
     std::process::exit(code);
@@ -374,6 +378,7 @@ async fn run(
     provider: Option<String>,
     model: Option<String>,
     thinking: Option<String>,
+    trust: bool,
 ) -> i32 {
     let prompt = if prompt == "-" {
         let mut buf = String::new();
@@ -431,6 +436,24 @@ async fn run(
         .map(|d| std::sync::Arc::new(hate_core::SkillStore::new(d)));
     let auto_skills = hate_auth::Config::load().map_or(true, |c| c.auto_skills);
 
+    let tools = std::env::current_dir().ok().and_then(|p| {
+        let mut store = hate_core::TrustStore::load();
+        let report = hate_core::inspect_repo_trust(&p, &store);
+        let trusted = if report.trusted {
+            true
+        } else if trust {
+            let _ = store.set_trusted(&p, true);
+            true
+        } else {
+            eprintln!(
+                "[policy] untrusted workspace has repo config ({}) — pass --trust to enable repo instructions",
+                report.rule_files.join(", ")
+            );
+            false
+        };
+        WorkspaceTools::new_with_trust(p, trusted).ok()
+    });
+
     let session = spawn_session(SessionConfig {
         provider,
         model: model.clone(),
@@ -439,10 +462,7 @@ async fn run(
         limits: Limits::default(),
         ledger: ledger(),
         persist: None,
-        tools: std::env::current_dir()
-            .ok()
-            .and_then(|p| WorkspaceTools::new(p).ok())
-            .map(std::sync::Arc::new),
+        tools: tools.map(std::sync::Arc::new),
         permissions: std::sync::Arc::new(PermissionHub::default()),
         mcp: Some(mcp),
         skills,

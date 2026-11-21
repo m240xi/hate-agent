@@ -38,6 +38,18 @@
       {/if}
     </div>
     <pre class="perm-detail mono">{detail}</pre>
+    {#if req.diff_preview}
+      <div class="perm-diff mono" role="region" aria-label="Diff preview">
+        {#each req.diff_preview.split('\n') as line, idx (idx)}
+          <div
+            class="diff-line"
+            class:add={line.startsWith('+') && !line.startsWith('+++')}
+            class:del={line.startsWith('-') && !line.startsWith('---')}
+            class:hdr={line.startsWith('@@') || line.startsWith('---') || line.startsWith('+++')}
+          >{line || ' '}</div>
+        {/each}
+      </div>
+    {/if}
     <div class="perm-actions">
       <button class="btn primary sm" onclick={() => session.respondPermission('allow')}>Run</button>
       <button class="btn sm" onclick={() => session.respondPermission('allow_session')}>
@@ -96,6 +108,35 @@
     word-break: break-word;
     max-height: 140px;
     overflow: auto;
+  }
+  .perm-diff {
+    margin: 0 0 8px;
+    padding: 6px 8px;
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 11px;
+    line-height: 1.4;
+    max-height: 180px;
+    overflow: auto;
+  }
+  .diff-line {
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--fg-2);
+    padding: 0 2px;
+  }
+  .diff-line.add {
+    color: var(--ok, #5cb85c);
+    background: color-mix(in srgb, var(--ok, #5cb85c) 12%, transparent);
+  }
+  .diff-line.del {
+    color: var(--danger, #e05252);
+    background: color-mix(in srgb, var(--danger, #e05252) 12%, transparent);
+  }
+  .diff-line.hdr {
+    color: var(--accent);
+    font-weight: 600;
   }
   .perm-actions {
     display: flex;

@@ -314,10 +314,12 @@ impl SkillStore {
         match result {
             Ok(full) => {
                 let sent = shape(&full, SENT_CAP);
+                let raw_preview = (full != sent).then(|| full.chars().take(2000).collect());
                 let preview: String = sent.chars().take(400).collect();
                 ToolOutput {
                     full_tokens: self.counter.count_sync(&full) as u32,
                     sent_tokens: self.counter.count_sync(&sent) as u32,
+                    raw_preview,
                     content: sent,
                     preview,
                     ok: true,
@@ -330,6 +332,7 @@ impl SkillStore {
                 ToolOutput {
                     full_tokens: tokens,
                     sent_tokens: tokens,
+                    raw_preview: None,
                     content,
                     preview,
                     ok: false,
